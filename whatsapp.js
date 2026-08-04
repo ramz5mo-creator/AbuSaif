@@ -162,9 +162,14 @@ async function connect() {
         if (!msg.message) continue;
         if (msg.key.fromMe) continue;
 
-        const targetGroup = config.whatsapp.targetGroupId;
-        if (targetGroup && msg.key.remoteJid !== targetGroup) continue;
-        if (!msg.key.remoteJid?.endsWith('@g.us')) continue;
+        // سجل كل رسالة واردة لاكتشاف الجروب الصحيح
+        const remoteJid = msg.key.remoteJid || '';
+        if (remoteJid.endsWith('@g.us')) {
+          logger.info('🔍 جروب', { id: remoteJid, name: msg.pushName || '' });
+        }
+
+        // قبول الرسائل من أي جروب (بدون فلتر)
+        if (!remoteJid.endsWith('@g.us')) continue;
 
         // تخزين في الكاش (ليس التفاعلات)
         if (msg.key.id && !msg.message.reactionMessage) {
