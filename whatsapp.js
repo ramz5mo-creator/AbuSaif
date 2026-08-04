@@ -4,6 +4,11 @@
  * يدير الاتصال بواتساب عبر Baileys،
  * ويقرأ رسائل الجروب المستهدف،
  * ويمرر الرسائل للمعالجة.
+ *
+ * يدعم:
+ * - الرسائل النصية العادية
+ * - الردود (extendedTextMessage)
+ * - التفاعلات (reactions) مثل 👍 / 2️⃣ / 3️⃣
  */
 
 const {
@@ -40,23 +45,19 @@ async function connect() {
 
   sock = makeWASocket({
     auth: state,
-    printQRInTerminal: false, // سنطبعه يدوياً بشكل أوضح
-    logger: require('pino')({ level: 'silent' }), // إخفاء سجلات Baileys
+    printQRInTerminal: false,
+    logger: require('pino')({ level: 'silent' }),
     browser: ['AbuSaif Bot', 'Chrome', '120.0.0'],
     getMessage: async (key) => {
-      // البحث عن الرسالة في المخزن المؤقت
       const cached = messageCache.get(key.id);
       return cached?.message || undefined;
     },
   });
 
-  // لا حاجة لربط مخزن خارجي - نستخدم cache محلي
-
   // === أحداث الاتصال ===
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // عرض رمز QR
     if (qr) {
       logger.info('═══════════════════════════════════════');
       logger.info('   امسح رمز QR التالي بواتساب:');
@@ -65,15 +66,11 @@ async function connect() {
       logger.info('═══════════════════════════════════════');
     }
 
-    // حالة الاتصال
     if (connection === 'close') {
       const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-      logger.warn('انقطع الاتصال بواتساب', {
-        statusCode,
-        shouldReconnect,
-      });
+      logger.warn('انقطع الاتصال بواتساب', { statusCode, shouldReconnect });
 
       if (shouldReconnect) {
         logger.info('إعادة الاتصال خلال ثوانٍ...');
@@ -89,27 +86,30 @@ async function connect() {
     }
   });
 
-  // حفظ بيانات الجلسة
   sock.ev.on('creds.update', saveCreds);
 
-  // === استقبال الرسائل ===
+  // === استقبال الرسائل النصية والردود ===
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    // نهتم فقط بالرسائل الجديدة (notify)
     if (type !== 'notify') return;
 
     for (const msg of messages) {
-      // تجاهل الرسائل القديمة أو رسائل النظام
       if (!msg.message) continue;
-      if (msg.key.fromMe) continue; // تجاهل رسائلنا
+      if (msg.key.fromMe) continue;
 
-      // التحقق من أن الرسالة من الجروب المستهدف
       const targetGroup = config.whatsapp.targetGroupId;
       if (targetGroup && msg.key.remoteJid !== targetGroup) continue;
-
-      // التحقق من أنها رسالة جروب
       if (!msg.key.remoteJid?.endsWith('@g.us')) continue;
 
-      // تمرير الرسالة للمعالج
+      // تخزين الرسالة في الكاش للردود المستقبلية
+      if (msg.key.id) {
+        messageCache.set(msg.key.id, msg);
+        // تنظيف الكاش القديم (الاحتفاظ بآخر 2000)
+        if (messageCache.size > 2000) {
+          const firstKey = messageCache.keys().next().value;
+          messageCache.delete(firstKey);
+        }
+      }
+
       if (messageHandler) {
         try {
           await messageHandler(msg, sock);
@@ -121,17 +121,40 @@ async function connect() {
         }
       }
 
-      // سجل تشخيصي
       const sender = msg.key.participant || msg.key.remoteJid;
       const text = extractText(msg);
       const isReply = !!msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
 
       logger.debug('رسالة جديدة', {
         from: sender,
-        group: msg.key.remoteJid,
         text: text?.substring(0, 50),
         isReply,
       });
+    }
+  });
+
+  // === استقبال التفاعلات (reactions) ===
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+
+    for (const msg of messages) {
+      if (!msg.message?.reactionMessage) continue;
+      if (msg.key.fromMe) continue;
+
+      const targetGroup = config.whatsapp.targetGroupId;
+      if (targetGroup && msg.key.remoteJid !== targetGroup) continue;
+      if (!msg.key.remoteJid?.endsWith('@g.us')) continue;
+
+      if (messageHandler) {
+        try {
+          await messageHandler(msg, sock);
+        } catch (error) {
+          logger.error('خطأ في معالجة التفاعل', {
+            error: error.message,
+            messageId: msg.key.id,
+          });
+        }
+      }
     }
   });
 
@@ -140,6 +163,7 @@ async function connect() {
 
 /**
  * استخراج النص من الرسالة
+ * يدعم: نص عادي، رد، صورة، تفاعل (reaction)
  */
 function extractText(msg) {
   if (!msg.message) return null;
@@ -159,7 +183,26 @@ function extractText(msg) {
     return msg.message.imageMessage.caption;
   }
 
+  // تفاعل (reaction) - مثل 👍 أو 2️⃣
+  if (msg.message.reactionMessage?.text) {
+    return msg.message.reactionMessage.text;
+  }
+
   return null;
+}
+
+/**
+ * التحقق مما إذا كانت الرسالة تفاعلاً (reaction)
+ */
+function isReaction(msg) {
+  return !!msg.message?.reactionMessage;
+}
+
+/**
+ * استخراج معرف الرسالة الأصلية التي تفاعل معها
+ */
+function getReactionTargetId(msg) {
+  return msg.message?.reactionMessage?.key?.id || null;
 }
 
 /**
@@ -175,7 +218,6 @@ async function listGroups() {
       logger.info(`  ${i + 1}. ${group.subject} → ${group.id}`);
     });
     logger.info('═══════════════════════════════════════');
-    logger.info('انسخ معرف الجروب المطلوب وضعه في TARGET_GROUP_ID');
   } catch (error) {
     logger.warn('لم يتم جلب قائمة الجروبات بعد', { error: error.message });
   }
@@ -188,9 +230,19 @@ function getSocket() {
   return sock;
 }
 
+/**
+ * الحصول على رسالة من الكاش
+ */
+function getCachedMessage(messageId) {
+  return messageCache.get(messageId) || null;
+}
+
 module.exports = {
   connect,
   setMessageHandler,
   getSocket,
   extractText,
+  isReaction,
+  getReactionTargetId,
+  getCachedMessage,
 };

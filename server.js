@@ -34,56 +34,74 @@ async function start() {
   // 2. تعيين معالج الرسائل
   whatsapp.setMessageHandler(async (msg, sock) => {
 
-    // استخراج النص والمرسل
-    const text = whatsapp.extractText ? whatsapp.extractText(msg) : null;
-    const sender = msg.key.participant || msg.key.remoteJid;
-    const phone = sender ? sender.replace(/@.*$/, '') : null;
-    const messageId = msg.key.id;
-    const timestamp = new Date().toISOString();
-
-    // التحقق من الرد (contextInfo)
-    const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
-    const isReply = !!contextInfo?.quotedMessage;
-
-    if (text && phone) {
-      if (!isReply) {
-        // === رسالة طلب أصلية (ليست ردًا) → سجّلها في ورقة الطلبات ===
+    // ====================================================
+    // حالة 1: تفاعل (reaction) مثل 👍 / 2️⃣ / 3️⃣
+    // ====================================================
+    if (whatsapp.isReaction(msg)) {
+      const result = await parser.processMessage(msg, sock);
+      if (result && result.type === 'accept') {
         try {
-          await sheets.recordOrder({
-            phone,
-            text: text.substring(0, 500),
-            timestamp,
-            messageId,
+          await sheets.recordTransaction(result);
+          if (result.quotedMessageId) {
+            await sheets.updateOrderStatus(
+              result.quotedMessageId,
+              result.phone,
+              result.quantity
+            );
+          }
+          logger.info('✅ تفاعل استلام مسجّل', {
+            phone: result.phone,
+            owner: result.quotedPhone,
+            qty: result.quantity,
           });
-          logger.debug('📝 تم تسجيل طلب جديد', { phone, text: text.substring(0, 40) });
         } catch (error) {
-          logger.warn('فشل تسجيل الطلب', { error: error.message });
+          logger.error('❌ فشل تسجيل التفاعل', { error: error.message });
         }
       }
+      return;
     }
 
-    // === معالجة رسائل الاستلام (الردود) ===
+    // ====================================================
+    // حالة 2: رسالة نصية (طلب أو رد استلام)
+    // ====================================================
     const result = await parser.processMessage(msg, sock);
-    if (result) {
-      // تسجيل العملية في سجل الحركات
+    if (!result) return;
+
+    if (result.type === 'order') {
+      // رسالة طلب أصلية → سجّلها في ورقة الطلبات
       try {
-        await sheets.recordTransaction(result);
-        logger.info('✅ تم تسجيل العملية', {
-          type: result.type,
+        await sheets.recordOrder(result);
+        logger.debug('📝 طلب جديد مسجّل', {
           phone: result.phone,
-          quantity: result.quantity,
+          text: result.text.substring(0, 40),
         });
       } catch (error) {
-        logger.error('❌ فشل تسجيل العملية في Sheets', {
-          error: error.message,
+        logger.warn('فشل تسجيل الطلب', { error: error.message });
+      }
+
+    } else if (result.type === 'accept') {
+      // رد استلام → سجّله في سجل الحركات وحدّث الأرصدة
+      // المستلم (phone) → -quantity
+      // صاحب الطلب (quotedPhone) → +quantity
+      try {
+        await sheets.recordTransaction(result);
+        logger.info('✅ استلام مسجّل', {
+          phone: result.phone,
+          owner: result.quotedPhone,
+          qty: result.quantity,
         });
+      } catch (error) {
+        logger.error('❌ فشل تسجيل الاستلام', { error: error.message });
       }
 
       // تحديث حالة الطلب الأصلي في ورقة الطلبات
-      const quotedMessageId = contextInfo?.stanzaId;
-      if (quotedMessageId) {
+      if (result.quotedMessageId) {
         try {
-          await sheets.updateOrderStatus(quotedMessageId, result.phone, result.quantity);
+          await sheets.updateOrderStatus(
+            result.quotedMessageId,
+            result.phone,
+            result.quantity
+          );
         } catch (error) {
           logger.warn('فشل تحديث حالة الطلب', { error: error.message });
         }
