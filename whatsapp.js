@@ -5,16 +5,17 @@
  * ويقرأ رسائل الجروب المستهدف،
  * ويمرر الرسائل للمعالجة.
  *
- * يدعم:
- * - الرسائل النصية العادية
- * - الردود (extendedTextMessage)
- * - التفاعلات (reactions) مثل 👍 / 2️⃣ / 3️⃣
+ * إصلاحات v3:
+ * - حل مشكلة statusCode 440 (conflict) بإضافة تأخير تصاعدي
+ * - حل مشكلة فقدان tamCache عند إعادة الاتصال
+ * - دعم senderPn/participantPn لأرقام الهاتف الحقيقية
  */
 
 const {
   default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
+  fetchLatestBaileysVersion,
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const qrcode = require('qrcode-terminal');
@@ -22,160 +23,201 @@ const path = require('path');
 const config = require('./config');
 const logger = require('./logger');
 
+// ====================================================
+// الكاشات (تبقى في الذاكرة بين إعادات الاتصال)
+// ====================================================
+
 // مخزن مؤقت للرسائل (للبحث عن الرسائل المرد عليها)
 const messageCache = new Map();
 
 // كاش خاص برسائل "تم" - يحفظ رقم الكابتن مع معرف الرسالة
 // { messageId: captainPhone }
+// هذا الكاش لا يُمسح عند إعادة الاتصال - يبقى طالما البوت يعمل
 const tamCache = new Map();
 
 let sock = null;
 let messageHandler = null;
+let reconnectAttempts = 0;
+let isConnecting = false;
 
 /**
  * تعيين معالج الرسائل
- * @param {Function} handler - دالة تُستدعى عند وصول رسالة جديدة
  */
 function setMessageHandler(handler) {
   messageHandler = handler;
 }
 
 /**
- * بدء الاتصال بواتساب
+ * بدء الاتصال بواتساب مع إدارة ذكية لإعادة الاتصال
  */
 async function connect() {
-  const authPath = path.resolve(config.whatsapp.authPath);
-  const { state, saveCreds } = await useMultiFileAuthState(authPath);
+  if (isConnecting) {
+    logger.debug('الاتصال جارٍ بالفعل، تجاهل الطلب المكرر');
+    return;
+  }
+  isConnecting = true;
 
-  sock = makeWASocket({
-    auth: state,
-    printQRInTerminal: false,
-    logger: require('pino')({ level: 'silent' }),
-    browser: ['AbuSaif Bot', 'Chrome', '120.0.0'],
-    getMessage: async (key) => {
-      const cached = messageCache.get(key.id);
-      return cached?.message || undefined;
-    },
-  });
+  try {
+    const authPath = path.resolve(config.whatsapp.authPath);
+    const { state, saveCreds } = await useMultiFileAuthState(authPath);
 
-  // === أحداث الاتصال ===
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      logger.info('═══════════════════════════════════════');
-      logger.info('   امسح رمز QR التالي بواتساب:');
-      logger.info('═══════════════════════════════════════');
-      qrcode.generate(qr, { small: true });
-      logger.info('═══════════════════════════════════════');
+    // جلب أحدث إصدار من Baileys
+    let version;
+    try {
+      const result = await fetchLatestBaileysVersion();
+      version = result.version;
+      logger.debug('إصدار Baileys', { version: version.join('.') });
+    } catch {
+      version = [2, 3000, 1015901307];
     }
 
-    if (connection === 'close') {
-      const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+    sock = makeWASocket({
+      version,
+      auth: state,
+      printQRInTerminal: false,
+      logger: require('pino')({ level: 'silent' }),
+      // استخدام اسم مختلف لتجنب تعارض الجلسات (conflict 440)
+      browser: ['AbuSaif', 'Chrome', '120.0.0'],
+      // تعطيل sync الرسائل القديمة لتسريع الاتصال
+      syncFullHistory: false,
+      // تعطيل retry تلقائي للرسائل لتجنب التكرار
+      retryRequestDelayMs: 250,
+      getMessage: async (key) => {
+        const cached = messageCache.get(key.id);
+        return cached?.message || undefined;
+      },
+    });
 
-      logger.warn('انقطع الاتصال بواتساب', { statusCode, shouldReconnect });
+    // === أحداث الاتصال ===
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update;
 
-      if (shouldReconnect) {
-        logger.info('إعادة الاتصال خلال ثوانٍ...');
-        setTimeout(connect, config.general.reconnectInterval);
-      } else {
-        logger.error('تم تسجيل الخروج. يرجى حذف مجلد auth وإعادة المسح.');
+      if (qr) {
+        logger.info('═══════════════════════════════════════');
+        logger.info('   امسح رمز QR التالي بواتساب:');
+        logger.info('═══════════════════════════════════════');
+        qrcode.generate(qr, { small: true });
+        logger.info('═══════════════════════════════════════');
       }
-    }
 
-    if (connection === 'open') {
-      logger.info('✅ تم الاتصال بواتساب بنجاح!');
-      listGroups();
-    }
-  });
+      if (connection === 'close') {
+        isConnecting = false;
+        const err = new Boom(lastDisconnect?.error);
+        const statusCode = err?.output?.statusCode;
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-  sock.ev.on('creds.update', saveCreds);
+        logger.warn('انقطع الاتصال بواتساب', { statusCode, shouldReconnect });
 
-  // === استقبال جميع الرسائل (نصية + تفاعلات) في مستمع واحد فقط ===
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
+        if (!shouldReconnect) {
+          logger.error('تم تسجيل الخروج. يرجى حذف مجلد auth وإعادة المسح.');
+          return;
+        }
 
-    for (const msg of messages) {
-      if (!msg.message) continue;
-      if (msg.key.fromMe) continue;
+        // ====================================================
+        // إدارة ذكية لإعادة الاتصال
+        // statusCode 440 = conflict (جلسة مكررة)
+        // في هذه الحالة ننتظر أطول قبل إعادة الاتصال
+        // ====================================================
+        reconnectAttempts++;
 
-      const targetGroup = config.whatsapp.targetGroupId;
-      if (targetGroup && msg.key.remoteJid !== targetGroup) continue;
-      if (!msg.key.remoteJid?.endsWith('@g.us')) continue;
+        let delay;
+        if (statusCode === 440) {
+          // conflict: ننتظر 30-60 ثانية
+          delay = 30000 + Math.random() * 30000;
+          logger.warn(`⚠️ تعارض جلسة (440) - إعادة الاتصال بعد ${Math.round(delay/1000)}ث`);
+        } else if (reconnectAttempts <= 3) {
+          delay = 5000;
+        } else if (reconnectAttempts <= 10) {
+          delay = 15000;
+        } else {
+          delay = 30000;
+        }
 
-      // تخزين الرسالة في الكاش (للرسائل النصية فقط، ليس التفاعلات)
-      if (msg.key.id && !msg.message.reactionMessage) {
-        messageCache.set(msg.key.id, msg);
-        // تنظيف الكاش القديم (الاحتفاظ بآخر 2000)
-        if (messageCache.size > 2000) {
-          const firstKey = messageCache.keys().next().value;
-          messageCache.delete(firstKey);
+        logger.info(`🔄 إعادة الاتصال بعد ${Math.round(delay/1000)} ثانية... (محاولة ${reconnectAttempts})`);
+        setTimeout(connect, delay);
+      }
+
+      if (connection === 'open') {
+        reconnectAttempts = 0;
+        isConnecting = false;
+        logger.info('✅ تم الاتصال بواتساب بنجاح!');
+        logger.info(`📦 حجم tamCache: ${tamCache.size} رسالة محفوظة`);
+        listGroups();
+      }
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+
+    // === استقبال جميع الرسائل ===
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+      if (type !== 'notify') return;
+
+      for (const msg of messages) {
+        if (!msg.message) continue;
+        if (msg.key.fromMe) continue;
+
+        const targetGroup = config.whatsapp.targetGroupId;
+        if (targetGroup && msg.key.remoteJid !== targetGroup) continue;
+        if (!msg.key.remoteJid?.endsWith('@g.us')) continue;
+
+        // تخزين الرسالة في الكاش (ليس التفاعلات)
+        if (msg.key.id && !msg.message.reactionMessage) {
+          messageCache.set(msg.key.id, msg);
+          if (messageCache.size > 3000) {
+            const firstKey = messageCache.keys().next().value;
+            messageCache.delete(firstKey);
+          }
+        }
+
+        // سجل تشخيصي
+        logger.info('📨 رسالة واردة', {
+          id: msg.key.id?.substring(0, 10),
+          participant: msg.key.participant?.substring(0, 20) || 'N/A',
+          senderPn: msg.key.senderPn || 'N/A',
+          participantPn: msg.key.participantPn || 'N/A',
+          isReaction: !!msg.message.reactionMessage,
+          pushName: msg.pushName || 'N/A',
+          msgType: Object.keys(msg.message)[0],
+        });
+
+        if (messageHandler) {
+          try {
+            await messageHandler(msg, sock);
+          } catch (error) {
+            logger.error('خطأ في معالجة الرسالة', {
+              error: error.message,
+              stack: error.stack?.substring(0, 200),
+              messageId: msg.key.id,
+            });
+          }
         }
       }
+    });
 
-      // سجل تشخيصي لكل رسالة واردة (لتتبع مشكلة LID)
-      logger.info('📨 رسالة واردة', {
-        id: msg.key.id?.substring(0, 10),
-        remoteJid: msg.key.remoteJid?.substring(0, 20),
-        participant: msg.key.participant || 'N/A',
-        senderPn: msg.key.senderPn || 'N/A',
-        participantPn: msg.key.participantPn || 'N/A',
-        remoteJidAlt: msg.key.remoteJidAlt || 'N/A',
-        isReaction: !!msg.message.reactionMessage,
-        pushName: msg.pushName || 'N/A',
-      });
-
-      if (messageHandler) {
-        try {
-          await messageHandler(msg, sock);
-        } catch (error) {
-          logger.error('خطأ في معالجة الرسالة', {
-            error: error.message,
-            messageId: msg.key.id,
-            isReaction: !!msg.message.reactionMessage,
-          });
-        }
-      }
-    }
-  });
-
-  return sock;
+    return sock;
+  } catch (error) {
+    isConnecting = false;
+    logger.error('خطأ في الاتصال', { error: error.message });
+    reconnectAttempts++;
+    const delay = Math.min(reconnectAttempts * 10000, 60000);
+    setTimeout(connect, delay);
+  }
 }
 
 /**
  * استخراج النص من الرسالة
- * يدعم: نص عادي، رد، صورة، تفاعل (reaction)
  */
 function extractText(msg) {
   if (!msg || !msg.message) return null;
-
-  // رسالة نصية عادية
-  if (msg.message.conversation) {
-    return msg.message.conversation;
-  }
-
-  // رسالة نصية ممتدة (رد أو رابط)
-  if (msg.message.extendedTextMessage?.text) {
-    return msg.message.extendedTextMessage.text;
-  }
-
-  // رسالة صورة مع تعليق
-  if (msg.message.imageMessage?.caption) {
-    return msg.message.imageMessage.caption;
-  }
-
-  // تفاعل (reaction) - مثل 👍 أو 2️⃣
-  if (msg.message.reactionMessage?.text) {
-    return msg.message.reactionMessage.text;
-  }
-
+  if (msg.message.conversation) return msg.message.conversation;
+  if (msg.message.extendedTextMessage?.text) return msg.message.extendedTextMessage.text;
+  if (msg.message.imageMessage?.caption) return msg.message.imageMessage.caption;
+  if (msg.message.reactionMessage?.text) return msg.message.reactionMessage.text;
   return null;
 }
 
 /**
  * استخراج نوع الرسالة
- * @returns {'text'|'audio'|'image'|'video'|'sticker'|'other'}
  */
 function getMessageType(msg) {
   if (!msg?.message) return 'other';
@@ -190,7 +232,7 @@ function getMessageType(msg) {
 }
 
 /**
- * التحقق مما إذا كانت الرسالة تفاعلاً (reaction)
+ * التحقق مما إذا كانت الرسالة تفاعلاً
  */
 function isReaction(msg) {
   return !!msg?.message?.reactionMessage;
@@ -204,55 +246,24 @@ function getReactionTargetId(msg) {
 }
 
 /**
- * استخراج رقم هاتف المرسل من الرسالة
- * 
- * Baileys 6.7+ يرسل LID (Local ID) في participant بدلاً من رقم الهاتف.
- * الحقول الموثوقة بالترتيب:
- *   1. senderPn / participantPn → رقم الهاتف الحقيقي
- *   2. participant (فقط إذا كان @s.whatsapp.net)
- *   3. remoteJidAlt (إذا كان @s.whatsapp.net)
+ * استخراج رقم هاتف المرسل
+ * Baileys 6.7+ يرسل LID في participant - نستخدم senderPn/participantPn أولاً
  */
 function getSenderJid(msg) {
   const key = msg.key || {};
 
-  // الأولوية 1: senderPn (رقم الهاتف الحقيقي - الأكثر موثوقية)
-  if (key.senderPn) {
-    logger.debug('📱 getSenderJid: استخدام senderPn', { senderPn: key.senderPn });
-    return key.senderPn;
-  }
+  if (key.senderPn) return key.senderPn;
+  if (key.participantPn) return key.participantPn;
+  if (key.participant && key.participant.includes('@s.whatsapp.net')) return key.participant;
+  if (key.remoteJidAlt && key.remoteJidAlt.includes('@s.whatsapp.net')) return key.remoteJidAlt;
 
-  // الأولوية 2: participantPn (رقم المشارك الحقيقي)
-  if (key.participantPn) {
-    logger.debug('📱 getSenderJid: استخدام participantPn', { participantPn: key.participantPn });
-    return key.participantPn;
-  }
-
-  // الأولوية 3: participant فقط إذا كان رقم هاتف حقيقي (@s.whatsapp.net)
-  if (key.participant && key.participant.includes('@s.whatsapp.net')) {
-    logger.debug('📱 getSenderJid: استخدام participant', { participant: key.participant });
-    return key.participant;
-  }
-
-  // الأولوية 4: remoteJidAlt (بديل عن remoteJid)
-  if (key.remoteJidAlt && key.remoteJidAlt.includes('@s.whatsapp.net')) {
-    logger.debug('📱 getSenderJid: استخدام remoteJidAlt', { remoteJidAlt: key.remoteJidAlt });
-    return key.remoteJidAlt;
-  }
-
-  // الأولوية 5: participant حتى لو LID (آخر محاولة)
-  if (key.participant && !key.participant.endsWith('@g.us')) {
-    logger.debug('📱 getSenderJid: استخدام participant (قد يكون LID)', { participant: key.participant });
-    return key.participant;
-  }
-
-  // الأولوية 6: remoteJid (فقط إذا ليس جروب)
-  if (key.remoteJid && !key.remoteJid.endsWith('@g.us')) {
-    return key.remoteJid;
-  }
+  // آخر محاولة: participant حتى لو LID
+  if (key.participant && !key.participant.endsWith('@g.us')) return key.participant;
+  if (key.remoteJid && !key.remoteJid.endsWith('@g.us')) return key.remoteJid;
 
   logger.warn('⚠️ getSenderJid: لم يُعثر على رقم هاتف', {
-    remoteJid: key.remoteJid,
-    participant: key.participant,
+    remoteJid: key.remoteJid?.substring(0, 30),
+    participant: key.participant?.substring(0, 30),
     senderPn: key.senderPn,
     participantPn: key.participantPn,
   });
@@ -260,20 +271,20 @@ function getSenderJid(msg) {
 }
 
 /**
- * عرض قائمة الجروبات المتاحة
+ * عرض قائمة الجروبات
  */
 async function listGroups() {
   try {
     const groups = await sock.groupFetchAllParticipating();
     const groupList = Object.values(groups);
-
     logger.info(`═══ الجروبات المتاحة (${groupList.length}) ═══`);
     groupList.forEach((group, i) => {
       logger.info(`  ${i + 1}. ${group.subject} → ${group.id}`);
     });
     logger.info('═══════════════════════════════════════');
+    logger.info('انسخ معرف الجروب المطلوب وضعه في TARGET_GROUP_ID');
   } catch (error) {
-    logger.warn('لم يتم جلب قائمة الجروبات بعد', { error: error.message });
+    logger.warn('لم يتم جلب قائمة الجروبات', { error: error.message });
   }
 }
 
@@ -293,27 +304,37 @@ function getCachedMessage(messageId) {
 
 /**
  * حفظ رقم الكابتن لرسالة "تم" في كاش خاص
- * @param {string} messageId - معرف رسالة "تم"
- * @param {string} captainPhone - رقم هاتف الكابتن
+ * هذا الكاش لا يُمسح عند إعادة الاتصال
  */
 function setCaptainForMessage(messageId, captainPhone) {
   if (!messageId || !captainPhone) return;
   tamCache.set(messageId, captainPhone);
-  // تنظيف الكاش القديم (الاحتفاظ بآخر 1000)
-  if (tamCache.size > 1000) {
+  if (tamCache.size > 5000) {
     const firstKey = tamCache.keys().next().value;
     tamCache.delete(firstKey);
   }
-  logger.debug('💾 حفظ كابتن لرسالة تم', { messageId: messageId.substring(0, 10), captain: captainPhone });
+  logger.debug('💾 tamCache: حفظ كابتن', {
+    msgId: messageId.substring(0, 10),
+    captain: captainPhone,
+    cacheSize: tamCache.size,
+  });
 }
 
 /**
  * الحصول على رقم الكابتن من كاش رسائل "تم"
- * @param {string} messageId - معرف الرسالة
- * @returns {string|null}
  */
 function getCaptainByMessageId(messageId) {
   return tamCache.get(messageId) || null;
+}
+
+/**
+ * الحصول على حجم الكاش (للتشخيص)
+ */
+function getCacheStats() {
+  return {
+    messageCache: messageCache.size,
+    tamCache: tamCache.size,
+  };
 }
 
 module.exports = {
@@ -321,6 +342,7 @@ module.exports = {
   setMessageHandler,
   setCaptainForMessage,
   getCaptainByMessageId,
+  getCacheStats,
   getSocket,
   extractText,
   getMessageType,

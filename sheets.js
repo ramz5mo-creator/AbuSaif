@@ -4,33 +4,30 @@
  *
  * هيكل الأوراق:
  *
- * ورقة "سجل الحركات" (A:J):
- *   A: معرف العملية
- *   B: التاريخ
- *   C: المستلم (الكابتن الذي استلم) ← رصيده يقل
- *   D: المرسل (صاحب الطلب الذي سلّم) ← رصيده يزيد
- *   E: الكمية
- *   F: النوع
- *   G: نص الاستلام
- *   H: نص الطلب الأصلي
- *   I: معرف الرسالة
- *   J: المصدر (reaction/reply)
- *
- * ورقة "الأرصدة" (A:E):
+ * ورقة "الاجمالي" (A:C):
  *   A: رقم الهاتف
- *   B: الرصيد (+ يعني سلّم أكثر مما استلم)
- *   C: عدد العمليات
- *   D: آخر تحديث
- *   E: الدور (مستلم/مرسل)
+ *   B: الانتاج (من وضع الإيموجي)
+ *   C: الاستلام (من كتب "تم")
  *
  * ورقة "الطلبات" (A:G):
  *   A: رقم الهاتف (صاحب الطلب)
  *   B: نص الطلب
  *   C: التاريخ
- *   D: الحالة (جديد/مكتمل)
- *   E: المستلم (من استلم)
+ *   D: الحالة
+ *   E: المستلم
  *   F: الكمية
  *   G: معرف الرسالة
+ *
+ * ورقة "سجل_تم" (A:C) - جديدة:
+ *   A: معرف رسالة "تم"
+ *   B: رقم هاتف الكابتن
+ *   C: التاريخ
+ *   (تُستخدم للاستعادة بعد إعادة الاتصال)
+ *
+ * ورقة "سجل الحركات" (A:J):
+ *   A: معرف العملية، B: التاريخ، C: المستلم، D: المرسل
+ *   E: الكمية، F: النوع، G: نص الاستلام، H: نص الطلب
+ *   I: معرف الرسالة، J: المصدر
  */
 
 const { google } = require('googleapis');
@@ -45,6 +42,10 @@ let isInitialized = false;
 
 const TOKEN_PATH = path.resolve('./token.json');
 const CREDENTIALS_PATH = path.resolve('./oauth-credentials.json');
+
+// ====================================================
+// تهيئة الاتصال
+// ====================================================
 
 async function initialize() {
   const spreadsheetId = config.sheets.spreadsheetId;
@@ -110,213 +111,72 @@ async function loadSettings() {
   }
 }
 
+// ====================================================
+// ورقة سجل_تم - حفظ واسترجاع رسائل "تم" بشكل دائم
+// ====================================================
+
 /**
- * تسجيل عملية استلام في سجل الحركات
- *
- * الأعمدة:
- *   C = المستلم (phone/acceptorPhone) → رصيده يقل
- *   D = المرسل/صاحب الطلب (quotedPhone/orderOwnerPhone) → رصيده يزيد
+ * حفظ رسالة "تم" في Google Sheets (للاستعادة بعد إعادة الاتصال)
+ * @param {string} messageId - معرف رسالة "تم"
+ * @param {string} captainPhone - رقم هاتف الكابتن
  */
-async function recordTransaction(transaction) {
-  if (!isInitialized) {
-    logger.warn('لم يتم تسجيل العملية - Sheets غير متصل');
-    return;
-  }
+async function saveTamToSheet(messageId, captainPhone) {
+  if (!isInitialized || !messageId || !captainPhone) return;
 
-  const acceptor = transaction.acceptorPhone || transaction.phone || '';
-  const owner = transaction.orderOwnerPhone || transaction.quotedPhone || '';
-
-  const row = [
-    transaction.transactionId,           // A: معرف العملية
-    transaction.timestamp,               // B: التاريخ
-    acceptor,                            // C: المستلم (رصيده يقل)
-    owner,                               // D: المرسل/صاحب الطلب (رصيده يزيد)
-    transaction.quantity,                // E: الكمية
-    transaction.type,                    // F: النوع
-    transaction.text || '',              // G: نص الاستلام
-    transaction.quotedText || '',        // H: نص الطلب الأصلي
-    transaction.messageId,               // I: معرف الرسالة
-    transaction.source || 'reply',       // J: المصدر
-  ];
-
+  const sheetName = config.sheets.sheetNames.tamLog || 'سجل_تم';
   try {
     await sheetsApi.spreadsheets.values.append({
       spreadsheetId: config.sheets.spreadsheetId,
-      range: `${config.sheets.sheetNames.transactions}!A:J`,
+      range: `${sheetName}!A:C`,
       valueInputOption: 'RAW',
       insertDataOption: 'INSERT_ROWS',
-      requestBody: { values: [row] },
+      requestBody: {
+        values: [[messageId, captainPhone, new Date().toISOString()]],
+      },
     });
-
-    // المستلم (الكابتن) → رصيده يقل
-    if (acceptor) {
-      await updateBalance(acceptor, -transaction.quantity, 'مستلم');
-    }
-
-    // صاحب الطلب → رصيده يزيد
-    if (owner) {
-      await updateBalance(owner, +transaction.quantity, 'مرسل');
-    }
-
-    logger.debug('تم تسجيل العملية', {
-      id: transaction.transactionId.substring(0, 8),
-      acceptor,
-      owner,
-      qty: transaction.quantity,
-    });
+    logger.debug('💾 حفظ تم في الجدول', { msgId: messageId.substring(0, 10), captain: captainPhone });
   } catch (error) {
-    logger.error('فشل تسجيل العملية', { error: error.message });
-    throw error;
+    // إذا كانت الورقة غير موجودة، نتجاهل الخطأ
+    logger.debug('فشل حفظ تم في الجدول (قد تكون الورقة غير موجودة)', { error: error.message });
   }
 }
 
 /**
- * تحديث رصيد شخص
- *
- * هيكل ورقة الأرصدة (A:D):
- *   A: الاسم (يُدخله المستخدم يدوياً - لا يُعدَّل تلقائياً)
- *   B: الهاتف
- *   C: موجب (مجموع ما سلّمه = طلبات صاحب الطلب)
- *   D: سالب (مجموع ما استلمه = طلبات الكابتن المستلم)
- *
- * @param {string} phone - رقم الهاتف
- * @param {number} delta - التغيير: موجب = سلّم، سالب = استلم
+ * البحث عن رقم الكابتن في ورقة سجل_تم
+ * يُستخدم كاحتياطي بعد إعادة الاتصال عندما يكون tamCache فارغاً
+ * @param {string} messageId - معرف رسالة "تم"
+ * @returns {string|null}
  */
-async function updateBalance(phone, delta) {
-  if (!isInitialized || !phone) return;
+async function getCaptainFromTamSheet(messageId) {
+  if (!isInitialized || !messageId) return null;
 
-  const sheetName = config.sheets.sheetNames.balances;
-
+  const sheetName = config.sheets.sheetNames.tamLog || 'سجل_تم';
   try {
     const response = await sheetsApi.spreadsheets.values.get({
       spreadsheetId: config.sheets.spreadsheetId,
-      range: `${sheetName}!A:D`,
+      range: `${sheetName}!A:B`,
     });
-
     const rows = response.data.values || [];
-    let found = false;
-    let rowIndex = -1;
-    let currentName = '';
-    let currentPositive = 0; // موجب (سلّم)
-    let currentNegative = 0; // سالب (استلم)
-
-    // البحث عن رقم الهاتف في العمود B
-    for (let i = 1; i < rows.length; i++) {
-      if (rows[i][1] === phone) {
-        found = true;
-        rowIndex = i + 1;
-        currentName = rows[i][0] || '';
-        currentPositive = parseFloat(rows[i][2]) || 0;
-        currentNegative = parseFloat(rows[i][3]) || 0;
-        break;
+    // البحث من الأحدث للأقدم
+    for (let i = rows.length - 1; i >= 1; i--) {
+      if (rows[i][0] === messageId) {
+        const captain = rows[i][1] || '';
+        if (captain) {
+          logger.info('📋 وجدنا الكابتن من سجل_تم', { msgId: messageId.substring(0, 10), captain });
+          return captain;
+        }
       }
     }
-
-    let newPositive = currentPositive;
-    let newNegative = currentNegative;
-
-    if (delta > 0) {
-      // سلّم طلبات → موجب يزيد
-      newPositive = currentPositive + delta;
-    } else if (delta < 0) {
-      // استلم طلبات → سالب يزيد
-      newNegative = currentNegative + Math.abs(delta);
-    }
-
-    if (found) {
-      // تحديث C و D فقط (الاسم في A يبقى كما هو)
-      await sheetsApi.spreadsheets.values.update({
-        spreadsheetId: config.sheets.spreadsheetId,
-        range: `${sheetName}!C${rowIndex}:D${rowIndex}`,
-        valueInputOption: 'RAW',
-        requestBody: {
-          values: [[newPositive, newNegative]],
-        },
-      });
-    } else {
-      // إضافة صف جديد: الاسم فارغ (يُدخله المستخدم لاحقاً)
-      await sheetsApi.spreadsheets.values.append({
-        spreadsheetId: config.sheets.spreadsheetId,
-        range: `${sheetName}!A:D`,
-        valueInputOption: 'RAW',
-        insertDataOption: 'INSERT_ROWS',
-        requestBody: {
-          values: [['', phone, newPositive, newNegative]],
-        },
-      });
-    }
-
-    // تحديث ورقة الإجمالي أيضاً
-    await updateTotals(phone, delta);
-
+    return null;
   } catch (error) {
-    logger.warn('فشل تحديث الرصيد', { error: error.message, phone });
+    logger.debug('فشل البحث في سجل_تم', { error: error.message });
+    return null;
   }
 }
 
-/**
- * تحديث ورقة الإجمالي (A: الهاتف، B: موجب، C: سالب)
- * تُستدعى من updateBalance بعد كل تحديث
- *
- * @param {string} phone - رقم الهاتف
- * @param {number} delta - موجب = سلّم، سالب = استلم
- */
-async function updateTotals(phone, delta) {
-  if (!isInitialized || !phone) return;
-
-  const sheetName = config.sheets.sheetNames.totals;
-
-  try {
-    const response = await sheetsApi.spreadsheets.values.get({
-      spreadsheetId: config.sheets.spreadsheetId,
-      range: `${sheetName}!A:C`,
-    });
-
-    const rows = response.data.values || [];
-    let found = false;
-    let rowIndex = -1;
-    let currentPositive = 0;
-    let currentNegative = 0;
-
-    for (let i = 1; i < rows.length; i++) {
-      if (rows[i][0] === phone) {
-        found = true;
-        rowIndex = i + 1;
-        currentPositive = parseFloat(rows[i][1]) || 0;
-        currentNegative = parseFloat(rows[i][2]) || 0;
-        break;
-      }
-    }
-
-    let newPositive = currentPositive;
-    let newNegative = currentNegative;
-
-    if (delta > 0) {
-      newPositive = currentPositive + delta;   // أرسل طلب → موجب يزيد
-    } else if (delta < 0) {
-      newNegative = currentNegative + Math.abs(delta); // استلم → سالب يزيد
-    }
-
-    if (found) {
-      await sheetsApi.spreadsheets.values.update({
-        spreadsheetId: config.sheets.spreadsheetId,
-        range: `${sheetName}!B${rowIndex}:C${rowIndex}`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [[newPositive, newNegative]] },
-      });
-    } else {
-      await sheetsApi.spreadsheets.values.append({
-        spreadsheetId: config.sheets.spreadsheetId,
-        range: `${sheetName}!A:C`,
-        valueInputOption: 'RAW',
-        insertDataOption: 'INSERT_ROWS',
-        requestBody: { values: [[phone, newPositive, newNegative]] },
-      });
-    }
-  } catch (error) {
-    logger.warn('فشل تحديث الإجمالي', { error: error.message, phone });
-  }
-}
+// ====================================================
+// ورقة الإجمالي - تسجيل الانتاج والاستلام
+// ====================================================
 
 /**
  * تسجيل انتاج للمنتج (من وضع الإيموجي)
@@ -337,14 +197,12 @@ async function updateTotalsProduction(phone, quantity) {
     let found = false;
     let rowIndex = -1;
     let currentProduction = 0;
-    let currentReception = 0;
 
     for (let i = 1; i < rows.length; i++) {
       if (rows[i][0] === phone) {
         found = true;
         rowIndex = i + 1;
         currentProduction = parseFloat(rows[i][1]) || 0;
-        currentReception = parseFloat(rows[i][2]) || 0;
         break;
       }
     }
@@ -368,9 +226,10 @@ async function updateTotalsProduction(phone, quantity) {
       });
     }
 
-    logger.debug('تم تسجيل انتاج', { phone, quantity, newProduction });
+    logger.debug('✅ تم تسجيل انتاج', { phone, qty: quantity, total: newProduction });
   } catch (error) {
     logger.warn('فشل تسجيل الانتاج', { error: error.message, phone });
+    throw error;
   }
 }
 
@@ -392,14 +251,12 @@ async function updateTotalsReception(phone, quantity) {
     const rows = response.data.values || [];
     let found = false;
     let rowIndex = -1;
-    let currentProduction = 0;
     let currentReception = 0;
 
     for (let i = 1; i < rows.length; i++) {
       if (rows[i][0] === phone) {
         found = true;
         rowIndex = i + 1;
-        currentProduction = parseFloat(rows[i][1]) || 0;
         currentReception = parseFloat(rows[i][2]) || 0;
         break;
       }
@@ -424,62 +281,29 @@ async function updateTotalsReception(phone, quantity) {
       });
     }
 
-    logger.debug('تم تسجيل استلام', { phone, quantity, newReception });
+    logger.debug('✅ تم تسجيل استلام', { phone, qty: quantity, total: newReception });
   } catch (error) {
     logger.warn('فشل تسجيل الاستلام', { error: error.message, phone });
+    throw error;
   }
 }
 
-async function getBalance(phone) {
-  if (!isInitialized) return null;
-  try {
-    const response = await sheetsApi.spreadsheets.values.get({
-      spreadsheetId: config.sheets.spreadsheetId,
-      range: `${config.sheets.sheetNames.balances}!A:D`,
-    });
-    const rows = response.data.values || [];
-    for (let i = 1; i < rows.length; i++) {
-      // الهاتف في عمود B (الفهرس 1)
-      if (rows[i][1] === phone) {
-        return {
-          name: rows[i][0] || '',
-          phone: rows[i][1],
-          positive: parseFloat(rows[i][2]) || 0,  // موجب (سلّم)
-          negative: parseFloat(rows[i][3]) || 0,  // سالب (استلم)
-        };
-      }
-    }
-    return { name: '', phone, positive: 0, negative: 0 };
-  } catch (error) {
-    logger.error('فشل جلب الرصيد', { error: error.message });
-    return null;
-  }
-}
+// ====================================================
+// ورقة الطلبات
+// ====================================================
 
-/**
- * تسجيل طلب أصلي في ورقة الطلبات
- *
- * الأعمدة:
- *   A: رقم الهاتف (صاحب الطلب)
- *   B: نص الطلب
- *   C: التاريخ
- *   D: الحالة
- *   E: المستلم
- *   F: الكمية
- *   G: معرف الرسالة
- */
 async function recordOrder(order) {
   if (!isInitialized) return;
 
   const sheetName = config.sheets.sheetNames.orders || 'الطلبات';
   const row = [
-    order.phone,       // A: رقم الهاتف (صاحب الطلب)
-    order.text,        // B: نص الطلب
-    order.timestamp,   // C: التاريخ
-    'جديد',           // D: الحالة
-    '',               // E: المستلم (فارغ)
-    '',               // F: الكمية (فارغة)
-    order.messageId,  // G: معرف الرسالة
+    order.phone,
+    order.text,
+    order.timestamp,
+    'جديد',
+    '',
+    '',
+    order.messageId,
   ];
 
   try {
@@ -498,7 +322,7 @@ async function recordOrder(order) {
 
 /**
  * البحث عن صاحب الطلب في ورقة الطلبات بواسطة معرف الرسالة
- * يُستخدم عندما يكون الكاش فارغاً (بعد إعادة الاتصال)
+ * ملاحظة: هذا يجد صاحب الطلب الأصلي، وليس الكابتن
  */
 async function getOrderOwnerByMessageId(messageId) {
   if (!isInitialized || !messageId) return null;
@@ -511,14 +335,10 @@ async function getOrderOwnerByMessageId(messageId) {
     });
     const rows = response.data.values || [];
     for (let i = 1; i < rows.length; i++) {
-      // معرف الرسالة في العمود G (الفهرس 6)
       if (rows[i][6] === messageId) {
-        const phone = rows[i][0] || '';
-        logger.debug('✅ وجدنا صاحب الطلب من الجدول', { messageId, phone });
-        return phone || null;
+        return rows[i][0] || null;
       }
     }
-    logger.debug('⚠️ لم نجد صاحب الطلب في الجدول', { messageId });
     return null;
   } catch (error) {
     logger.warn('فشل البحث عن صاحب الطلب', { error: error.message });
@@ -526,9 +346,127 @@ async function getOrderOwnerByMessageId(messageId) {
   }
 }
 
-async function updateOrderStatus(quotedMessageId, acceptorPhone, quantity) {
+// ====================================================
+// دوال مساعدة قديمة (للتوافق)
+// ====================================================
+
+async function recordTransaction(transaction) {
   if (!isInitialized) return;
 
+  const acceptor = transaction.acceptorPhone || transaction.phone || '';
+  const owner = transaction.orderOwnerPhone || transaction.quotedPhone || '';
+
+  const row = [
+    transaction.transactionId,
+    transaction.timestamp,
+    acceptor,
+    owner,
+    transaction.quantity,
+    transaction.type,
+    transaction.text || '',
+    transaction.quotedText || '',
+    transaction.messageId,
+    transaction.source || 'reply',
+  ];
+
+  try {
+    await sheetsApi.spreadsheets.values.append({
+      spreadsheetId: config.sheets.spreadsheetId,
+      range: `${config.sheets.sheetNames.transactions}!A:J`,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [row] },
+    });
+  } catch (error) {
+    logger.error('فشل تسجيل العملية', { error: error.message });
+  }
+}
+
+async function updateBalance(phone, delta) {
+  if (!isInitialized || !phone) return;
+  const sheetName = config.sheets.sheetNames.balances;
+  try {
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId: config.sheets.spreadsheetId,
+      range: `${sheetName}!A:D`,
+    });
+    const rows = response.data.values || [];
+    let found = false;
+    let rowIndex = -1;
+    let currentPositive = 0;
+    let currentNegative = 0;
+
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][1] === phone) {
+        found = true;
+        rowIndex = i + 1;
+        currentPositive = parseFloat(rows[i][2]) || 0;
+        currentNegative = parseFloat(rows[i][3]) || 0;
+        break;
+      }
+    }
+
+    let newPositive = currentPositive;
+    let newNegative = currentNegative;
+    if (delta > 0) newPositive = currentPositive + delta;
+    else if (delta < 0) newNegative = currentNegative + Math.abs(delta);
+
+    if (found) {
+      await sheetsApi.spreadsheets.values.update({
+        spreadsheetId: config.sheets.spreadsheetId,
+        range: `${sheetName}!C${rowIndex}:D${rowIndex}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[newPositive, newNegative]] },
+      });
+    } else {
+      await sheetsApi.spreadsheets.values.append({
+        spreadsheetId: config.sheets.spreadsheetId,
+        range: `${sheetName}!A:D`,
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: [['', phone, newPositive, newNegative]] },
+      });
+    }
+  } catch (error) {
+    logger.warn('فشل تحديث الرصيد', { error: error.message, phone });
+  }
+}
+
+async function updateTotals(phone, delta) {
+  if (delta > 0) {
+    await updateTotalsProduction(phone, delta);
+  } else if (delta < 0) {
+    await updateTotalsReception(phone, Math.abs(delta));
+  }
+}
+
+async function getBalance(phone) {
+  if (!isInitialized) return null;
+  try {
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId: config.sheets.spreadsheetId,
+      range: `${config.sheets.sheetNames.balances}!A:D`,
+    });
+    const rows = response.data.values || [];
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][1] === phone) {
+        return {
+          name: rows[i][0] || '',
+          phone: rows[i][1],
+          positive: parseFloat(rows[i][2]) || 0,
+          negative: parseFloat(rows[i][3]) || 0,
+        };
+      }
+    }
+    return { name: '', phone, positive: 0, negative: 0 };
+  } catch (error) {
+    logger.error('فشل جلب الرصيد', { error: error.message });
+    return null;
+  }
+}
+
+async function updateOrderStatus(quotedMessageId, acceptorPhone, quantity) {
+  if (!isInitialized) return;
   const sheetName = config.sheets.sheetNames.orders || 'الطلبات';
   try {
     const response = await sheetsApi.spreadsheets.values.get({
@@ -544,7 +482,6 @@ async function updateOrderStatus(quotedMessageId, acceptorPhone, quantity) {
           valueInputOption: 'RAW',
           requestBody: { values: [['مكتمل', acceptorPhone, quantity]] },
         });
-        logger.debug('تم تحديث حالة الطلب إلى مكتمل', { row: i + 1 });
         break;
       }
     }
@@ -556,13 +493,19 @@ async function updateOrderStatus(quotedMessageId, acceptorPhone, quantity) {
 module.exports = {
   initialize,
   loadSettings,
-  recordTransaction,
-  recordOrder,
-  updateOrderStatus,
-  updateBalance,
-  updateTotals,
+  // ورقة الإجمالي
   updateTotalsProduction,
   updateTotalsReception,
-  getBalance,
+  // ورقة سجل_تم (جديد)
+  saveTamToSheet,
+  getCaptainFromTamSheet,
+  // ورقة الطلبات
+  recordOrder,
   getOrderOwnerByMessageId,
+  updateOrderStatus,
+  // دوال مساعدة
+  recordTransaction,
+  updateBalance,
+  updateTotals,
+  getBalance,
 };

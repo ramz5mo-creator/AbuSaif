@@ -1,7 +1,20 @@
 /**
  * server.js - نقطة تشغيل النظام
  * ================================
- * يبدأ جميع الخدمات ويربطها ببعض.
+ * المنطق الكامل:
+ *
+ * 1. الكابتن يكتب "تم" ردًا على طلب:
+ *    → يُحفظ رقمه في tamCache (ذاكرة) + سجل_تم (Google Sheets)
+ *    → لا يُسجَّل شيء في الإجمالي
+ *
+ * 2. المنتج يضع 👍/2️⃣/3️⃣ على رسالة "تم":
+ *    → يُسجَّل له "انتاج" في عمود B
+ *    → يُسجَّل للكابتن "استلام" في عمود C
+ *    → البحث عن الكابتن: tamCache → سجل_تم (Sheets)
+ *
+ * 3. ❌ على رسالة "تم":
+ *    → يُخصم فوراً من انتاج المنتج
+ *    → يُخصم فوراً من استلام الكابتن
  */
 
 const config = require('./config');
@@ -10,23 +23,54 @@ const whatsapp = require('./whatsapp');
 const parser = require('./parser');
 const sheets = require('./sheets');
 
-// === بدء التشغيل ===
+// ====================================================
+// دالة مساعدة: البحث عن رقم الكابتن بكل الطرق المتاحة
+// ====================================================
+async function findCaptainPhone(quotedMessageId, fallbackPhone) {
+  // الطريقة 1: tamCache في الذاكرة (الأسرع)
+  if (quotedMessageId) {
+    const fromCache = whatsapp.getCaptainByMessageId(quotedMessageId);
+    if (fromCache) {
+      logger.info('💾 الكابتن من tamCache', { captain: fromCache, msgId: quotedMessageId.substring(0, 10) });
+      return fromCache;
+    }
+  }
+
+  // الطريقة 2: من بيانات الرسالة المرفقة (إذا كانت متاحة)
+  if (fallbackPhone) {
+    logger.info('📱 الكابتن من بيانات الرسالة', { captain: fallbackPhone });
+    return fallbackPhone;
+  }
+
+  // الطريقة 3: من ورقة سجل_تم في Google Sheets (بعد إعادة الاتصال)
+  if (quotedMessageId) {
+    const fromSheet = await sheets.getCaptainFromTamSheet(quotedMessageId);
+    if (fromSheet) {
+      // أعد تحميله في tamCache لتسريع الطلبات القادمة
+      whatsapp.setCaptainForMessage(quotedMessageId, fromSheet);
+      return fromSheet;
+    }
+  }
+
+  return null;
+}
+
+// ====================================================
+// بدء التشغيل
+// ====================================================
 async function start() {
   logger.info('═══════════════════════════════════════');
-  logger.info('   🚀 نظام AbuSaif - تجريد الطلبات');
+  logger.info('   🚀 نظام AbuSaif - تجريد الطلبات v3');
   logger.info('═══════════════════════════════════════');
-  logger.info('جاري بدء التشغيل...');
 
   // 1. تهيئة Google Sheets
   try {
     await sheets.initialize();
     logger.info('✅ تم الاتصال بـ Google Sheets');
-
-    // تحميل كلمات الاستلام من ورقة الإعدادات
     await sheets.loadSettings();
-    logger.info('✅ تم تحميل الإعدادات من Sheets');
+    logger.info('✅ تم تحميل الإعدادات');
   } catch (error) {
-    logger.warn('⚠️ لم يتم الاتصال بـ Google Sheets (سيعمل بالإعدادات الافتراضية)', {
+    logger.warn('⚠️ Google Sheets غير متاح (سيعمل بالإعدادات الافتراضية)', {
       error: error.message,
     });
   }
@@ -35,97 +79,96 @@ async function start() {
   whatsapp.setMessageHandler(async (msg, sock) => {
 
     // ====================================================
-    // حالة 1: تفاعل (reaction) مثل 👍 / 2️⃣ / 3️⃣
-    // المنتج (صاحب الطلب) يضع الإيموجي → يُسجّل له "انتاج"
+    // حالة 1: تفاعل (reaction) 👍 / 2️⃣ / 3️⃣ / ❌
     // ====================================================
     if (whatsapp.isReaction(msg)) {
       const result = await parser.processMessage(msg, sock);
       if (!result) return;
 
-      // البحث عن رقم الكابتن بالترتيب:
-      // 1. من كاش رسائل "تم" (tamCache) - الأكثر موثوقية
-      // 2. من كاش الرسائل العام (messageCache)
-      // 3. من الجدول (sheets)
-      let captainPhone = '';
-      if (result.quotedMessageId) {
-        // أولاً: ابحث في tamCache
-        captainPhone = whatsapp.getCaptainByMessageId(result.quotedMessageId) || '';
-        if (captainPhone) {
-          logger.info('💾 وجدنا الكابتن من tamCache', { captain: captainPhone });
-        }
-      }
-      // ثانياً: من بيانات الرسالة (كاش عام)
-      if (!captainPhone) {
-        captainPhone = result.orderOwnerPhone || result.quotedPhone || '';
-      }
-      // ثالثاً: من الجدول
-      if (!captainPhone && result.quotedMessageId) {
-        captainPhone = await sheets.getOrderOwnerByMessageId(result.quotedMessageId) || '';
-        if (captainPhone) {
-          logger.info('📋 وجدنا الكابتن من الجدول', { captain: captainPhone });
-        }
-      }
+      const producerPhone = result.phone;   // من وضع الإيموجي
+      const quantity = result.quantity;
+      const quotedMsgId = result.quotedMessageId;
+
+      // البحث عن رقم الكابتن بكل الطرق
+      const captainPhone = await findCaptainPhone(
+        quotedMsgId,
+        result.orderOwnerPhone || result.quotedPhone || null
+      );
 
       if (result.type === 'accept') {
-        // 👍/2️⃣/3️⃣ = انتاج للمنتج + استلام للكابتن
+        // ====================================================
+        // انتاج + استلام
+        // ====================================================
+        logger.info('🎯 تفاعل انتاج', {
+          producer: producerPhone,
+          captain: captainPhone || '❓ غير معروف',
+          qty: quantity,
+          msgId: quotedMsgId?.substring(0, 10),
+        });
+
         try {
-          const producerPhone = result.phone;
-          const quantity = result.quantity;
-
-          // تسجيل الانتاج للمنتج
+          // تسجيل الانتاج للمنتج (دائماً)
           await sheets.updateTotalsProduction(producerPhone, quantity);
-
-          // تسجيل الاستلام للكابتن
-          if (captainPhone) {
-            await sheets.updateTotalsReception(captainPhone, quantity);
-          }
-
-          logger.info('✅ تفاعل انتاج مسجّل', {
-            producer: producerPhone,
-            captain: captainPhone || 'غير معروف',
-            qty: quantity,
-          });
+          logger.info(`✅ انتاج مسجّل: ${producerPhone} +${quantity}`);
         } catch (error) {
-          logger.error('❌ فشل تسجيل الانتاج', { error: error.message });
+          logger.error('❌ فشل تسجيل الانتاج', { error: error.message, producer: producerPhone });
+        }
+
+        if (captainPhone) {
+          try {
+            // تسجيل الاستلام للكابتن
+            await sheets.updateTotalsReception(captainPhone, quantity);
+            logger.info(`✅ استلام مسجّل: ${captainPhone} +${quantity}`);
+          } catch (error) {
+            logger.error('❌ فشل تسجيل الاستلام', { error: error.message, captain: captainPhone });
+          }
+        } else {
+          logger.warn('⚠️ لم يُعثر على رقم الكابتن - الاستلام لم يُسجَّل', {
+            quotedMsgId: quotedMsgId?.substring(0, 10),
+          });
         }
 
       } else if (result.type === 'cancel') {
-        // ❌ = إلغاء فوري → يخصم من الطرفين
+        // ====================================================
+        // إلغاء فوري: خصم من الطرفين
+        // ====================================================
+        logger.info('❌ إلغاء', {
+          producer: producerPhone,
+          captain: captainPhone || '❓ غير معروف',
+          qty: quantity,
+        });
+
         try {
-          const producerPhone = result.phone;
-          const quantity = result.quantity;
-
-          // خصم من انتاج المنتج
           await sheets.updateTotalsProduction(producerPhone, -quantity);
-
-          // خصم من استلام الكابتن
-          if (captainPhone) {
-            await sheets.updateTotalsReception(captainPhone, -quantity);
-          }
-
-          logger.info('❌ إلغاء مسجّل', {
-            producer: producerPhone,
-            captain: captainPhone || 'غير معروف',
-            qty: quantity,
-          });
+          logger.info(`✅ خصم انتاج: ${producerPhone} -${quantity}`);
         } catch (error) {
-          logger.error('❌ فشل تسجيل الإلغاء', { error: error.message });
+          logger.error('❌ فشل خصم الانتاج', { error: error.message });
+        }
+
+        if (captainPhone) {
+          try {
+            await sheets.updateTotalsReception(captainPhone, -quantity);
+            logger.info(`✅ خصم استلام: ${captainPhone} -${quantity}`);
+          } catch (error) {
+            logger.error('❌ فشل خصم الاستلام', { error: error.message });
+          }
         }
       }
+
       return;
     }
 
     // ====================================================
-    // حالة 2: رسالة نصية (طلب أو رد استلام)
+    // حالة 2: رسالة نصية
     // ====================================================
     const result = await parser.processMessage(msg, sock);
     if (!result) return;
 
     if (result.type === 'order') {
-      // رسالة طلب أصلية → سجّلها في ورقة الطلبات
+      // طلب أصلي → سجّله في ورقة الطلبات
       try {
         await sheets.recordOrder(result);
-        logger.debug('📝 طلب جديد مسجّل', {
+        logger.debug('📝 طلب جديد', {
           phone: result.phone,
           text: result.text.substring(0, 40),
         });
@@ -134,13 +177,27 @@ async function start() {
       }
 
     } else if (result.type === 'accept') {
-      // رد بـ "تم" → لا يُسجّل شيء في الإجمالي
-      // لكن نحفظ رقم الكابتن في كاش خاص حتى نستخدمه عند وضع الإيموجي
+      // ====================================================
+      // رسالة "تم" → احفظ رقم الكابتن في:
+      // 1. tamCache (ذاكرة سريعة)
+      // 2. سجل_تم في Google Sheets (دائم)
+      // ====================================================
       const captainPhone = result.phone;
       const tamMessageId = result.messageId;
+
       if (captainPhone && tamMessageId) {
+        // حفظ في الذاكرة
         whatsapp.setCaptainForMessage(tamMessageId, captainPhone);
-        logger.debug('💾 حفظ رقم الكابتن في كاش تم', { captain: captainPhone, msgId: tamMessageId.substring(0, 10) });
+
+        // حفظ دائم في Google Sheets (للاستعادة بعد إعادة الاتصال)
+        sheets.saveTamToSheet(tamMessageId, captainPhone).catch((err) => {
+          logger.debug('فشل حفظ تم في الجدول', { error: err.message });
+        });
+
+        logger.info('💾 تم حفظ رسالة "تم"', {
+          captain: captainPhone,
+          msgId: tamMessageId.substring(0, 10),
+        });
       }
     }
   });
@@ -158,13 +215,14 @@ async function start() {
   setInterval(async () => {
     try {
       await sheets.loadSettings();
-      logger.debug('تم تحديث الإعدادات من Sheets');
+      const stats = whatsapp.getCacheStats();
+      logger.debug('تحديث الإعدادات', { tamCache: stats.tamCache, msgCache: stats.messageCache });
     } catch (error) {
       logger.debug('فشل تحديث الإعدادات', { error: error.message });
     }
   }, config.general.settingsRefreshInterval);
 
-  logger.info('النظام يعمل الآن. في انتظار الرسائل...');
+  logger.info('✅ النظام يعمل الآن. في انتظار الرسائل...');
 }
 
 // === معالجة الأخطاء غير المتوقعة ===
