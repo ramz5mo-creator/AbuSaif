@@ -75,7 +75,7 @@ async function connect() {
     sock = makeWASocket({
       version,
       auth: state,
-      printQRInTerminal: false,
+      printQRInTerminal: true,
       logger: require('pino')({ level: 'silent' }),
       // استخدام اسم مختلف لتجنب تعارض الجلسات (conflict 440)
       browser: ['AbuSaif', 'Chrome', '120.0.0'],
@@ -94,19 +94,13 @@ async function connect() {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        logger.info('═══════════════════════════════════════');
-        logger.info('   📱 امسح رمز QR التالي بواتساب:');
-        logger.info('═══════════════════════════════════════');
-        // طباعة QR بحجم صغير في Terminal
+        console.log('\n\n');
+        console.log('========================================');
+        console.log('  📱 امسح رمز QR التالي بواتساب');
+        console.log('========================================');
         qrcode.generate(qr, { small: true });
-        // إنشاء رابط QR كصورة (يمكن فتحه في المتصفح)
-        QRCode.toString(qr, { type: 'terminal', small: true }, (err, url) => {
-          if (!err) console.log(url);
-        });
-        logger.info('═══════════════════════════════════════');
-        logger.info('💡 إذا لم يظهر QR بشكل صحيح، انسخ النص التالي وافتحه في:');
-        logger.info('   https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(qr));
-        logger.info('═══════════════════════════════════════');
+        console.log('========================================');
+        console.log('\n\n');
       }
 
       if (connection === 'close') {
