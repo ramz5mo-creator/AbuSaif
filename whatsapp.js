@@ -19,6 +19,7 @@ const {
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const qrcode = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const path = require('path');
 const config = require('./config');
 const logger = require('./logger');
@@ -94,9 +95,17 @@ async function connect() {
 
       if (qr) {
         logger.info('═══════════════════════════════════════');
-        logger.info('   امسح رمز QR التالي بواتساب:');
+        logger.info('   📱 امسح رمز QR التالي بواتساب:');
         logger.info('═══════════════════════════════════════');
+        // طباعة QR بحجم صغير في Terminal
         qrcode.generate(qr, { small: true });
+        // إنشاء رابط QR كصورة (يمكن فتحه في المتصفح)
+        QRCode.toString(qr, { type: 'terminal', small: true }, (err, url) => {
+          if (!err) console.log(url);
+        });
+        logger.info('═══════════════════════════════════════');
+        logger.info('💡 إذا لم يظهر QR بشكل صحيح، انسخ النص التالي وافتحه في:');
+        logger.info('   https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(qr));
         logger.info('═══════════════════════════════════════');
       }
 
