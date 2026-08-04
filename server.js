@@ -42,8 +42,23 @@ async function start() {
       const result = await parser.processMessage(msg, sock);
       if (!result) return;
 
-      // إذا كان صاحب رسالة "تم" غير معروف (الكاش فارغ) → ابحث في الجدول
-      let captainPhone = result.orderOwnerPhone || result.quotedPhone || '';
+      // البحث عن رقم الكابتن بالترتيب:
+      // 1. من كاش رسائل "تم" (tamCache) - الأكثر موثوقية
+      // 2. من كاش الرسائل العام (messageCache)
+      // 3. من الجدول (sheets)
+      let captainPhone = '';
+      if (result.quotedMessageId) {
+        // أولاً: ابحث في tamCache
+        captainPhone = whatsapp.getCaptainByMessageId(result.quotedMessageId) || '';
+        if (captainPhone) {
+          logger.info('💾 وجدنا الكابتن من tamCache', { captain: captainPhone });
+        }
+      }
+      // ثانياً: من بيانات الرسالة (كاش عام)
+      if (!captainPhone) {
+        captainPhone = result.orderOwnerPhone || result.quotedPhone || '';
+      }
+      // ثالثاً: من الجدول
       if (!captainPhone && result.quotedMessageId) {
         captainPhone = await sheets.getOrderOwnerByMessageId(result.quotedMessageId) || '';
         if (captainPhone) {
@@ -120,10 +135,13 @@ async function start() {
 
     } else if (result.type === 'accept') {
       // رد بـ "تم" → لا يُسجّل شيء في الإجمالي
-      // التسجيل يحدث فقط عند وضع المنتج الإيموجي على رسالة "تم"
-      logger.debug('تم تجاهل رسالة "تم" - التسجيل يكون عند وضع الإيموجي', {
-        phone: result.phone,
-      });
+      // لكن نحفظ رقم الكابتن في كاش خاص حتى نستخدمه عند وضع الإيموجي
+      const captainPhone = result.phone;
+      const tamMessageId = result.messageId;
+      if (captainPhone && tamMessageId) {
+        whatsapp.setCaptainForMessage(tamMessageId, captainPhone);
+        logger.debug('💾 حفظ رقم الكابتن في كاش تم', { captain: captainPhone, msgId: tamMessageId.substring(0, 10) });
+      }
     }
   });
 

@@ -25,6 +25,10 @@ const logger = require('./logger');
 // مخزن مؤقت للرسائل (للبحث عن الرسائل المرد عليها)
 const messageCache = new Map();
 
+// كاش خاص برسائل "تم" - يحفظ رقم الكابتن مع معرف الرسالة
+// { messageId: captainPhone }
+const tamCache = new Map();
+
 let sock = null;
 let messageHandler = null;
 
@@ -287,9 +291,36 @@ function getCachedMessage(messageId) {
   return messageCache.get(messageId) || null;
 }
 
+/**
+ * حفظ رقم الكابتن لرسالة "تم" في كاش خاص
+ * @param {string} messageId - معرف رسالة "تم"
+ * @param {string} captainPhone - رقم هاتف الكابتن
+ */
+function setCaptainForMessage(messageId, captainPhone) {
+  if (!messageId || !captainPhone) return;
+  tamCache.set(messageId, captainPhone);
+  // تنظيف الكاش القديم (الاحتفاظ بآخر 1000)
+  if (tamCache.size > 1000) {
+    const firstKey = tamCache.keys().next().value;
+    tamCache.delete(firstKey);
+  }
+  logger.debug('💾 حفظ كابتن لرسالة تم', { messageId: messageId.substring(0, 10), captain: captainPhone });
+}
+
+/**
+ * الحصول على رقم الكابتن من كاش رسائل "تم"
+ * @param {string} messageId - معرف الرسالة
+ * @returns {string|null}
+ */
+function getCaptainByMessageId(messageId) {
+  return tamCache.get(messageId) || null;
+}
+
 module.exports = {
   connect,
   setMessageHandler,
+  setCaptainForMessage,
+  getCaptainByMessageId,
   getSocket,
   extractText,
   getMessageType,
