@@ -82,6 +82,31 @@ const httpServer = http.createServer(async (req, res) => {
     html += `<script>setTimeout(()=>location.reload(), 15000);</script></body></html>`;
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
+  } else if (req.url === '/logout') {
+    // مسح ملفات الجلسة وإعادة التشغيل
+    const fs = require('fs');
+    const path = require('path');
+    const authPath = path.resolve(config.whatsapp.authPath);
+    try {
+      if (fs.existsSync(authPath)) {
+        const files = fs.readdirSync(authPath);
+        for (const file of files) {
+          fs.unlinkSync(path.join(authPath, file));
+        }
+        logger.info('🗑️ تم مسح ملفات الجلسة');
+      }
+    } catch (e) {
+      logger.error('خطأ في مسح الجلسة', { error: e.message });
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(`<html><body style="background:#111;color:#ff0;font-size:20px;text-align:center;padding:40px;font-family:monospace;">
+      <h1>🗑️ تم مسح الجلسة</h1>
+      <p>البوت سيعيد التشغيل خلال 3 ثوانٍ...</p>
+      <p>بعدها افتح الصفحة الرئيسية لمسح QR الجديد</p>
+      <a href="/" style="color:#0f0;font-size:24px;">← العودة للصفحة الرئيسية</a>
+    </body></html>`);
+    // إعادة التشغيل بعد 2 ثانية
+    setTimeout(() => process.exit(0), 2000);
   } else {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('AbuSaif Bot v4');
