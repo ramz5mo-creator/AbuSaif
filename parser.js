@@ -35,15 +35,20 @@ function getAcceptWords() {
 
 /**
  * تنظيف رقم الهاتف من واتساب
- * واتساب يرسل الأرقام بصيغ مختلفة:
- *   - 966501234567@s.whatsapp.net  → 966501234567
- *   - 109346058985724@s.whatsapp.net → يحتوي على رقم زائد في البداية
  *
- * نحذف كل شيء بعد @ ثم نحتفظ بالأرقام فقط.
- * إذا كان الطول > 13 رقم، نحذف الرقم الأول (encoding artifact).
+ * واتساب يرسل المعرفات بصيغتين:
+ *   - مستخدم فردي: 966501234567@s.whatsapp.net
+ *   - جروب: 120363401940570759@g.us  ← هذا معرف الجروب نفسه، ليس هاتف
+ *
+ * القاعدة:
+ * - إذا كان المعرف ينتهي بـ @g.us → رفضه (معرف جروب)
+ * - إذا كان طول الرقم > 13 → احذف الرقم الأول (encoding artifact)
  */
 function cleanPhone(jid) {
   if (!jid) return null;
+
+  // رفض معرفات الجروب (تنتهي بـ @g.us)
+  if (jid.endsWith('@g.us')) return null;
 
   // إزالة الجزء بعد @
   let phone = jid.split('@')[0].trim();
@@ -53,11 +58,14 @@ function cleanPhone(jid) {
 
   if (!phone) return null;
 
-  // أرقام الهاتف مع رمز الدولة عادةً 11-13 رقم
+  // أرقام الهاتف مع رمز الدولة عادةً 10-13 رقم
   // إذا كان أطول من 13 رقم → احذف الرقم الأول
   if (phone.length > 13) {
     phone = phone.substring(1);
   }
+
+  // لا يزال طويلاً بعد الحذف → رفضه
+  if (phone.length > 15) return null;
 
   return phone;
 }
@@ -159,9 +167,13 @@ async function processMessage(msg, sock) {
 
     if (!isQuantityReaction) return null;
 
-    const senderJid = msg.key.participant || msg.key.remoteJid;
+    // في التفاعلات: participant = رقم هاتف من وضع التفاعل
+    const senderJid = msg.key.participant;
     const acceptorPhone = cleanPhone(senderJid);
-    if (!acceptorPhone) return null;
+    if (!acceptorPhone) {
+      logger.debug('تفاعل بدون participant صالح', { jid: senderJid });
+      return null;
+    }
 
     const quantity = extractQuantity(reactionText);
     const transactionId = uuidv4();
@@ -207,9 +219,15 @@ async function processMessage(msg, sock) {
   const text = whatsapp.extractText(msg);
   if (!text) return null;
 
-  const senderJid = msg.key.participant || msg.key.remoteJid;
+  // في رسائل الجروب: participant = رقم هاتف المرسل
+  // remoteJid = معرف الجروب (ينتهي بـ @g.us) - لا يصلح كرقم هاتف
+  const senderJid = msg.key.participant;
   const senderPhone = cleanPhone(senderJid);
-  if (!senderPhone) return null;
+  // إذا لم يوجد participant صالح → تجاهل الرسالة
+  if (!senderPhone) {
+    logger.debug('تم تجاهل رسالة بدون participant صالح', { jid: senderJid });
+    return null;
+  }
 
   const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
   const isReply = !!contextInfo?.quotedMessage;
