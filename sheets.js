@@ -172,11 +172,17 @@ async function recordTransaction(transaction) {
 
 /**
  * تحديث رصيد شخص
+ *
+ * هيكل ورقة الأرصدة (A:D):
+ *   A: الاسم (يُدخله المستخدم يدوياً - لا يُعدَّل تلقائياً)
+ *   B: الهاتف
+ *   C: موجب (مجموع ما سلّمه = طلبات صاحب الطلب)
+ *   D: سالب (مجموع ما استلمه = طلبات الكابتن المستلم)
+ *
  * @param {string} phone - رقم الهاتف
- * @param {number} delta - التغيير (+quantity أو -quantity)
- * @param {string} role - الدور (مستلم / مرسل)
+ * @param {number} delta - التغيير: موجب = سلّم، سالب = استلم
  */
-async function updateBalance(phone, delta, role = '') {
+async function updateBalance(phone, delta) {
   if (!isInitialized || !phone) return;
 
   const sheetName = config.sheets.sheetNames.balances;
@@ -184,46 +190,58 @@ async function updateBalance(phone, delta, role = '') {
   try {
     const response = await sheetsApi.spreadsheets.values.get({
       spreadsheetId: config.sheets.spreadsheetId,
-      range: `${sheetName}!A:E`,
+      range: `${sheetName}!A:D`,
     });
 
     const rows = response.data.values || [];
     let found = false;
     let rowIndex = -1;
-    let currentBalance = 0;
-    let currentOps = 0;
+    let currentName = '';
+    let currentPositive = 0; // موجب (سلّم)
+    let currentNegative = 0; // سالب (استلم)
 
+    // البحث عن رقم الهاتف في العمود B
     for (let i = 1; i < rows.length; i++) {
-      if (rows[i][0] === phone) {
+      if (rows[i][1] === phone) {
         found = true;
         rowIndex = i + 1;
-        currentBalance = parseFloat(rows[i][1]) || 0;
-        currentOps = parseInt(rows[i][2]) || 0;
+        currentName = rows[i][0] || '';
+        currentPositive = parseFloat(rows[i][2]) || 0;
+        currentNegative = parseFloat(rows[i][3]) || 0;
         break;
       }
     }
 
-    const newBalance = currentBalance + delta;
-    const newOps = currentOps + 1;
-    const now = new Date().toISOString();
+    let newPositive = currentPositive;
+    let newNegative = currentNegative;
+
+    if (delta > 0) {
+      // سلّم طلبات → موجب يزيد
+      newPositive = currentPositive + delta;
+    } else if (delta < 0) {
+      // استلم طلبات → سالب يزيد
+      newNegative = currentNegative + Math.abs(delta);
+    }
 
     if (found) {
+      // تحديث C و D فقط (الاسم في A يبقى كما هو)
       await sheetsApi.spreadsheets.values.update({
         spreadsheetId: config.sheets.spreadsheetId,
-        range: `${sheetName}!A${rowIndex}:E${rowIndex}`,
+        range: `${sheetName}!C${rowIndex}:D${rowIndex}`,
         valueInputOption: 'RAW',
         requestBody: {
-          values: [[phone, newBalance, newOps, now, role]],
+          values: [[newPositive, newNegative]],
         },
       });
     } else {
+      // إضافة صف جديد: الاسم فارغ (يُدخله المستخدم لاحقاً)
       await sheetsApi.spreadsheets.values.append({
         spreadsheetId: config.sheets.spreadsheetId,
-        range: `${sheetName}!A:E`,
+        range: `${sheetName}!A:D`,
         valueInputOption: 'RAW',
         insertDataOption: 'INSERT_ROWS',
         requestBody: {
-          values: [[phone, delta, 1, now, role]],
+          values: [['', phone, newPositive, newNegative]],
         },
       });
     }
@@ -237,21 +255,21 @@ async function getBalance(phone) {
   try {
     const response = await sheetsApi.spreadsheets.values.get({
       spreadsheetId: config.sheets.spreadsheetId,
-      range: `${config.sheets.sheetNames.balances}!A:E`,
+      range: `${config.sheets.sheetNames.balances}!A:D`,
     });
     const rows = response.data.values || [];
     for (let i = 1; i < rows.length; i++) {
-      if (rows[i][0] === phone) {
+      // الهاتف في عمود B (الفهرس 1)
+      if (rows[i][1] === phone) {
         return {
-          phone: rows[i][0],
-          balance: parseFloat(rows[i][1]) || 0,
-          totalOps: parseInt(rows[i][2]) || 0,
-          lastOperation: rows[i][3] || '',
-          role: rows[i][4] || '',
+          name: rows[i][0] || '',
+          phone: rows[i][1],
+          positive: parseFloat(rows[i][2]) || 0,  // موجب (سلّم)
+          negative: parseFloat(rows[i][3]) || 0,  // سالب (استلم)
         };
       }
     }
-    return { phone, balance: 0, totalOps: 0, lastOperation: '', role: '' };
+    return { name: '', phone, positive: 0, negative: 0 };
   } catch (error) {
     logger.error('فشل جلب الرصيد', { error: error.message });
     return null;
