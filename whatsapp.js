@@ -40,6 +40,8 @@ let sock = null;
 let messageHandler = null;
 let reconnectAttempts = 0;
 let isConnecting = false;
+let qrUpdateCallback = null;
+let qrClearCallback = null;
 
 /**
  * تعيين معالج الرسائل
@@ -94,13 +96,15 @@ async function connect() {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        console.log('\n\n');
-        console.log('========================================');
-        console.log('  📱 امسح رمز QR التالي بواتساب');
+        console.log('\n========================================');
+        console.log('  📱 امسح رمز QR بواتساب');
         console.log('========================================');
         qrcode.generate(qr, { small: true });
         console.log('========================================');
-        console.log('\n\n');
+        console.log('🌐 أو افتح رابط البوت في المتصفح لمسح QR كصورة');
+        console.log('\n');
+        // إرسال QR للخادم
+        if (qrUpdateCallback) qrUpdateCallback(qr);
       }
 
       if (connection === 'close') {
@@ -145,6 +149,8 @@ async function connect() {
         isConnecting = false;
         logger.info('✅ تم الاتصال بواتساب بنجاح!');
         logger.info(`📦 حجم tamCache: ${tamCache.size} رسالة محفوظة`);
+        // مسح QR من الخادم (لم يعد مطلوباً)
+        if (qrClearCallback) qrClearCallback();
         listGroups();
       }
     });
@@ -340,6 +346,14 @@ function getCacheStats() {
   };
 }
 
+/**
+ * تعيين callback لتحديث QR في الخادم
+ */
+function onQRUpdate(updateFn, clearFn) {
+  qrUpdateCallback = updateFn;
+  qrClearCallback = clearFn;
+}
+
 module.exports = {
   connect,
   setMessageHandler,
@@ -353,4 +367,5 @@ module.exports = {
   getReactionTargetId,
   getSenderJid,
   getCachedMessage,
+  onQRUpdate,
 };

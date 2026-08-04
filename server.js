@@ -17,11 +17,57 @@
  *    → يُخصم فوراً من استلام الكابتن
  */
 
+const http = require('http');
+const QRCode = require('qrcode');
 const config = require('./config');
 const logger = require('./logger');
 const whatsapp = require('./whatsapp');
 const parser = require('./parser');
 const sheets = require('./sheets');
+
+// ====================================================
+// خادم ويب بسيط لعرض QR كصفحة
+// ====================================================
+let currentQR = null;
+
+const httpServer = http.createServer(async (req, res) => {
+  if (req.url === '/' || req.url === '/qr') {
+    if (!currentQR) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<html><body style="background:#000;color:#0f0;font-size:24px;text-align:center;padding:50px;"><h1>✅ البوت متصل بواتساب بنجاح!</h1><p>لا حاجة لمسح QR</p></body></html>');
+      return;
+    }
+    try {
+      const qrImage = await QRCode.toDataURL(currentQR, { width: 400 });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<html><body style="background:#000;text-align:center;padding:30px;">
+        <h1 style="color:#fff;">📱 امسح رمز QR بواتساب</h1>
+        <img src="${qrImage}" style="width:400px;height:400px;border:10px solid #fff;border-radius:10px;" />
+        <p style="color:#ff0;font-size:18px;">الرمز يتغير كل 20 ثانية - حدّث الصفحة إذا انتهت صلاحيته</p>
+        <script>setTimeout(()=>location.reload(), 20000);</script>
+      </body></html>`);
+    } catch (e) {
+      res.writeHead(500);
+      res.end('Error generating QR');
+    }
+  } else {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('AbuSaif Bot Running');
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+httpServer.listen(PORT, () => {
+  logger.info(`🌐 خادم QR يعمل على البورت ${PORT}`);
+});
+
+// دالة لتحديث QR الحالي
+function setCurrentQR(qr) {
+  currentQR = qr;
+}
+function clearCurrentQR() {
+  currentQR = null;
+}
 
 // ====================================================
 // دالة مساعدة: البحث عن رقم الكابتن بكل الطرق المتاحة
@@ -202,7 +248,10 @@ async function start() {
     }
   });
 
-  // 3. الاتصال بواتساب
+  // 3. ربط QR بالخادم
+  whatsapp.onQRUpdate(setCurrentQR, clearCurrentQR);
+
+  // 4. الاتصال بواتساب
   try {
     await whatsapp.connect();
     logger.info('جاري الاتصال بواتساب...');
