@@ -318,6 +318,118 @@ async function updateTotals(phone, delta) {
   }
 }
 
+/**
+ * تسجيل انتاج للمنتج (من وضع الإيموجي)
+ * يزيد عمود B (الانتاج) في ورقة الإجمالي
+ */
+async function updateTotalsProduction(phone, quantity) {
+  if (!isInitialized || !phone) return;
+
+  const sheetName = config.sheets.sheetNames.totals;
+
+  try {
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId: config.sheets.spreadsheetId,
+      range: `${sheetName}!A:C`,
+    });
+
+    const rows = response.data.values || [];
+    let found = false;
+    let rowIndex = -1;
+    let currentProduction = 0;
+    let currentReception = 0;
+
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][0] === phone) {
+        found = true;
+        rowIndex = i + 1;
+        currentProduction = parseFloat(rows[i][1]) || 0;
+        currentReception = parseFloat(rows[i][2]) || 0;
+        break;
+      }
+    }
+
+    const newProduction = currentProduction + quantity;
+
+    if (found) {
+      await sheetsApi.spreadsheets.values.update({
+        spreadsheetId: config.sheets.spreadsheetId,
+        range: `${sheetName}!B${rowIndex}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[newProduction]] },
+      });
+    } else {
+      await sheetsApi.spreadsheets.values.append({
+        spreadsheetId: config.sheets.spreadsheetId,
+        range: `${sheetName}!A:C`,
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: [[phone, newProduction, 0]] },
+      });
+    }
+
+    logger.debug('تم تسجيل انتاج', { phone, quantity, newProduction });
+  } catch (error) {
+    logger.warn('فشل تسجيل الانتاج', { error: error.message, phone });
+  }
+}
+
+/**
+ * تسجيل استلام للكابتن (من كتب "تم")
+ * يزيد عمود C (الاستلام) في ورقة الإجمالي
+ */
+async function updateTotalsReception(phone, quantity) {
+  if (!isInitialized || !phone) return;
+
+  const sheetName = config.sheets.sheetNames.totals;
+
+  try {
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId: config.sheets.spreadsheetId,
+      range: `${sheetName}!A:C`,
+    });
+
+    const rows = response.data.values || [];
+    let found = false;
+    let rowIndex = -1;
+    let currentProduction = 0;
+    let currentReception = 0;
+
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][0] === phone) {
+        found = true;
+        rowIndex = i + 1;
+        currentProduction = parseFloat(rows[i][1]) || 0;
+        currentReception = parseFloat(rows[i][2]) || 0;
+        break;
+      }
+    }
+
+    const newReception = currentReception + quantity;
+
+    if (found) {
+      await sheetsApi.spreadsheets.values.update({
+        spreadsheetId: config.sheets.spreadsheetId,
+        range: `${sheetName}!C${rowIndex}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[newReception]] },
+      });
+    } else {
+      await sheetsApi.spreadsheets.values.append({
+        spreadsheetId: config.sheets.spreadsheetId,
+        range: `${sheetName}!A:C`,
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: [[phone, 0, newReception]] },
+      });
+    }
+
+    logger.debug('تم تسجيل استلام', { phone, quantity, newReception });
+  } catch (error) {
+    logger.warn('فشل تسجيل الاستلام', { error: error.message, phone });
+  }
+}
+
 async function getBalance(phone) {
   if (!isInitialized) return null;
   try {
@@ -449,6 +561,8 @@ module.exports = {
   updateOrderStatus,
   updateBalance,
   updateTotals,
+  updateTotalsProduction,
+  updateTotalsReception,
   getBalance,
   getOrderOwnerByMessageId,
 };

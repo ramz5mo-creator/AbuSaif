@@ -36,33 +36,22 @@ async function start() {
 
     // ====================================================
     // حالة 1: تفاعل (reaction) مثل 👍 / 2️⃣ / 3️⃣
+    // المنتج (صاحب الطلب) يضع الإيموجي → يُسجّل له "انتاج"
     // ====================================================
     if (whatsapp.isReaction(msg)) {
       const result = await parser.processMessage(msg, sock);
       if (result && result.type === 'accept') {
         try {
-          // إذا كان صاحب الطلب غير معروف (الكاش فارغ) → ابحث في الجدول
-          if (!result.orderOwnerPhone && result.quotedMessageId) {
-            const ownerFromSheet = await sheets.getOrderOwnerByMessageId(result.quotedMessageId);
-            if (ownerFromSheet) {
-              result.orderOwnerPhone = ownerFromSheet;
-              result.quotedPhone = ownerFromSheet;
-              logger.info('📋 وجدنا صاحب الطلب من الجدول (تفاعل)', { owner: ownerFromSheet });
-            }
-          }
+          // من وضع الإيموجي = المنتج → يُسجّل له انتاج
+          const producerPhone = result.phone; // من وضع الإيموجي
+          const quantity = result.quantity;
 
-          await sheets.recordTransaction(result);
-          if (result.quotedMessageId) {
-            await sheets.updateOrderStatus(
-              result.quotedMessageId,
-              result.phone,
-              result.quantity
-            );
-          }
-          logger.info('✅ تفاعل استلام مسجّل', {
-            phone: result.phone,
-            owner: result.quotedPhone || 'غير معروف',
-            qty: result.quantity,
+          // تسجيل الانتاج للمنتج
+          await sheets.updateTotalsProduction(producerPhone, quantity);
+
+          logger.info('✅ تفاعل انتاج مسجّل', {
+            producer: producerPhone,
+            qty: quantity,
           });
         } catch (error) {
           logger.error('❌ فشل تسجيل التفاعل', { error: error.message });
@@ -90,25 +79,17 @@ async function start() {
       }
 
     } else if (result.type === 'accept') {
-      // رد استلام → سجّله في سجل الحركات وحدّث الأرصدة
-      // المستلم (phone) → -quantity
-      // صاحب الطلب (quotedPhone) → +quantity
+      // رد بـ "تم" → الكابتن استلم → يُسجّل له "استلام" فقط
       try {
-        // إذا كان صاحب الطلب غير معروف (الكاش فارغ أو LID) → ابحث في الجدول
-        if (!result.orderOwnerPhone && result.quotedMessageId) {
-          const ownerFromSheet = await sheets.getOrderOwnerByMessageId(result.quotedMessageId);
-          if (ownerFromSheet) {
-            result.orderOwnerPhone = ownerFromSheet;
-            result.quotedPhone = ownerFromSheet;
-            logger.info('📋 وجدنا صاحب الطلب من الجدول (رد)', { owner: ownerFromSheet });
-          }
-        }
+        const captainPhone = result.phone; // من كتب "تم"
+        const quantity = result.quantity || 1;
 
-        await sheets.recordTransaction(result);
-        logger.info('✅ استلام مسجّل', {
-          phone: result.phone,
-          owner: result.quotedPhone || 'غير معروف',
-          qty: result.quantity,
+        // تسجيل الاستلام للكابتن
+        await sheets.updateTotalsReception(captainPhone, quantity);
+
+        logger.info('✅ استلام مسجّل (تم)', {
+          captain: captainPhone,
+          qty: quantity,
         });
       } catch (error) {
         logger.error('❌ فشل تسجيل الاستلام', { error: error.message });
