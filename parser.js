@@ -6,16 +6,9 @@
  * 2. ردود الاستلام نصية (type: 'accept')
  * 3. تفاعلات الاستلام 👍/2️⃣/3️⃣ (type: 'accept')
  *
- * القواعد:
- * - يعتمد على رقم الهاتف وليس الاسم
- * - كل عملية لها معرف فريد (UUID) لمنع التكرار
- * - لا تُحتسب العملية إلا مرة واحدة
- * - كلمة الاستلام يجب أن تكون ردًا على رسالة الطلب
- *   أو تفاعلاً (reaction) على رسالة الطلب
- *
  * منطق الرصيد:
- * - صاحب الطلب (quotedPhone) → +quantity (سلّم طلبات)
- * - المستلم (phone) → -quantity (استلم طلبات)
+ * - صاحب الطلب (orderOwnerPhone) → +quantity (سلّم طلبات → رصيده يزيد)
+ * - المستلم (acceptorPhone) → -quantity (استلم طلبات → رصيده يقل)
  */
 
 const { v4: uuidv4 } = require('uuid');
@@ -29,9 +22,6 @@ const processedIds = new Set();
 // كلمات الاستلام (تُحدّث من Google Sheets)
 let acceptWords = [...config.defaultAcceptWords];
 
-/**
- * تحديث كلمات الاستلام
- */
 function updateAcceptWords(words) {
   if (Array.isArray(words) && words.length > 0) {
     acceptWords = words.map((w) => w.trim().toLowerCase());
@@ -39,59 +29,47 @@ function updateAcceptWords(words) {
   }
 }
 
-/**
- * الحصول على كلمات الاستلام الحالية
- */
 function getAcceptWords() {
   return [...acceptWords];
 }
 
 /**
- * تنظيف رقم الهاتف
- * يزيل @s.whatsapp.net أو @g.us
- * ويزيل الصفر الزائد في البداية إن وجد
- * مثال: 10934600585724 → 934600585724
- *        962791234567  → 962791234567 (يبقى كما هو)
+ * تنظيف رقم الهاتف من واتساب
+ * واتساب يرسل الأرقام بصيغ مختلفة:
+ *   - 966501234567@s.whatsapp.net  → 966501234567
+ *   - 109346058985724@s.whatsapp.net → يحتوي على رقم زائد في البداية
+ *
+ * نحذف كل شيء بعد @ ثم نحتفظ بالأرقام فقط.
+ * إذا كان الطول > 13 رقم، نحذف الرقم الأول (encoding artifact).
  */
-function cleanPhone(participant) {
-  if (!participant) return null;
-  let phone = participant.replace(/@.*$/, '').trim();
+function cleanPhone(jid) {
+  if (!jid) return null;
+
+  // إزالة الجزء بعد @
+  let phone = jid.split('@')[0].trim();
 
   // إزالة أي حروف غير رقمية
   phone = phone.replace(/\D/g, '');
 
-  // بعض أرقام واتساب تبدأ بـ 1 زائد (مشكلة encoding)
-  // مثل: 10934600585724 → يجب أن يكون 934600585724
-  // نتحقق: إذا كان الرقم يبدأ بـ 1 وطوله 14 رقم → احذف الـ 1
-  // (أرقام الهاتف العادية 12-13 رقم مع رمز الدولة)
-  if (phone.length === 14 && phone.startsWith('1')) {
-    const withoutLeadingOne = phone.substring(1);
-    // تحقق أن الرقم الناتج منطقي (يبدأ برمز دولة معروف)
-    if (/^(9[0-9]{2}|2[0-9]{2}|3[0-9]{2}|4[0-9]{2}|5[0-9]{2}|6[0-9]{2}|7[0-9]{2}|8[0-9]{2})/.test(withoutLeadingOne)) {
-      phone = withoutLeadingOne;
-    }
+  if (!phone) return null;
+
+  // أرقام الهاتف مع رمز الدولة عادةً 11-13 رقم
+  // إذا كان أطول من 13 رقم → احذف الرقم الأول
+  if (phone.length > 13) {
+    phone = phone.substring(1);
   }
 
-  return phone || null;
+  return phone;
 }
 
 /**
  * تحويل إيموجيات الأرقام إلى أرقام
- * مثل: 2️⃣ → 2, 1️⃣5️⃣ → 15
  */
 function emojiToNumber(text) {
   const emojiMap = {
-    '0️⃣': '0',
-    '1️⃣': '1',
-    '2️⃣': '2',
-    '3️⃣': '3',
-    '4️⃣': '4',
-    '5️⃣': '5',
-    '6️⃣': '6',
-    '7️⃣': '7',
-    '8️⃣': '8',
-    '9️⃣': '9',
-    '🔟': '10',
+    '0️⃣': '0', '1️⃣': '1', '2️⃣': '2', '3️⃣': '3',
+    '4️⃣': '4', '5️⃣': '5', '6️⃣': '6', '7️⃣': '7',
+    '8️⃣': '8', '9️⃣': '9', '🔟': '10',
   };
 
   let result = text;
@@ -105,34 +83,20 @@ function emojiToNumber(text) {
 
 /**
  * استخراج الكمية من النص
- * - 👍 = 1
- * - إيموجي رقم (2️⃣) = الرقم نفسه
- * - رقم عادي = الرقم نفسه
- * - لا شيء = 1
  */
 function extractQuantity(text) {
   if (!text) return 1;
-
   const cleaned = text.trim();
 
-  // 👍 = 1
-  if (cleaned === '👍' || cleaned.includes('👍')) {
-    return 1;
-  }
+  if (cleaned === '👍' || cleaned.includes('👍')) return 1;
 
-  // البحث عن إيموجيات أرقام أولاً (مثل 2️⃣ أو 3️⃣)
   const emojiNum = emojiToNumber(cleaned);
-  if (emojiNum !== null && emojiNum > 0) {
-    return emojiNum;
-  }
+  if (emojiNum !== null && emojiNum > 0) return emojiNum;
 
-  // البحث عن أرقام عادية
   const numberMatch = cleaned.match(/(\d+)/);
   if (numberMatch) {
     const num = parseInt(numberMatch[1], 10);
-    if (num > 0 && num <= 9999) {
-      return num;
-    }
+    if (num > 0 && num <= 9999) return num;
   }
 
   return 1;
@@ -155,23 +119,15 @@ function isAcceptMessage(text) {
     }
   }
 
-  // 👍 وحده = استلام
-  if (cleaned === '👍') {
-    return true;
-  }
+  if (cleaned === '👍') return true;
 
-  // إيموجيات الأرقام وحدها = استلام (2️⃣ أو 3️⃣ ...)
+  // إيموجيات أرقام وحدها (2️⃣ أو 3️⃣ ...)
   const emojiOnlyPattern = /^[\s0️⃣1️⃣2️⃣3️⃣4️⃣5️⃣6️⃣7️⃣8️⃣9️⃣🔟]+$/u;
-  if (emojiOnlyPattern.test(cleaned)) {
-    return true;
-  }
+  if (emojiOnlyPattern.test(cleaned)) return true;
 
   return false;
 }
 
-/**
- * منع التكرار - تنظيف المعرفات القديمة
- */
 function addProcessedId(id) {
   processedIds.add(id);
   if (processedIds.size > 10000) {
@@ -184,16 +140,10 @@ function addProcessedId(id) {
 
 /**
  * معالجة رسالة واحدة
- * @param {object} msg - كائن الرسالة من Baileys
- * @param {object} sock - كائن الاتصال
- * @returns {object|null}
  */
 async function processMessage(msg, sock) {
   const messageId = msg.key.id;
-
-  if (processedIds.has(messageId)) {
-    return null;
-  }
+  if (processedIds.has(messageId)) return null;
 
   // ====================================================
   // حالة 1: تفاعل (reaction) مثل 👍 أو 2️⃣ أو 3️⃣
@@ -202,43 +152,45 @@ async function processMessage(msg, sock) {
     const reactionText = msg.message.reactionMessage.text;
     const targetMessageId = whatsapp.getReactionTargetId(msg);
 
-    // التحقق من أن التفاعل هو كمية (👍 أو إيموجي رقم)
+    // فقط التفاعلات الكمية (👍 أو إيموجي رقم)
     const isQuantityReaction =
       reactionText === '👍' ||
       /^[\s0️⃣1️⃣2️⃣3️⃣4️⃣5️⃣6️⃣7️⃣8️⃣9️⃣🔟]+$/u.test(reactionText);
 
-    if (!isQuantityReaction) {
-      return null;
-    }
+    if (!isQuantityReaction) return null;
 
-    const sender = msg.key.participant || msg.key.remoteJid;
-    const phone = cleanPhone(sender);
-    if (!phone) return null;
+    const senderJid = msg.key.participant || msg.key.remoteJid;
+    const acceptorPhone = cleanPhone(senderJid);
+    if (!acceptorPhone) return null;
 
     const quantity = extractQuantity(reactionText);
     const transactionId = uuidv4();
     addProcessedId(messageId);
 
-    // نحاول جلب بيانات الرسالة الأصلية من الكاش
+    // جلب بيانات الرسالة الأصلية (صاحب الطلب)
     const originalMsg = whatsapp.getCachedMessage(targetMessageId);
-    const quotedSender = originalMsg?.key?.participant || originalMsg?.key?.remoteJid;
-    const quotedPhone = cleanPhone(quotedSender);
+    const ownerJid = originalMsg?.key?.participant || originalMsg?.key?.remoteJid;
+    const orderOwnerPhone = cleanPhone(ownerJid);
     const quotedText = whatsapp.extractText(originalMsg) || '';
 
-    logger.info('🎯 تفاعل استلام جديد', {
-      transactionId: transactionId.substring(0, 8),
-      acceptor: phone,
-      orderOwner: quotedPhone,
+    logger.info('🎯 تفاعل استلام', {
+      id: transactionId.substring(0, 8),
+      acceptor: acceptorPhone,
+      owner: orderOwnerPhone,
       reaction: reactionText,
-      quantity,
+      qty: quantity,
     });
 
     return {
       transactionId,
       messageId,
       type: 'accept',
-      phone,                              // المستلم (الكابتن) → رصيده يقل
-      quotedPhone: quotedPhone || '',     // صاحب الطلب → رصيده يزيد
+      // المستلم (الكابتن الذي وضع التفاعل) → رصيده يقل
+      phone: acceptorPhone,
+      acceptorPhone,
+      // صاحب الطلب → رصيده يزيد
+      quotedPhone: orderOwnerPhone || '',
+      orderOwnerPhone: orderOwnerPhone || '',
       quantity,
       text: reactionText,
       quotedText: quotedText.substring(0, 200),
@@ -255,9 +207,9 @@ async function processMessage(msg, sock) {
   const text = whatsapp.extractText(msg);
   if (!text) return null;
 
-  const sender = msg.key.participant || msg.key.remoteJid;
-  const phone = cleanPhone(sender);
-  if (!phone) return null;
+  const senderJid = msg.key.participant || msg.key.remoteJid;
+  const senderPhone = cleanPhone(senderJid);
+  if (!senderPhone) return null;
 
   const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
   const isReply = !!contextInfo?.quotedMessage;
@@ -270,7 +222,7 @@ async function processMessage(msg, sock) {
     return {
       type: 'order',
       messageId,
-      phone,
+      phone: senderPhone,
       text: text.substring(0, 500),
       timestamp: new Date().toISOString(),
       groupId: msg.key.remoteJid,
@@ -281,13 +233,12 @@ async function processMessage(msg, sock) {
   // حالة 2ب: رد على رسالة → تحقق من كلمة الاستلام
   // ====================================================
   if (!isAcceptMessage(text)) {
-    logger.debug('رد لكن ليس استلاماً', { phone, text: text.substring(0, 30) });
+    logger.debug('رد لكن ليس استلاماً', { phone: senderPhone, text: text.substring(0, 30) });
     return null;
   }
 
-  // استخراج بيانات الرسالة المرد عليها
-  const quotedParticipant = contextInfo?.participant;
-  const quotedPhone = cleanPhone(quotedParticipant);
+  const quotedOwnerJid = contextInfo?.participant;
+  const orderOwnerPhone = cleanPhone(quotedOwnerJid);
   const quotedText =
     contextInfo?.quotedMessage?.conversation ||
     contextInfo?.quotedMessage?.extendedTextMessage?.text ||
@@ -295,26 +246,29 @@ async function processMessage(msg, sock) {
     '';
   const quotedMessageId = contextInfo?.stanzaId || '';
 
-  // استخراج الكمية من نص الرد
   const textAfterWord = text.replace(/^(تم|هات|تن|اوك)\s*/i, '').trim();
   const quantity = extractQuantity(textAfterWord || text);
 
   const transactionId = uuidv4();
   addProcessedId(messageId);
 
-  logger.info('🎯 رد استلام جديد', {
-    transactionId: transactionId.substring(0, 8),
-    acceptor: phone,
-    orderOwner: quotedPhone,
-    quantity,
+  logger.info('🎯 رد استلام', {
+    id: transactionId.substring(0, 8),
+    acceptor: senderPhone,
+    owner: orderOwnerPhone,
+    qty: quantity,
   });
 
   return {
     transactionId,
     messageId,
     type: 'accept',
-    phone,                              // المستلم (الكابتن) → رصيده يقل
-    quotedPhone: quotedPhone || '',     // صاحب الطلب → رصيده يزيد
+    // المستلم (الكابتن الذي رد) → رصيده يقل
+    phone: senderPhone,
+    acceptorPhone: senderPhone,
+    // صاحب الطلب → رصيده يزيد
+    quotedPhone: orderOwnerPhone || '',
+    orderOwnerPhone: orderOwnerPhone || '',
     quantity,
     text,
     quotedText: quotedText.substring(0, 200),
