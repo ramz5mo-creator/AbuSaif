@@ -42,15 +42,29 @@ async function start() {
       const result = await parser.processMessage(msg, sock);
       if (result && result.type === 'accept') {
         try {
-          // من وضع الإيموجي = المنتج → يُسجّل له انتاج
-          const producerPhone = result.phone; // من وضع الإيموجي
+          const producerPhone = result.phone;       // من وضع الإيموجي = المنتج
           const quantity = result.quantity;
+
+          // إذا كان صاحب رسالة "تم" غير معروف (الكاش فارغ) → ابحث في الجدول
+          let captainPhone = result.orderOwnerPhone || result.quotedPhone || '';
+          if (!captainPhone && result.quotedMessageId) {
+            captainPhone = await sheets.getOrderOwnerByMessageId(result.quotedMessageId) || '';
+            if (captainPhone) {
+              logger.info('📋 وجدنا الكابتن من الجدول', { captain: captainPhone });
+            }
+          }
 
           // تسجيل الانتاج للمنتج
           await sheets.updateTotalsProduction(producerPhone, quantity);
 
-          logger.info('✅ تفاعل انتاج مسجّل', {
+          // تسجيل الاستلام للكابتن (صاحب رسالة "تم")
+          if (captainPhone) {
+            await sheets.updateTotalsReception(captainPhone, quantity);
+          }
+
+          logger.info('✅ تفاعل مسجّل', {
             producer: producerPhone,
+            captain: captainPhone || 'غير معروف',
             qty: quantity,
           });
         } catch (error) {
@@ -79,34 +93,11 @@ async function start() {
       }
 
     } else if (result.type === 'accept') {
-      // رد بـ "تم" → الكابتن استلم → يُسجّل له "استلام" فقط
-      try {
-        const captainPhone = result.phone; // من كتب "تم"
-        const quantity = result.quantity || 1;
-
-        // تسجيل الاستلام للكابتن
-        await sheets.updateTotalsReception(captainPhone, quantity);
-
-        logger.info('✅ استلام مسجّل (تم)', {
-          captain: captainPhone,
-          qty: quantity,
-        });
-      } catch (error) {
-        logger.error('❌ فشل تسجيل الاستلام', { error: error.message });
-      }
-
-      // تحديث حالة الطلب الأصلي في ورقة الطلبات
-      if (result.quotedMessageId) {
-        try {
-          await sheets.updateOrderStatus(
-            result.quotedMessageId,
-            result.phone,
-            result.quantity
-          );
-        } catch (error) {
-          logger.warn('فشل تحديث حالة الطلب', { error: error.message });
-        }
-      }
+      // رد بـ "تم" → لا يُسجّل شيء في الإجمالي
+      // التسجيل يحدث فقط عند وضع المنتج الإيموجي على رسالة "تم"
+      logger.debug('تم تجاهل رسالة "تم" - التسجيل يكون عند وضع الإيموجي', {
+        phone: result.phone,
+      });
     }
   });
 
