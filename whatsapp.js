@@ -170,6 +170,22 @@ function extractText(msg) {
 }
 
 /**
+ * استخراج نوع الرسالة
+ * @returns {'text'|'audio'|'image'|'video'|'sticker'|'other'}
+ */
+function getMessageType(msg) {
+  if (!msg?.message) return 'other';
+  const m = msg.message;
+  if (m.conversation || m.extendedTextMessage) return 'text';
+  if (m.audioMessage) return 'audio';
+  if (m.imageMessage) return 'image';
+  if (m.videoMessage) return 'video';
+  if (m.stickerMessage) return 'sticker';
+  if (m.documentMessage) return 'document';
+  return 'other';
+}
+
+/**
  * التحقق مما إذا كانت الرسالة تفاعلاً (reaction)
  */
 function isReaction(msg) {
@@ -276,6 +292,7 @@ module.exports = {
   setMessageHandler,
   getSocket,
   extractText,
+  getMessageType,
   isReaction,
   getReactionTargetId,
   getSenderJid,

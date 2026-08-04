@@ -41,6 +41,16 @@ async function start() {
       const result = await parser.processMessage(msg, sock);
       if (result && result.type === 'accept') {
         try {
+          // إذا كان صاحب الطلب غير معروف (الكاش فارغ) → ابحث في الجدول
+          if (!result.orderOwnerPhone && result.quotedMessageId) {
+            const ownerFromSheet = await sheets.getOrderOwnerByMessageId(result.quotedMessageId);
+            if (ownerFromSheet) {
+              result.orderOwnerPhone = ownerFromSheet;
+              result.quotedPhone = ownerFromSheet;
+              logger.info('📋 وجدنا صاحب الطلب من الجدول (تفاعل)', { owner: ownerFromSheet });
+            }
+          }
+
           await sheets.recordTransaction(result);
           if (result.quotedMessageId) {
             await sheets.updateOrderStatus(
@@ -51,7 +61,7 @@ async function start() {
           }
           logger.info('✅ تفاعل استلام مسجّل', {
             phone: result.phone,
-            owner: result.quotedPhone,
+            owner: result.quotedPhone || 'غير معروف',
             qty: result.quantity,
           });
         } catch (error) {
@@ -84,10 +94,20 @@ async function start() {
       // المستلم (phone) → -quantity
       // صاحب الطلب (quotedPhone) → +quantity
       try {
+        // إذا كان صاحب الطلب غير معروف (الكاش فارغ أو LID) → ابحث في الجدول
+        if (!result.orderOwnerPhone && result.quotedMessageId) {
+          const ownerFromSheet = await sheets.getOrderOwnerByMessageId(result.quotedMessageId);
+          if (ownerFromSheet) {
+            result.orderOwnerPhone = ownerFromSheet;
+            result.quotedPhone = ownerFromSheet;
+            logger.info('📋 وجدنا صاحب الطلب من الجدول (رد)', { owner: ownerFromSheet });
+          }
+        }
+
         await sheets.recordTransaction(result);
         logger.info('✅ استلام مسجّل', {
           phone: result.phone,
-          owner: result.quotedPhone,
+          owner: result.quotedPhone || 'غير معروف',
           qty: result.quantity,
         });
       } catch (error) {

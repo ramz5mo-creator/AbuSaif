@@ -287,10 +287,8 @@ async function processMessage(msg, sock) {
   }
 
   // ====================================================
-  // حالة 2: رسالة نصية
+  // حالة 2: رسالة نصية أو صوتية أو مرئية
   // ====================================================
-  const text = whatsapp.extractText(msg);
-  if (!text) return null;
 
   // استخراج رقم هاتف المرسل
   const senderJid = whatsapp.getSenderJid(msg);
@@ -304,23 +302,38 @@ async function processMessage(msg, sock) {
     return null;
   }
 
+  // التحقق من نوع الرسالة
+  const text = whatsapp.extractText(msg);
+  const msgType = whatsapp.getMessageType(msg); // 'text' | 'audio' | 'image' | 'video' | 'other'
+
+  // التحقق من الرد (contextInfo موجود في الرسائل النصية فقط)
   const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
   const isReply = !!contextInfo?.quotedMessage;
 
   // ====================================================
   // حالة 2أ: رسالة أصلية (ليست ردًا) → طلب
+  // تشمل: نصية وصوتية ومرئية
   // ====================================================
   if (!isReply) {
+    // الرسائل الصوتية والمرئية ليس لها نص - نسجلها كطلب
+    if (!text && msgType === 'other') {
+      // رسالة غير معروفة - تجاهل
+      return null;
+    }
+
     addProcessedId(messageId);
     return {
       type: 'order',
       messageId,
       phone: senderPhone,
-      text: text.substring(0, 500),
+      text: text ? text.substring(0, 500) : `[رسالة ${msgType}]`,
       timestamp: new Date().toISOString(),
       groupId: msg.key.remoteJid,
     };
   }
+
+  // إذا لم يكن هناك نص في الرد → تجاهل
+  if (!text) return null;
 
   // ====================================================
   // حالة 2ب: رد على رسالة → تحقق من كلمة الاستلام

@@ -384,6 +384,36 @@ async function recordOrder(order) {
   }
 }
 
+/**
+ * البحث عن صاحب الطلب في ورقة الطلبات بواسطة معرف الرسالة
+ * يُستخدم عندما يكون الكاش فارغاً (بعد إعادة الاتصال)
+ */
+async function getOrderOwnerByMessageId(messageId) {
+  if (!isInitialized || !messageId) return null;
+
+  const sheetName = config.sheets.sheetNames.orders || 'الطلبات';
+  try {
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId: config.sheets.spreadsheetId,
+      range: `${sheetName}!A:G`,
+    });
+    const rows = response.data.values || [];
+    for (let i = 1; i < rows.length; i++) {
+      // معرف الرسالة في العمود G (الفهرس 6)
+      if (rows[i][6] === messageId) {
+        const phone = rows[i][0] || '';
+        logger.debug('✅ وجدنا صاحب الطلب من الجدول', { messageId, phone });
+        return phone || null;
+      }
+    }
+    logger.debug('⚠️ لم نجد صاحب الطلب في الجدول', { messageId });
+    return null;
+  } catch (error) {
+    logger.warn('فشل البحث عن صاحب الطلب', { error: error.message });
+    return null;
+  }
+}
+
 async function updateOrderStatus(quotedMessageId, acceptorPhone, quantity) {
   if (!isInitialized) return;
 
@@ -420,4 +450,5 @@ module.exports = {
   updateBalance,
   updateTotals,
   getBalance,
+  getOrderOwnerByMessageId,
 };
