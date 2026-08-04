@@ -22,7 +22,7 @@
     "nodemon": "^3.1.9"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "author": "AbuSaif",
   "license": "ISC"
