@@ -173,6 +173,8 @@ function extractQuantity(text) {
 
 /**
  * التحقق مما إذا كان النص يحتوي على كلمة استلام
+ * "تم" + أي شيء بعدها = رسالة قبول
+ * مثل: "تم", "تم ثلث", "تم 3", "تم الجامعة", "تم اذا بزبط"
  */
 function isAcceptMessage(text) {
   if (!text) return false;
@@ -182,7 +184,8 @@ function isAcceptMessage(text) {
     if (
       cleaned === word ||
       cleaned.startsWith(word + ' ') ||
-      cleaned.startsWith(word + '\n')
+      cleaned.startsWith(word + '\n') ||
+      cleaned.startsWith(word)
     ) {
       return true;
     }
@@ -315,13 +318,40 @@ async function processMessage(msg, sock) {
   const isReply = !!contextInfo?.quotedMessage;
 
   // ====================================================
-  // حالة 2أ: رسالة أصلية (ليست ردًا) → طلب
-  // تشمل: نصية وصوتية ومرئية
+  // حالة 2أ: رسالة أصلية (ليست ردًا)
+  // إذا تبدأ بـ "تم" حتى لو ليست رداً → اعتبرها accept
+  // وإلا → طلب جديد
   // ====================================================
   if (!isReply) {
+    // إذا الرسالة تبدأ بكلمة استلام (تم/هات/تن/اوك) → اعتبرها accept
+    if (text && isAcceptMessage(text)) {
+      const transactionId = uuidv4();
+      addProcessedId(messageId);
+      logger.info('🎯 رسالة تم (بدون رد)', {
+        id: transactionId.substring(0, 8),
+        captain: senderPhone,
+        text: text.substring(0, 30),
+      });
+      return {
+        transactionId,
+        messageId,
+        type: 'accept',
+        phone: senderPhone,
+        acceptorPhone: senderPhone,
+        quotedPhone: '',
+        orderOwnerPhone: '',
+        quantity: 1,
+        text,
+        quotedText: '',
+        quotedMessageId: '',
+        timestamp: new Date().toISOString(),
+        groupId: msg.key.remoteJid,
+        source: 'direct',
+      };
+    }
+
     // الرسائل الصوتية والمرئية ليس لها نص - نسجلها كطلب
     if (!text && msgType === 'other') {
-      // رسالة غير معروفة - تجاهل
       return null;
     }
 
