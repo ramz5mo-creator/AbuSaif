@@ -49,6 +49,9 @@ function cleanPhone(jid) {
   // رفض معرفات الجروب
   if (jid.includes('@g.us')) return null;
 
+  // رفض معرفات LID (ليست أرقام هاتف)
+  if (jid.includes('@lid')) return null;
+
   // إزالة الجزء بعد @
   let phone = jid.split('@')[0].trim();
 
@@ -57,7 +60,8 @@ function cleanPhone(jid) {
 
   if (!phone) return null;
 
-  // أرقام الأردن 12 خانة → احذف من البداية حتى يصبح 12 خانة
+  // أرقام الأردن 12 خانة (962 + 9 أرقام)
+  // إذا كان أطول من 12 → احذف من البداية
   while (phone.length > 12) {
     phone = phone.substring(1);
   }
@@ -248,8 +252,8 @@ async function processMessage(msg, sock) {
     let quotedText = '';
 
     if (originalMsg) {
-      // صاحب الطلب: participant في رسائل الجروب
-      const ownerJid = originalMsg.key.participant;
+      // صاحب الطلب: استخدام getSenderJid للحصول على الرقم الحقيقي
+      const ownerJid = whatsapp.getSenderJid(originalMsg);
       orderOwnerPhone = cleanPhone(ownerJid);
       quotedText = whatsapp.extractText(originalMsg) || '';
     }
@@ -326,7 +330,12 @@ async function processMessage(msg, sock) {
     return null;
   }
 
-  const quotedOwnerJid = contextInfo?.participant;
+  // contextInfo.participant قد يكون LID - نحاول senderPn أولاً
+  const quotedOwnerJid = 
+    contextInfo?.senderPn ||
+    contextInfo?.participantPn ||
+    (contextInfo?.participant?.includes('@s.whatsapp.net') ? contextInfo.participant : null) ||
+    contextInfo?.participant;
   const orderOwnerPhone = cleanPhone(quotedOwnerJid);
   const quotedText =
     contextInfo?.quotedMessage?.conversation ||

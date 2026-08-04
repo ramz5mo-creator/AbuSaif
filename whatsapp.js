@@ -110,6 +110,18 @@ async function connect() {
         }
       }
 
+      // سجل تشخيصي لكل رسالة واردة (لتتبع مشكلة LID)
+      logger.info('📨 رسالة واردة', {
+        id: msg.key.id?.substring(0, 10),
+        remoteJid: msg.key.remoteJid?.substring(0, 20),
+        participant: msg.key.participant || 'N/A',
+        senderPn: msg.key.senderPn || 'N/A',
+        participantPn: msg.key.participantPn || 'N/A',
+        remoteJidAlt: msg.key.remoteJidAlt || 'N/A',
+        isReaction: !!msg.message.reactionMessage,
+        pushName: msg.pushName || 'N/A',
+      });
+
       if (messageHandler) {
         try {
           await messageHandler(msg, sock);
@@ -173,18 +185,57 @@ function getReactionTargetId(msg) {
 
 /**
  * استخراج رقم هاتف المرسل من الرسالة
- * يحاول participant أولاً، ثم يتحقق من remoteJid
+ * 
+ * Baileys 6.7+ يرسل LID (Local ID) في participant بدلاً من رقم الهاتف.
+ * الحقول الموثوقة بالترتيب:
+ *   1. senderPn / participantPn → رقم الهاتف الحقيقي
+ *   2. participant (فقط إذا كان @s.whatsapp.net)
+ *   3. remoteJidAlt (إذا كان @s.whatsapp.net)
  */
 function getSenderJid(msg) {
-  // participant موجود في رسائل الجروب ويحتوي على رقم الهاتف
-  if (msg.key.participant) return msg.key.participant;
+  const key = msg.key || {};
 
-  // في بعض الحالات النادرة participant غائب لكن remoteJid يحتوي على الهاتف
-  // (مثلاً في الرسائل الخاصة أو إصدارات معينة من Baileys)
-  if (msg.key.remoteJid && !msg.key.remoteJid.endsWith('@g.us')) {
-    return msg.key.remoteJid;
+  // الأولوية 1: senderPn (رقم الهاتف الحقيقي - الأكثر موثوقية)
+  if (key.senderPn) {
+    logger.debug('📱 getSenderJid: استخدام senderPn', { senderPn: key.senderPn });
+    return key.senderPn;
   }
 
+  // الأولوية 2: participantPn (رقم المشارك الحقيقي)
+  if (key.participantPn) {
+    logger.debug('📱 getSenderJid: استخدام participantPn', { participantPn: key.participantPn });
+    return key.participantPn;
+  }
+
+  // الأولوية 3: participant فقط إذا كان رقم هاتف حقيقي (@s.whatsapp.net)
+  if (key.participant && key.participant.includes('@s.whatsapp.net')) {
+    logger.debug('📱 getSenderJid: استخدام participant', { participant: key.participant });
+    return key.participant;
+  }
+
+  // الأولوية 4: remoteJidAlt (بديل عن remoteJid)
+  if (key.remoteJidAlt && key.remoteJidAlt.includes('@s.whatsapp.net')) {
+    logger.debug('📱 getSenderJid: استخدام remoteJidAlt', { remoteJidAlt: key.remoteJidAlt });
+    return key.remoteJidAlt;
+  }
+
+  // الأولوية 5: participant حتى لو LID (آخر محاولة)
+  if (key.participant && !key.participant.endsWith('@g.us')) {
+    logger.debug('📱 getSenderJid: استخدام participant (قد يكون LID)', { participant: key.participant });
+    return key.participant;
+  }
+
+  // الأولوية 6: remoteJid (فقط إذا ليس جروب)
+  if (key.remoteJid && !key.remoteJid.endsWith('@g.us')) {
+    return key.remoteJid;
+  }
+
+  logger.warn('⚠️ getSenderJid: لم يُعثر على رقم هاتف', {
+    remoteJid: key.remoteJid,
+    participant: key.participant,
+    senderPn: key.senderPn,
+    participantPn: key.participantPn,
+  });
   return null;
 }
 
