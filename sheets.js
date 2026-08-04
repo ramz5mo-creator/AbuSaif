@@ -1,33 +1,23 @@
 /**
- * sheets.js - ربط Google Sheets
+ * sheets.js - ربط Google Sheets v4
  * ================================
- *
+ * 
  * هيكل الأوراق:
  *
- * ورقة "الاجمالي" (A:C):
- *   A: رقم الهاتف
- *   B: الانتاج (من وضع الإيموجي)
- *   C: الاستلام (من كتب "تم")
+ * ورقة يومية (اسمها = التاريخ مثل "2026-08-04"):
+ *   A: الهاتف
+ *   B: #الانتاج
+ *   C: الاستلام
+ *   (تُنشأ تلقائياً كل يوم)
  *
- * ورقة "الطلبات" (A:G):
- *   A: رقم الهاتف (صاحب الطلب)
- *   B: نص الطلب
- *   C: التاريخ
- *   D: الحالة
- *   E: المستلم
- *   F: الكمية
- *   G: معرف الرسالة
- *
- * ورقة "سجل_تم" (A:C) - جديدة:
+ * ورقة "سجل_تم" (A:C):
  *   A: معرف رسالة "تم"
  *   B: رقم هاتف الكابتن
  *   C: التاريخ
- *   (تُستخدم للاستعادة بعد إعادة الاتصال)
  *
  * ورقة "سجل الحركات" (A:J):
- *   A: معرف العملية، B: التاريخ، C: المستلم، D: المرسل
- *   E: الكمية، F: النوع، G: نص الاستلام، H: نص الطلب
- *   I: معرف الرسالة، J: المصدر
+ *   A: معرف العملية، B: التاريخ، C: المنتج، D: الكابتن
+ *   E: الكمية، F: النوع، G: الإيموجي
  */
 
 const { google } = require('googleapis');
@@ -39,16 +29,20 @@ const parser = require('./parser');
 
 let sheetsApi = null;
 let isInitialized = false;
+let spreadsheetId = '';
 
 const TOKEN_PATH = path.resolve('./token.json');
 const CREDENTIALS_PATH = path.resolve('./oauth-credentials.json');
+
+// كاش لأسماء الأوراق الموجودة (لتجنب إنشاء مكرر)
+const existingSheets = new Set();
 
 // ====================================================
 // تهيئة الاتصال
 // ====================================================
 
 async function initialize() {
-  const spreadsheetId = config.sheets.spreadsheetId;
+  spreadsheetId = config.sheets.spreadsheetId;
   if (!spreadsheetId) throw new Error('لم يتم تحديد معرف الجدول');
 
   if (!fs.existsSync(CREDENTIALS_PATH))
@@ -83,7 +77,14 @@ async function initialize() {
 
   try {
     const response = await sheetsApi.spreadsheets.get({ spreadsheetId });
-    logger.info('تم الاتصال بالجدول', { title: response.data.properties?.title });
+    const title = response.data.properties?.title;
+    // تحميل أسماء الأوراق الموجودة
+    if (response.data.sheets) {
+      for (const sheet of response.data.sheets) {
+        existingSheets.add(sheet.properties.title);
+      }
+    }
+    logger.info('تم الاتصال بالجدول', { title, sheets: existingSheets.size });
     isInitialized = true;
   } catch (error) {
     if (error.code === 401 || error.code === 403)
@@ -96,7 +97,7 @@ async function loadSettings() {
   if (!isInitialized) return;
   try {
     const response = await sheetsApi.spreadsheets.values.get({
-      spreadsheetId: config.sheets.spreadsheetId,
+      spreadsheetId,
       range: `${config.sheets.sheetNames.settings}!A:B`,
     });
     const rows = response.data.values || [];
@@ -112,85 +113,86 @@ async function loadSettings() {
 }
 
 // ====================================================
-// ورقة سجل_تم - حفظ واسترجاع رسائل "تم" بشكل دائم
+// الورقة اليومية — كل يوم ورقة منفصلة
 // ====================================================
 
 /**
- * حفظ رسالة "تم" في Google Sheets (للاستعادة بعد إعادة الاتصال)
- * @param {string} messageId - معرف رسالة "تم"
- * @param {string} captainPhone - رقم هاتف الكابتن
+ * الحصول على اسم الورقة اليومية (التاريخ بتوقيت الأردن)
  */
-async function saveTamToSheet(messageId, captainPhone) {
-  if (!isInitialized || !messageId || !captainPhone) return;
+function getTodaySheetName() {
+  const now = new Date();
+  // توقيت الأردن GMT+3
+  const jordanTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
+  const year = jordanTime.getUTCFullYear();
+  const month = String(jordanTime.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(jordanTime.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
 
-  const sheetName = config.sheets.sheetNames.tamLog || 'سجل_تم';
+/**
+ * إنشاء ورقة يومية جديدة إذا لم تكن موجودة
+ */
+async function ensureDailySheet(sheetName) {
+  if (existingSheets.has(sheetName)) return;
+
   try {
-    await sheetsApi.spreadsheets.values.append({
-      spreadsheetId: config.sheets.spreadsheetId,
-      range: `${sheetName}!A:C`,
-      valueInputOption: 'RAW',
-      insertDataOption: 'INSERT_ROWS',
+    await sheetsApi.spreadsheets.batchUpdate({
+      spreadsheetId,
       requestBody: {
-        values: [[messageId, captainPhone, new Date().toISOString()]],
+        requests: [{
+          addSheet: {
+            properties: {
+              title: sheetName,
+              rightToLeft: true,
+            },
+          },
+        }],
       },
     });
-    logger.debug('💾 حفظ تم في الجدول', { msgId: messageId.substring(0, 10), captain: captainPhone });
-  } catch (error) {
-    // إذا كانت الورقة غير موجودة، نتجاهل الخطأ
-    logger.debug('فشل حفظ تم في الجدول (قد تكون الورقة غير موجودة)', { error: error.message });
-  }
-}
 
-/**
- * البحث عن رقم الكابتن في ورقة سجل_تم
- * يُستخدم كاحتياطي بعد إعادة الاتصال عندما يكون tamCache فارغاً
- * @param {string} messageId - معرف رسالة "تم"
- * @returns {string|null}
- */
-async function getCaptainFromTamSheet(messageId) {
-  if (!isInitialized || !messageId) return null;
-
-  const sheetName = config.sheets.sheetNames.tamLog || 'سجل_تم';
-  try {
-    const response = await sheetsApi.spreadsheets.values.get({
-      spreadsheetId: config.sheets.spreadsheetId,
-      range: `${sheetName}!A:B`,
+    // إضافة الرؤوس
+    await sheetsApi.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${sheetName}'!A1:C1`,
+      valueInputOption: 'RAW',
+      requestBody: {
+        values: [['الهاتف', '#الانتاج', 'الاستلام']],
+      },
     });
-    const rows = response.data.values || [];
-    // البحث من الأحدث للأقدم
-    for (let i = rows.length - 1; i >= 1; i--) {
-      if (rows[i][0] === messageId) {
-        const captain = rows[i][1] || '';
-        if (captain) {
-          logger.info('📋 وجدنا الكابتن من سجل_تم', { msgId: messageId.substring(0, 10), captain });
-          return captain;
-        }
-      }
-    }
-    return null;
+
+    existingSheets.add(sheetName);
+    logger.info(`📄 تم إنشاء ورقة يومية: ${sheetName}`);
   } catch (error) {
-    logger.debug('فشل البحث في سجل_تم', { error: error.message });
-    return null;
+    // إذا كانت موجودة بالفعل (خطأ مكرر)
+    if (error.message?.includes('already exists')) {
+      existingSheets.add(sheetName);
+    } else {
+      logger.error('فشل إنشاء ورقة يومية', { error: error.message, sheetName });
+      throw error;
+    }
   }
 }
 
 // ====================================================
-// ورقة الإجمالي - تسجيل الانتاج والاستلام
+// تسجيل الانتاج والاستلام (في الورقة اليومية)
 // ====================================================
 
 /**
  * تسجيل انتاج للمنتج (من وضع الإيموجي)
- * يزيد عمود B (الانتاج) في ورقة الإجمالي
  */
 async function updateTotalsProduction(phone, quantity) {
-  if (!isInitialized || !phone) return;
+  if (!isInitialized || !phone) {
+    logger.warn('updateTotalsProduction: لا يمكن التسجيل', { initialized: isInitialized, phone });
+    return;
+  }
 
-  const sheetName = config.sheets.sheetNames.totals;
+  const sheetName = getTodaySheetName();
+  await ensureDailySheet(sheetName);
 
   try {
     const response = await sheetsApi.spreadsheets.values.get({
-      spreadsheetId: config.sheets.spreadsheetId,
-      range: `${sheetName}!A:C`,
+      spreadsheetId,
+      range: `'${sheetName}'!A:C`,
     });
 
     const rows = response.data.values || [];
@@ -211,41 +213,44 @@ async function updateTotalsProduction(phone, quantity) {
 
     if (found) {
       await sheetsApi.spreadsheets.values.update({
-        spreadsheetId: config.sheets.spreadsheetId,
-        range: `${sheetName}!B${rowIndex}`,
+        spreadsheetId,
+        range: `'${sheetName}'!B${rowIndex}`,
         valueInputOption: 'RAW',
         requestBody: { values: [[newProduction]] },
       });
     } else {
       await sheetsApi.spreadsheets.values.append({
-        spreadsheetId: config.sheets.spreadsheetId,
-        range: `${sheetName}!A:C`,
+        spreadsheetId,
+        range: `'${sheetName}'!A:C`,
         valueInputOption: 'RAW',
         insertDataOption: 'INSERT_ROWS',
-        requestBody: { values: [[phone, newProduction, 0]] },
+        requestBody: { values: [[phone, quantity, 0]] },
       });
     }
 
-    logger.debug('✅ تم تسجيل انتاج', { phone, qty: quantity, total: newProduction });
+    logger.info(`✅ انتاج: ${phone} +${quantity} = ${newProduction} [${sheetName}]`);
   } catch (error) {
-    logger.warn('فشل تسجيل الانتاج', { error: error.message, phone });
+    logger.error('فشل تسجيل الانتاج', { error: error.message, phone, sheet: sheetName });
     throw error;
   }
 }
 
 /**
  * تسجيل استلام للكابتن (من كتب "تم")
- * يزيد عمود C (الاستلام) في ورقة الإجمالي
  */
 async function updateTotalsReception(phone, quantity) {
-  if (!isInitialized || !phone) return;
+  if (!isInitialized || !phone) {
+    logger.warn('updateTotalsReception: لا يمكن التسجيل', { initialized: isInitialized, phone });
+    return;
+  }
 
-  const sheetName = config.sheets.sheetNames.totals;
+  const sheetName = getTodaySheetName();
+  await ensureDailySheet(sheetName);
 
   try {
     const response = await sheetsApi.spreadsheets.values.get({
-      spreadsheetId: config.sheets.spreadsheetId,
-      range: `${sheetName}!A:C`,
+      spreadsheetId,
+      range: `'${sheetName}'!A:C`,
     });
 
     const rows = response.data.values || [];
@@ -266,246 +271,132 @@ async function updateTotalsReception(phone, quantity) {
 
     if (found) {
       await sheetsApi.spreadsheets.values.update({
-        spreadsheetId: config.sheets.spreadsheetId,
-        range: `${sheetName}!C${rowIndex}`,
+        spreadsheetId,
+        range: `'${sheetName}'!C${rowIndex}`,
         valueInputOption: 'RAW',
         requestBody: { values: [[newReception]] },
       });
     } else {
       await sheetsApi.spreadsheets.values.append({
-        spreadsheetId: config.sheets.spreadsheetId,
-        range: `${sheetName}!A:C`,
+        spreadsheetId,
+        range: `'${sheetName}'!A:C`,
         valueInputOption: 'RAW',
         insertDataOption: 'INSERT_ROWS',
-        requestBody: { values: [[phone, 0, newReception]] },
+        requestBody: { values: [[phone, 0, quantity]] },
       });
     }
 
-    logger.debug('✅ تم تسجيل استلام', { phone, qty: quantity, total: newReception });
+    logger.info(`✅ استلام: ${phone} +${quantity} = ${newReception} [${sheetName}]`);
   } catch (error) {
-    logger.warn('فشل تسجيل الاستلام', { error: error.message, phone });
+    logger.error('فشل تسجيل الاستلام', { error: error.message, phone, sheet: sheetName });
     throw error;
   }
 }
 
 // ====================================================
-// ورقة الطلبات
+// ورقة سجل_تم
 // ====================================================
 
-async function recordOrder(order) {
-  if (!isInitialized) return;
+async function saveTamToSheet(messageId, captainPhone) {
+  if (!isInitialized || !messageId || !captainPhone) return;
 
-  const sheetName = config.sheets.sheetNames.orders || 'الطلبات';
-  const row = [
-    order.phone,
-    order.text,
-    order.timestamp,
-    'جديد',
-    '',
-    '',
-    order.messageId,
-  ];
-
+  const sheetName = config.sheets.sheetNames.tamLog || 'سجل_تم';
   try {
     await sheetsApi.spreadsheets.values.append({
-      spreadsheetId: config.sheets.spreadsheetId,
-      range: `${sheetName}!A:G`,
+      spreadsheetId,
+      range: `'${sheetName}'!A:C`,
       valueInputOption: 'RAW',
       insertDataOption: 'INSERT_ROWS',
-      requestBody: { values: [row] },
+      requestBody: {
+        values: [[messageId, captainPhone, new Date().toISOString()]],
+      },
     });
-    logger.debug('تم تسجيل الطلب', { phone: order.phone });
   } catch (error) {
-    logger.warn('فشل تسجيل الطلب', { error: error.message });
+    logger.debug('فشل حفظ تم', { error: error.message });
   }
 }
 
-/**
- * البحث عن صاحب الطلب في ورقة الطلبات بواسطة معرف الرسالة
- * ملاحظة: هذا يجد صاحب الطلب الأصلي، وليس الكابتن
- */
-async function getOrderOwnerByMessageId(messageId) {
+async function getCaptainFromTamSheet(messageId) {
   if (!isInitialized || !messageId) return null;
 
-  const sheetName = config.sheets.sheetNames.orders || 'الطلبات';
+  const sheetName = config.sheets.sheetNames.tamLog || 'سجل_تم';
   try {
     const response = await sheetsApi.spreadsheets.values.get({
-      spreadsheetId: config.sheets.spreadsheetId,
-      range: `${sheetName}!A:G`,
+      spreadsheetId,
+      range: `'${sheetName}'!A:B`,
     });
     const rows = response.data.values || [];
-    for (let i = 1; i < rows.length; i++) {
-      if (rows[i][6] === messageId) {
-        return rows[i][0] || null;
+    for (let i = rows.length - 1; i >= 1; i--) {
+      if (rows[i][0] === messageId) {
+        return rows[i][1] || null;
       }
     }
     return null;
   } catch (error) {
-    logger.warn('فشل البحث عن صاحب الطلب', { error: error.message });
+    logger.debug('فشل البحث في سجل_تم', { error: error.message });
     return null;
   }
 }
 
 // ====================================================
-// دوال مساعدة قديمة (للتوافق)
+// سجل الحركات (للتتبع والمراجعة)
 // ====================================================
 
 async function recordTransaction(transaction) {
   if (!isInitialized) return;
 
-  const acceptor = transaction.acceptorPhone || transaction.phone || '';
-  const owner = transaction.orderOwnerPhone || transaction.quotedPhone || '';
-
+  const sheetName = config.sheets.sheetNames.transactions || 'سجل الحركات';
   const row = [
-    transaction.transactionId,
-    transaction.timestamp,
-    acceptor,
-    owner,
-    transaction.quantity,
-    transaction.type,
-    transaction.text || '',
-    transaction.quotedText || '',
-    transaction.messageId,
-    transaction.source || 'reply',
+    transaction.transactionId || '',
+    transaction.timestamp || new Date().toISOString(),
+    transaction.producerPhone || transaction.phone || '',
+    transaction.captainPhone || '',
+    transaction.quantity || 1,
+    transaction.type || '',
+    transaction.emoji || '',
   ];
 
   try {
     await sheetsApi.spreadsheets.values.append({
-      spreadsheetId: config.sheets.spreadsheetId,
-      range: `${config.sheets.sheetNames.transactions}!A:J`,
+      spreadsheetId,
+      range: `'${sheetName}'!A:G`,
       valueInputOption: 'RAW',
       insertDataOption: 'INSERT_ROWS',
       requestBody: { values: [row] },
     });
   } catch (error) {
-    logger.error('فشل تسجيل العملية', { error: error.message });
+    logger.debug('فشل تسجيل الحركة', { error: error.message });
   }
 }
 
-async function updateBalance(phone, delta) {
-  if (!isInitialized || !phone) return;
-  const sheetName = config.sheets.sheetNames.balances;
-  try {
-    const response = await sheetsApi.spreadsheets.values.get({
-      spreadsheetId: config.sheets.spreadsheetId,
-      range: `${sheetName}!A:D`,
-    });
-    const rows = response.data.values || [];
-    let found = false;
-    let rowIndex = -1;
-    let currentPositive = 0;
-    let currentNegative = 0;
+// ====================================================
+// دوال مساعدة
+// ====================================================
 
-    for (let i = 1; i < rows.length; i++) {
-      if (rows[i][1] === phone) {
-        found = true;
-        rowIndex = i + 1;
-        currentPositive = parseFloat(rows[i][2]) || 0;
-        currentNegative = parseFloat(rows[i][3]) || 0;
-        break;
-      }
-    }
-
-    let newPositive = currentPositive;
-    let newNegative = currentNegative;
-    if (delta > 0) newPositive = currentPositive + delta;
-    else if (delta < 0) newNegative = currentNegative + Math.abs(delta);
-
-    if (found) {
-      await sheetsApi.spreadsheets.values.update({
-        spreadsheetId: config.sheets.spreadsheetId,
-        range: `${sheetName}!C${rowIndex}:D${rowIndex}`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [[newPositive, newNegative]] },
-      });
-    } else {
-      await sheetsApi.spreadsheets.values.append({
-        spreadsheetId: config.sheets.spreadsheetId,
-        range: `${sheetName}!A:D`,
-        valueInputOption: 'RAW',
-        insertDataOption: 'INSERT_ROWS',
-        requestBody: { values: [['', phone, newPositive, newNegative]] },
-      });
-    }
-  } catch (error) {
-    logger.warn('فشل تحديث الرصيد', { error: error.message, phone });
-  }
-}
-
-async function updateTotals(phone, delta) {
-  if (delta > 0) {
-    await updateTotalsProduction(phone, delta);
-  } else if (delta < 0) {
-    await updateTotalsReception(phone, Math.abs(delta));
-  }
-}
-
-async function getBalance(phone) {
-  if (!isInitialized) return null;
-  try {
-    const response = await sheetsApi.spreadsheets.values.get({
-      spreadsheetId: config.sheets.spreadsheetId,
-      range: `${config.sheets.sheetNames.balances}!A:D`,
-    });
-    const rows = response.data.values || [];
-    for (let i = 1; i < rows.length; i++) {
-      if (rows[i][1] === phone) {
-        return {
-          name: rows[i][0] || '',
-          phone: rows[i][1],
-          positive: parseFloat(rows[i][2]) || 0,
-          negative: parseFloat(rows[i][3]) || 0,
-        };
-      }
-    }
-    return { name: '', phone, positive: 0, negative: 0 };
-  } catch (error) {
-    logger.error('فشل جلب الرصيد', { error: error.message });
-    return null;
-  }
-}
-
-async function updateOrderStatus(quotedMessageId, acceptorPhone, quantity) {
-  if (!isInitialized) return;
-  const sheetName = config.sheets.sheetNames.orders || 'الطلبات';
-  try {
-    const response = await sheetsApi.spreadsheets.values.get({
-      spreadsheetId: config.sheets.spreadsheetId,
-      range: `${sheetName}!A:G`,
-    });
-    const rows = response.data.values || [];
-    for (let i = 1; i < rows.length; i++) {
-      if (rows[i][6] === quotedMessageId) {
-        await sheetsApi.spreadsheets.values.update({
-          spreadsheetId: config.sheets.spreadsheetId,
-          range: `${sheetName}!D${i + 1}:F${i + 1}`,
-          valueInputOption: 'RAW',
-          requestBody: { values: [['مكتمل', acceptorPhone, quantity]] },
-        });
-        break;
-      }
-    }
-  } catch (error) {
-    logger.warn('فشل تحديث حالة الطلب', { error: error.message });
-  }
-}
+async function loadSettings2() { return loadSettings(); }
+async function updateBalance() { /* deprecated */ }
+async function updateTotals() { /* deprecated */ }
+async function getBalance() { return null; }
+async function recordOrder() { /* لم نعد نسجل الطلبات */ }
+async function getOrderOwnerByMessageId() { return null; }
+async function updateOrderStatus() { /* deprecated */ }
 
 module.exports = {
   initialize,
   loadSettings,
-  // ورقة الإجمالي
+  // الورقة اليومية
   updateTotalsProduction,
   updateTotalsReception,
-  // ورقة سجل_تم (جديد)
+  // سجل_تم
   saveTamToSheet,
   getCaptainFromTamSheet,
-  // ورقة الطلبات
-  recordOrder,
-  getOrderOwnerByMessageId,
-  updateOrderStatus,
-  // دوال مساعدة
+  // سجل الحركات
   recordTransaction,
+  // deprecated (للتوافق)
   updateBalance,
   updateTotals,
   getBalance,
+  recordOrder,
+  getOrderOwnerByMessageId,
+  updateOrderStatus,
 };
