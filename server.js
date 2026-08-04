@@ -40,35 +40,61 @@ async function start() {
     // ====================================================
     if (whatsapp.isReaction(msg)) {
       const result = await parser.processMessage(msg, sock);
-      if (result && result.type === 'accept') {
-        try {
-          const producerPhone = result.phone;       // من وضع الإيموجي = المنتج
-          const quantity = result.quantity;
+      if (!result) return;
 
-          // إذا كان صاحب رسالة "تم" غير معروف (الكاش فارغ) → ابحث في الجدول
-          let captainPhone = result.orderOwnerPhone || result.quotedPhone || '';
-          if (!captainPhone && result.quotedMessageId) {
-            captainPhone = await sheets.getOrderOwnerByMessageId(result.quotedMessageId) || '';
-            if (captainPhone) {
-              logger.info('📋 وجدنا الكابتن من الجدول', { captain: captainPhone });
-            }
-          }
+      // إذا كان صاحب رسالة "تم" غير معروف (الكاش فارغ) → ابحث في الجدول
+      let captainPhone = result.orderOwnerPhone || result.quotedPhone || '';
+      if (!captainPhone && result.quotedMessageId) {
+        captainPhone = await sheets.getOrderOwnerByMessageId(result.quotedMessageId) || '';
+        if (captainPhone) {
+          logger.info('📋 وجدنا الكابتن من الجدول', { captain: captainPhone });
+        }
+      }
+
+      if (result.type === 'accept') {
+        // 👍/2️⃣/3️⃣ = انتاج للمنتج + استلام للكابتن
+        try {
+          const producerPhone = result.phone;
+          const quantity = result.quantity;
 
           // تسجيل الانتاج للمنتج
           await sheets.updateTotalsProduction(producerPhone, quantity);
 
-          // تسجيل الاستلام للكابتن (صاحب رسالة "تم")
+          // تسجيل الاستلام للكابتن
           if (captainPhone) {
             await sheets.updateTotalsReception(captainPhone, quantity);
           }
 
-          logger.info('✅ تفاعل مسجّل', {
+          logger.info('✅ تفاعل انتاج مسجّل', {
             producer: producerPhone,
             captain: captainPhone || 'غير معروف',
             qty: quantity,
           });
         } catch (error) {
-          logger.error('❌ فشل تسجيل التفاعل', { error: error.message });
+          logger.error('❌ فشل تسجيل الانتاج', { error: error.message });
+        }
+
+      } else if (result.type === 'cancel') {
+        // ❌ = إلغاء فوري → يخصم من الطرفين
+        try {
+          const producerPhone = result.phone;
+          const quantity = result.quantity;
+
+          // خصم من انتاج المنتج
+          await sheets.updateTotalsProduction(producerPhone, -quantity);
+
+          // خصم من استلام الكابتن
+          if (captainPhone) {
+            await sheets.updateTotalsReception(captainPhone, -quantity);
+          }
+
+          logger.info('❌ إلغاء مسجّل', {
+            producer: producerPhone,
+            captain: captainPhone || 'غير معروف',
+            qty: quantity,
+          });
+        } catch (error) {
+          logger.error('❌ فشل تسجيل الإلغاء', { error: error.message });
         }
       }
       return;

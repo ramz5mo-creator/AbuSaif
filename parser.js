@@ -223,9 +223,12 @@ async function processMessage(msg, sock) {
       jid: msg.key.participant || msg.key.remoteJid,
     });
 
-    // فقط التفاعلات الكمية
-    if (!isQuantityEmoji(reactionText)) {
-      logger.debug('تفاعل غير كمي - تجاهل', { text: reactionText });
+    // ❌ = إلغاء
+    const isCancelEmoji = reactionText && (reactionText.trim() === '❌' || reactionText.trim() === '✖️' || reactionText.trim() === '✖' || reactionText.trim() === '❎');
+
+    // فقط التفاعلات الكمية أو الإلغاء
+    if (!isQuantityEmoji(reactionText) && !isCancelEmoji) {
+      logger.debug('تفاعل غير كمي وغير إلغاء - تجاهل', { text: reactionText });
       return null;
     }
 
@@ -242,23 +245,24 @@ async function processMessage(msg, sock) {
       return null;
     }
 
-    const quantity = extractQuantity(reactionText);
+    const quantity = isCancelEmoji ? 1 : extractQuantity(reactionText);
     const transactionId = uuidv4();
     addProcessedId(messageId);
 
-    // جلب بيانات الرسالة الأصلية (صاحب الطلب)
+    // جلب بيانات الرسالة الأصلية (صاحب رسالة "تم")
     const originalMsg = whatsapp.getCachedMessage(targetMessageId);
     let orderOwnerPhone = null;
     let quotedText = '';
 
     if (originalMsg) {
-      // صاحب الطلب: استخدام getSenderJid للحصول على الرقم الحقيقي
       const ownerJid = whatsapp.getSenderJid(originalMsg);
       orderOwnerPhone = cleanPhone(ownerJid);
       quotedText = whatsapp.extractText(originalMsg) || '';
     }
 
-    logger.info('🎯 تفاعل استلام', {
+    const resultType = isCancelEmoji ? 'cancel' : 'accept';
+
+    logger.info(`🎯 تفاعل ${isCancelEmoji ? 'إلغاء' : 'انتاج'}`, {
       id: transactionId.substring(0, 8),
       acceptor: acceptorPhone,
       owner: orderOwnerPhone || 'غير معروف',
@@ -271,8 +275,8 @@ async function processMessage(msg, sock) {
     return {
       transactionId,
       messageId,
-      type: 'accept',
-      phone: acceptorPhone,          // المستلم → رصيده يقل
+      type: resultType,
+      phone: acceptorPhone,          // من وضع الإيموجي
       acceptorPhone,
       quotedPhone: orderOwnerPhone || '',
       orderOwnerPhone: orderOwnerPhone || '',
