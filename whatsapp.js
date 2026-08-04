@@ -32,6 +32,9 @@ const tamCache = new Map();
 // { lid@lid: phone@s.whatsapp.net }
 const lidToPhoneMap = new Map();
 
+// كاش الجروبات المكتشفة { groupId: { name, messageCount, lastMessage } }
+const discoveredGroups = new Map();
+
 let sock = null;
 let messageHandler = null;
 let reconnectAttempts = 0;
@@ -162,10 +165,14 @@ async function connect() {
         if (!msg.message) continue;
         if (msg.key.fromMe) continue;
 
-        // سجل كل رسالة واردة لاكتشاف الجروب الصحيح
+        // تتبع الجروبات المكتشفة
         const remoteJid = msg.key.remoteJid || '';
         if (remoteJid.endsWith('@g.us')) {
-          logger.info('🔍 جروب', { id: remoteJid, name: msg.pushName || '' });
+          const existing = discoveredGroups.get(remoteJid) || { name: '', messageCount: 0, lastMessage: '' };
+          existing.messageCount++;
+          existing.lastMessage = new Date().toISOString();
+          if (msg.pushName) existing.name = msg.pushName;
+          discoveredGroups.set(remoteJid, existing);
         }
 
         // قبول الرسائل من أي جروب (بدون فلتر)
@@ -391,6 +398,10 @@ function onQRUpdate(updateFn, clearFn) {
   qrClearCallback = clearFn;
 }
 
+function getDiscoveredGroups() {
+  return discoveredGroups;
+}
+
 module.exports = {
   connect,
   setMessageHandler,
@@ -405,4 +416,5 @@ module.exports = {
   getSenderJid,
   getCachedMessage,
   onQRUpdate,
+  getDiscoveredGroups,
 };

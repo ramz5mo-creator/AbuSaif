@@ -58,6 +58,30 @@ const httpServer = http.createServer(async (req, res) => {
   } else if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', ...whatsapp.getCacheStats() }));
+  } else if (req.url === '/groups') {
+    const groups = whatsapp.getDiscoveredGroups();
+    let html = `<html><head><meta charset="utf-8"><style>
+      body{background:#111;color:#0f0;font-family:monospace;padding:20px;direction:rtl;}
+      table{border-collapse:collapse;width:100%;margin-top:20px;}
+      th,td{border:1px solid #0f0;padding:10px;text-align:center;}
+      th{background:#0f0;color:#000;}
+      tr:hover{background:#1a3a1a;}
+      h1{text-align:center;}
+      .id{font-size:10px;color:#888;word-break:break-all;}
+    </style></head><body>`;
+    html += `<h1>📋 الجروبات المكتشفة (${groups.size})</h1>`;
+    html += `<table><tr><th>#</th><th>اسم آخر مرسل</th><th>عدد الرسائل</th><th>آخر رسالة</th><th>معرف الجروب</th></tr>`;
+    let i = 0;
+    for (const [id, info] of groups) {
+      i++;
+      const lastTime = info.lastMessage ? new Date(info.lastMessage).toLocaleString('ar-JO', {timeZone:'Asia/Amman'}) : '-';
+      html += `<tr><td>${i}</td><td>${info.name || '-'}</td><td>${info.messageCount}</td><td>${lastTime}</td><td class="id">${id}</td></tr>`;
+    }
+    html += `</table>`;
+    html += `<p style="text-align:center;margin-top:20px;color:#ff0;">حدّث الصفحة بعد إرسال رسائل في الجروبات</p>`;
+    html += `<script>setTimeout(()=>location.reload(), 15000);</script></body></html>`;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
   } else {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('AbuSaif Bot v4');
