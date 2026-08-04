@@ -37,71 +37,131 @@ function getAcceptWords() {
  * تنظيف رقم الهاتف من واتساب
  *
  * واتساب يرسل المعرفات بصيغتين:
- *   - مستخدم فردي: 966501234567@s.whatsapp.net
- *   - جروب: 120363401940570759@g.us  ← هذا معرف الجروب نفسه، ليس هاتف
+ *   - مستخدم فردي: 966501234567@s.whatsapp.net  → 966501234567
+ *   - جروب: 120363401940570759@g.us              → يُرفض
  *
- * القاعدة:
- * - إذا كان المعرف ينتهي بـ @g.us → رفضه (معرف جروب)
- * - إذا كان طول الرقم > 13 → احذف الرقم الأول (encoding artifact)
+ * بعض الأرقام تصل بـ prefix زائد (1 في البداية):
+ *   - 1966501234567 → 966501234567  (حذف الـ 1 الأول)
+ *
+ * أرقام الهاتف الصحيحة: 9 إلى 15 رقم
  */
 function cleanPhone(jid) {
   if (!jid) return null;
 
   // رفض معرفات الجروب (تنتهي بـ @g.us)
-  if (jid.endsWith('@g.us')) return null;
+  if (jid.includes('@g.us')) return null;
 
   // إزالة الجزء بعد @
   let phone = jid.split('@')[0].trim();
 
-  // إزالة أي حروف غير رقمية
+  // إزالة أي حروف غير رقمية (مثل + أو -)
   phone = phone.replace(/\D/g, '');
 
   if (!phone) return null;
 
-  // أرقام الهاتف مع رمز الدولة عادةً 10-13 رقم
-  // إذا كان أطول من 13 رقم → احذف الرقم الأول
-  if (phone.length > 13) {
+  // أرقام الهاتف الدولية: 7 إلى 15 رقم
+  // إذا كان أطول من 15 → احذف الرقم الأول تدريجياً حتى يصبح صالحاً
+  while (phone.length > 15) {
     phone = phone.substring(1);
   }
 
-  // لا يزال طويلاً بعد الحذف → رفضه
-  if (phone.length > 15) return null;
+  // أقصر من 7 أرقام → غير صالح
+  if (phone.length < 7) return null;
 
   return phone;
 }
 
 /**
  * تحويل إيموجيات الأرقام إلى أرقام
+ *
+ * الإيموجيات تصل أحياناً بـ variation selectors مختلفة
+ * لذا نستخدم codePoint للتعرف عليها بدقة
  */
 function emojiToNumber(text) {
+  if (!text) return null;
+
+  // تنظيف الـ variation selectors (U+FE0F و U+20E3)
+  // ثم البحث عن الأرقام الإيموجية
+  const cleaned = text.replace(/\uFE0F|\u20E3/g, '').trim();
+
+  // خريطة الإيموجيات بعد إزالة الـ variation selectors
+  // 0️⃣ = 0\uFE0F\u20E3 → بعد التنظيف = '0'
+  // لكن نحتاج للتعامل مع الصيغة الأصلية أيضاً
   const emojiMap = {
-    '0️⃣': '0', '1️⃣': '1', '2️⃣': '2', '3️⃣': '3',
-    '4️⃣': '4', '5️⃣': '5', '6️⃣': '6', '7️⃣': '7',
-    '8️⃣': '8', '9️⃣': '9', '🔟': '10',
+    '0️⃣': 0, '1️⃣': 1, '2️⃣': 2, '3️⃣': 3, '4️⃣': 4,
+    '5️⃣': 5, '6️⃣': 6, '7️⃣': 7, '8️⃣': 8, '9️⃣': 9,
+    '🔟': 10,
+    // صيغ بديلة بدون variation selector
+    '0⃣': 0, '1⃣': 1, '2⃣': 2, '3⃣': 3, '4⃣': 4,
+    '5⃣': 5, '6⃣': 6, '7⃣': 7, '8⃣': 8, '9⃣': 9,
   };
 
-  let result = text;
-  for (const [emoji, num] of Object.entries(emojiMap)) {
-    result = result.replaceAll(emoji, num);
+  // محاولة مطابقة مباشرة
+  const trimmed = text.trim();
+  if (emojiMap[trimmed] !== undefined) {
+    return emojiMap[trimmed];
   }
 
+  // استبدال الإيموجيات بأرقام
+  let result = text;
+  for (const [emoji, num] of Object.entries(emojiMap)) {
+    result = result.split(emoji).join(String(num));
+  }
+
+  // استخراج الرقم
   const numbers = result.replace(/[^\d]/g, '');
-  return numbers ? parseInt(numbers, 10) : null;
+  if (numbers) {
+    const n = parseInt(numbers, 10);
+    if (n > 0) return n;
+  }
+
+  return null;
 }
 
 /**
- * استخراج الكمية من النص
+ * التحقق مما إذا كان النص تفاعل كمي (👍 أو إيموجي رقم)
+ */
+function isQuantityEmoji(text) {
+  if (!text) return false;
+  const t = text.trim();
+
+  // 👍 مباشرة
+  if (t === '👍') return true;
+
+  // إيموجيات الأرقام المعروفة
+  const quantityEmojis = [
+    '1️⃣','2️⃣','3️⃣','4️⃣','5️⃣',
+    '6️⃣','7️⃣','8️⃣','9️⃣','0️⃣','🔟',
+    '1⃣','2⃣','3⃣','4⃣','5⃣',
+    '6⃣','7⃣','8⃣','9⃣','0⃣',
+  ];
+
+  for (const emoji of quantityEmojis) {
+    if (t === emoji || t.includes(emoji)) return true;
+  }
+
+  // رقم عادي وحده (مثل "3" أو "5")
+  if (/^\d+$/.test(t)) return true;
+
+  return false;
+}
+
+/**
+ * استخراج الكمية من النص أو التفاعل
  */
 function extractQuantity(text) {
   if (!text) return 1;
-  const cleaned = text.trim();
+  const t = text.trim();
 
-  if (cleaned === '👍' || cleaned.includes('👍')) return 1;
+  // 👍 = 1
+  if (t === '👍') return 1;
 
-  const emojiNum = emojiToNumber(cleaned);
+  // محاولة تحويل الإيموجي
+  const emojiNum = emojiToNumber(t);
   if (emojiNum !== null && emojiNum > 0) return emojiNum;
 
-  const numberMatch = cleaned.match(/(\d+)/);
+  // رقم عادي في النص
+  const numberMatch = t.match(/(\d+)/);
   if (numberMatch) {
     const num = parseInt(numberMatch[1], 10);
     if (num > 0 && num <= 9999) return num;
@@ -127,11 +187,8 @@ function isAcceptMessage(text) {
     }
   }
 
-  if (cleaned === '👍') return true;
-
-  // إيموجيات أرقام وحدها (2️⃣ أو 3️⃣ ...)
-  const emojiOnlyPattern = /^[\s0️⃣1️⃣2️⃣3️⃣4️⃣5️⃣6️⃣7️⃣8️⃣9️⃣🔟]+$/u;
-  if (emojiOnlyPattern.test(cleaned)) return true;
+  // 👍 أو إيموجي رقم وحده
+  if (isQuantityEmoji(cleaned)) return true;
 
   return false;
 }
@@ -158,20 +215,29 @@ async function processMessage(msg, sock) {
   // ====================================================
   if (whatsapp.isReaction(msg)) {
     const reactionText = msg.message.reactionMessage.text;
+
+    logger.debug('📥 تفاعل وارد', {
+      text: reactionText,
+      codes: reactionText ? [...reactionText].map(c => c.codePointAt(0).toString(16)).join(',') : 'empty',
+      jid: msg.key.participant || msg.key.remoteJid,
+    });
+
+    // فقط التفاعلات الكمية
+    if (!isQuantityEmoji(reactionText)) {
+      logger.debug('تفاعل غير كمي - تجاهل', { text: reactionText });
+      return null;
+    }
+
     const targetMessageId = whatsapp.getReactionTargetId(msg);
 
-    // فقط التفاعلات الكمية (👍 أو إيموجي رقم)
-    const isQuantityReaction =
-      reactionText === '👍' ||
-      /^[\s0️⃣1️⃣2️⃣3️⃣4️⃣5️⃣6️⃣7️⃣8️⃣9️⃣🔟]+$/u.test(reactionText);
-
-    if (!isQuantityReaction) return null;
-
-    // في التفاعلات: participant = رقم هاتف من وضع التفاعل
-    const senderJid = msg.key.participant;
+    // استخراج رقم هاتف من وضع التفاعل
+    const senderJid = whatsapp.getSenderJid(msg);
     const acceptorPhone = cleanPhone(senderJid);
     if (!acceptorPhone) {
-      logger.debug('تفاعل بدون participant صالح', { jid: senderJid });
+      logger.warn('⚠️ تفاعل بدون رقم هاتف صالح', {
+        participant: msg.key.participant,
+        remoteJid: msg.key.remoteJid,
+      });
       return null;
     }
 
@@ -181,26 +247,32 @@ async function processMessage(msg, sock) {
 
     // جلب بيانات الرسالة الأصلية (صاحب الطلب)
     const originalMsg = whatsapp.getCachedMessage(targetMessageId);
-    const ownerJid = originalMsg?.key?.participant || originalMsg?.key?.remoteJid;
-    const orderOwnerPhone = cleanPhone(ownerJid);
-    const quotedText = whatsapp.extractText(originalMsg) || '';
+    let orderOwnerPhone = null;
+    let quotedText = '';
+
+    if (originalMsg) {
+      // صاحب الطلب: participant في رسائل الجروب
+      const ownerJid = originalMsg.key.participant;
+      orderOwnerPhone = cleanPhone(ownerJid);
+      quotedText = whatsapp.extractText(originalMsg) || '';
+    }
 
     logger.info('🎯 تفاعل استلام', {
       id: transactionId.substring(0, 8),
       acceptor: acceptorPhone,
-      owner: orderOwnerPhone,
+      owner: orderOwnerPhone || 'غير معروف',
       reaction: reactionText,
       qty: quantity,
+      targetId: targetMessageId,
+      cacheHit: !!originalMsg,
     });
 
     return {
       transactionId,
       messageId,
       type: 'accept',
-      // المستلم (الكابتن الذي وضع التفاعل) → رصيده يقل
-      phone: acceptorPhone,
+      phone: acceptorPhone,          // المستلم → رصيده يقل
       acceptorPhone,
-      // صاحب الطلب → رصيده يزيد
       quotedPhone: orderOwnerPhone || '',
       orderOwnerPhone: orderOwnerPhone || '',
       quantity,
@@ -219,13 +291,15 @@ async function processMessage(msg, sock) {
   const text = whatsapp.extractText(msg);
   if (!text) return null;
 
-  // في رسائل الجروب: participant = رقم هاتف المرسل
-  // remoteJid = معرف الجروب (ينتهي بـ @g.us) - لا يصلح كرقم هاتف
-  const senderJid = msg.key.participant;
+  // استخراج رقم هاتف المرسل
+  const senderJid = whatsapp.getSenderJid(msg);
   const senderPhone = cleanPhone(senderJid);
-  // إذا لم يوجد participant صالح → تجاهل الرسالة
+
   if (!senderPhone) {
-    logger.debug('تم تجاهل رسالة بدون participant صالح', { jid: senderJid });
+    logger.debug('تم تجاهل رسالة بدون رقم هاتف صالح', {
+      participant: msg.key.participant,
+      remoteJid: msg.key.remoteJid,
+    });
     return null;
   }
 
@@ -264,6 +338,7 @@ async function processMessage(msg, sock) {
     '';
   const quotedMessageId = contextInfo?.stanzaId || '';
 
+  // استخراج الكمية من النص بعد كلمة الاستلام
   const textAfterWord = text.replace(/^(تم|هات|تن|اوك)\s*/i, '').trim();
   const quantity = extractQuantity(textAfterWord || text);
 
@@ -273,7 +348,7 @@ async function processMessage(msg, sock) {
   logger.info('🎯 رد استلام', {
     id: transactionId.substring(0, 8),
     acceptor: senderPhone,
-    owner: orderOwnerPhone,
+    owner: orderOwnerPhone || 'غير معروف',
     qty: quantity,
   });
 
@@ -281,10 +356,8 @@ async function processMessage(msg, sock) {
     transactionId,
     messageId,
     type: 'accept',
-    // المستلم (الكابتن الذي رد) → رصيده يقل
-    phone: senderPhone,
+    phone: senderPhone,             // المستلم → رصيده يقل
     acceptorPhone: senderPhone,
-    // صاحب الطلب → رصيده يزيد
     quotedPhone: orderOwnerPhone || '',
     orderOwnerPhone: orderOwnerPhone || '',
     quantity,
@@ -304,5 +377,6 @@ module.exports = {
   extractQuantity,
   emojiToNumber,
   isAcceptMessage,
+  isQuantityEmoji,
   cleanPhone,
 };

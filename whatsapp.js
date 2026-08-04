@@ -88,7 +88,7 @@ async function connect() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  // === استقبال الرسائل النصية والردود ===
+  // === استقبال جميع الرسائل (نصية + تفاعلات) في مستمع واحد فقط ===
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
@@ -100,8 +100,8 @@ async function connect() {
       if (targetGroup && msg.key.remoteJid !== targetGroup) continue;
       if (!msg.key.remoteJid?.endsWith('@g.us')) continue;
 
-      // تخزين الرسالة في الكاش للردود المستقبلية
-      if (msg.key.id) {
+      // تخزين الرسالة في الكاش (للرسائل النصية فقط، ليس التفاعلات)
+      if (msg.key.id && !msg.message.reactionMessage) {
         messageCache.set(msg.key.id, msg);
         // تنظيف الكاش القديم (الاحتفاظ بآخر 2000)
         if (messageCache.size > 2000) {
@@ -117,41 +117,7 @@ async function connect() {
           logger.error('خطأ في معالجة الرسالة', {
             error: error.message,
             messageId: msg.key.id,
-          });
-        }
-      }
-
-      const sender = msg.key.participant || msg.key.remoteJid;
-      const text = extractText(msg);
-      const isReply = !!msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-
-      logger.debug('رسالة جديدة', {
-        from: sender,
-        text: text?.substring(0, 50),
-        isReply,
-      });
-    }
-  });
-
-  // === استقبال التفاعلات (reactions) ===
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-
-    for (const msg of messages) {
-      if (!msg.message?.reactionMessage) continue;
-      if (msg.key.fromMe) continue;
-
-      const targetGroup = config.whatsapp.targetGroupId;
-      if (targetGroup && msg.key.remoteJid !== targetGroup) continue;
-      if (!msg.key.remoteJid?.endsWith('@g.us')) continue;
-
-      if (messageHandler) {
-        try {
-          await messageHandler(msg, sock);
-        } catch (error) {
-          logger.error('خطأ في معالجة التفاعل', {
-            error: error.message,
-            messageId: msg.key.id,
+            isReaction: !!msg.message.reactionMessage,
           });
         }
       }
@@ -166,7 +132,7 @@ async function connect() {
  * يدعم: نص عادي، رد، صورة، تفاعل (reaction)
  */
 function extractText(msg) {
-  if (!msg.message) return null;
+  if (!msg || !msg.message) return null;
 
   // رسالة نصية عادية
   if (msg.message.conversation) {
@@ -195,14 +161,31 @@ function extractText(msg) {
  * التحقق مما إذا كانت الرسالة تفاعلاً (reaction)
  */
 function isReaction(msg) {
-  return !!msg.message?.reactionMessage;
+  return !!msg?.message?.reactionMessage;
 }
 
 /**
  * استخراج معرف الرسالة الأصلية التي تفاعل معها
  */
 function getReactionTargetId(msg) {
-  return msg.message?.reactionMessage?.key?.id || null;
+  return msg?.message?.reactionMessage?.key?.id || null;
+}
+
+/**
+ * استخراج رقم هاتف المرسل من الرسالة
+ * يحاول participant أولاً، ثم يتحقق من remoteJid
+ */
+function getSenderJid(msg) {
+  // participant موجود في رسائل الجروب ويحتوي على رقم الهاتف
+  if (msg.key.participant) return msg.key.participant;
+
+  // في بعض الحالات النادرة participant غائب لكن remoteJid يحتوي على الهاتف
+  // (مثلاً في الرسائل الخاصة أو إصدارات معينة من Baileys)
+  if (msg.key.remoteJid && !msg.key.remoteJid.endsWith('@g.us')) {
+    return msg.key.remoteJid;
+  }
+
+  return null;
 }
 
 /**
@@ -244,5 +227,6 @@ module.exports = {
   extractText,
   isReaction,
   getReactionTargetId,
+  getSenderJid,
   getCachedMessage,
 };
