@@ -245,8 +245,76 @@ async function updateBalance(phone, delta) {
         },
       });
     }
+
+    // تحديث ورقة الإجمالي أيضاً
+    await updateTotals(phone, delta);
+
   } catch (error) {
     logger.warn('فشل تحديث الرصيد', { error: error.message, phone });
+  }
+}
+
+/**
+ * تحديث ورقة الإجمالي (A: الهاتف، B: موجب، C: سالب)
+ * تُستدعى من updateBalance بعد كل تحديث
+ *
+ * @param {string} phone - رقم الهاتف
+ * @param {number} delta - موجب = سلّم، سالب = استلم
+ */
+async function updateTotals(phone, delta) {
+  if (!isInitialized || !phone) return;
+
+  const sheetName = config.sheets.sheetNames.totals;
+
+  try {
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId: config.sheets.spreadsheetId,
+      range: `${sheetName}!A:C`,
+    });
+
+    const rows = response.data.values || [];
+    let found = false;
+    let rowIndex = -1;
+    let currentPositive = 0;
+    let currentNegative = 0;
+
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][0] === phone) {
+        found = true;
+        rowIndex = i + 1;
+        currentPositive = parseFloat(rows[i][1]) || 0;
+        currentNegative = parseFloat(rows[i][2]) || 0;
+        break;
+      }
+    }
+
+    let newPositive = currentPositive;
+    let newNegative = currentNegative;
+
+    if (delta > 0) {
+      newPositive = currentPositive + delta;   // أرسل طلب → موجب يزيد
+    } else if (delta < 0) {
+      newNegative = currentNegative + Math.abs(delta); // استلم → سالب يزيد
+    }
+
+    if (found) {
+      await sheetsApi.spreadsheets.values.update({
+        spreadsheetId: config.sheets.spreadsheetId,
+        range: `${sheetName}!B${rowIndex}:C${rowIndex}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[newPositive, newNegative]] },
+      });
+    } else {
+      await sheetsApi.spreadsheets.values.append({
+        spreadsheetId: config.sheets.spreadsheetId,
+        range: `${sheetName}!A:C`,
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: [[phone, newPositive, newNegative]] },
+      });
+    }
+  } catch (error) {
+    logger.warn('فشل تحديث الإجمالي', { error: error.message, phone });
   }
 }
 
@@ -350,5 +418,6 @@ module.exports = {
   recordOrder,
   updateOrderStatus,
   updateBalance,
+  updateTotals,
   getBalance,
 };
