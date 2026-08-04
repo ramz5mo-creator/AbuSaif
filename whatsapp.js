@@ -175,7 +175,9 @@ async function connect() {
           discoveredGroups.set(remoteJid, existing);
         }
 
-        // قبول الرسائل من أي جروب (بدون فلتر)
+        // فلتر الجروب: قبول الرسائل من الجروب المستهدف فقط
+        const targetGroup = config.whatsapp.targetGroupId;
+        if (targetGroup && msg.key.remoteJid !== targetGroup) continue;
         if (!remoteJid.endsWith('@g.us')) continue;
 
         // تخزين في الكاش (ليس التفاعلات)
