@@ -33,21 +33,60 @@ async function start() {
 
   // 2. تعيين معالج الرسائل
   whatsapp.setMessageHandler(async (msg, sock) => {
+
+    // استخراج النص والمرسل
+    const text = whatsapp.extractText ? whatsapp.extractText(msg) : null;
+    const sender = msg.key.participant || msg.key.remoteJid;
+    const phone = sender ? sender.replace(/@.*$/, '') : null;
+    const messageId = msg.key.id;
+    const timestamp = new Date().toISOString();
+
+    // التحقق من الرد (contextInfo)
+    const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
+    const isReply = !!contextInfo?.quotedMessage;
+
+    if (text && phone) {
+      if (!isReply) {
+        // === رسالة طلب أصلية (ليست ردًا) → سجّلها في ورقة الطلبات ===
+        try {
+          await sheets.recordOrder({
+            phone,
+            text: text.substring(0, 500),
+            timestamp,
+            messageId,
+          });
+          logger.debug('📝 تم تسجيل طلب جديد', { phone, text: text.substring(0, 40) });
+        } catch (error) {
+          logger.warn('فشل تسجيل الطلب', { error: error.message });
+        }
+      }
+    }
+
+    // === معالجة رسائل الاستلام (الردود) ===
     const result = await parser.processMessage(msg, sock);
     if (result) {
-      // تسجيل العملية في Google Sheets
+      // تسجيل العملية في سجل الحركات
       try {
         await sheets.recordTransaction(result);
         logger.info('✅ تم تسجيل العملية', {
           type: result.type,
           phone: result.phone,
-          amount: result.amount,
+          quantity: result.quantity,
         });
       } catch (error) {
         logger.error('❌ فشل تسجيل العملية في Sheets', {
           error: error.message,
-          result,
         });
+      }
+
+      // تحديث حالة الطلب الأصلي في ورقة الطلبات
+      const quotedMessageId = contextInfo?.stanzaId;
+      if (quotedMessageId) {
+        try {
+          await sheets.updateOrderStatus(quotedMessageId, result.phone, result.quantity);
+        } catch (error) {
+          logger.warn('فشل تحديث حالة الطلب', { error: error.message });
+        }
       }
     }
   });

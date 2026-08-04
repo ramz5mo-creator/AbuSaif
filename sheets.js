@@ -271,10 +271,85 @@ async function getBalance(phone) {
   }
 }
 
+/**
+ * تسجيل طلب أصلي في ورقة الطلبات
+ * @param {object} order - بيانات الطلب
+ */
+async function recordOrder(order) {
+  if (!isInitialized) return;
+
+  const sheetName = config.sheets.sheetNames.orders || 'الطلبات';
+
+  const row = [
+    order.phone,          // رقم الهاتف
+    order.text,           // نص الطلب
+    order.timestamp,      // التاريخ
+    'جديد',              // الحالة
+    '',                   // المستلم (فارغ حتى الآن)
+    '',                   // الكمية (فارغة حتى الآن)
+    order.messageId,      // معرف الرسالة للربط لاحقاً
+  ];
+
+  try {
+    await sheetsApi.spreadsheets.values.append({
+      spreadsheetId: config.sheets.spreadsheetId,
+      range: `${sheetName}!A:G`,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [row] },
+    });
+    logger.debug('تم تسجيل الطلب في ورقة الطلبات', { phone: order.phone });
+  } catch (error) {
+    logger.warn('فشل تسجيل الطلب', { error: error.message });
+  }
+}
+
+/**
+ * تحديث حالة طلب في ورقة الطلبات عند الاستلام
+ * @param {string} quotedMessageId - معرف الرسالة الأصلية
+ * @param {string} acceptorPhone - رقم المستلم
+ * @param {number} quantity - الكمية
+ */
+async function updateOrderStatus(quotedMessageId, acceptorPhone, quantity) {
+  if (!isInitialized) return;
+
+  const sheetName = config.sheets.sheetNames.orders || 'الطلبات';
+
+  try {
+    // جلب كل الطلبات للبحث عن معرف الرسالة
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId: config.sheets.spreadsheetId,
+      range: `${sheetName}!A:G`,
+    });
+
+    const rows = response.data.values || [];
+
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][6] === quotedMessageId) {
+        // تحديث الحالة والمستلم والكمية
+        await sheetsApi.spreadsheets.values.update({
+          spreadsheetId: config.sheets.spreadsheetId,
+          range: `${sheetName}!D${i + 1}:F${i + 1}`,
+          valueInputOption: 'RAW',
+          requestBody: {
+            values: [['مكتمل', acceptorPhone, quantity]],
+          },
+        });
+        logger.debug('تم تحديث حالة الطلب إلى مكتمل', { row: i + 1 });
+        break;
+      }
+    }
+  } catch (error) {
+    logger.warn('فشل تحديث حالة الطلب', { error: error.message });
+  }
+}
+
 module.exports = {
   initialize,
   loadSettings,
   recordTransaction,
+  recordOrder,
+  updateOrderStatus,
   updateBalance,
   getBalance,
 };
