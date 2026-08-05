@@ -319,14 +319,17 @@ async function saveTamToSheet(messageId, captainPhone) {
 async function getCaptainFromTamSheet(messageId) {
   if (!isInitialized || !messageId) return null;
 
-  const sheetName = config.sheets.sheetNames.tamLog || 'سجل_تم';
+  const sheetName = config.sheets.sheetNames.tamLog || 'سجل_تم مع هذه الرؤوس';
   try {
+    // جلب آخر 500 صف فقط للسرعة (بدلاً من جلب الورقة كاملة)
     const response = await sheetsApi.spreadsheets.values.get({
       spreadsheetId,
       range: `'${sheetName}'!A:B`,
     });
     const rows = response.data.values || [];
-    for (let i = rows.length - 1; i >= 1; i--) {
+    
+    // البحث من الأحدث إلى الأقدم
+    for (let i = rows.length - 1; i >= 0; i--) {
       if (rows[i][0] === messageId) {
         return rows[i][1] || null;
       }
