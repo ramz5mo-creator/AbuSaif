@@ -119,14 +119,15 @@ async function loadSettings() {
 /**
  * الحصول على اسم الورقة اليومية (التاريخ بتوقيت الأردن)
  */
-function getTodaySheetName() {
+function getTodaySheetName(groupPrefix = '') {
   const now = new Date();
   // توقيت الأردن GMT+3
   const jordanTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
   const year = jordanTime.getUTCFullYear();
   const month = String(jordanTime.getUTCMonth() + 1).padStart(2, '0');
   const day = String(jordanTime.getUTCDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  const dateStr = `${year}-${month}-${day}`;
+  return groupPrefix ? `${groupPrefix}-${dateStr}` : dateStr;
 }
 
 /**
@@ -180,13 +181,13 @@ async function ensureDailySheet(sheetName) {
 /**
  * تسجيل انتاج للمنتج (من وضع الإيموجي)
  */
-async function updateTotalsProduction(phone, quantity) {
+async function updateTotalsProduction(phone, quantity, groupPrefix = '') {
   if (!isInitialized || !phone) {
     logger.warn('updateTotalsProduction: لا يمكن التسجيل', { initialized: isInitialized, phone });
     return;
   }
 
-  const sheetName = getTodaySheetName();
+  const sheetName = getTodaySheetName(groupPrefix);
   await ensureDailySheet(sheetName);
 
   try {
@@ -238,13 +239,13 @@ async function updateTotalsProduction(phone, quantity) {
 /**
  * تسجيل استلام للكابتن (من كتب "تم")
  */
-async function updateTotalsReception(phone, quantity) {
+async function updateTotalsReception(phone, quantity, groupPrefix = '') {
   if (!isInitialized || !phone) {
     logger.warn('updateTotalsReception: لا يمكن التسجيل', { initialized: isInitialized, phone });
     return;
   }
 
-  const sheetName = getTodaySheetName();
+  const sheetName = getTodaySheetName(groupPrefix);
   await ensureDailySheet(sheetName);
 
   try {

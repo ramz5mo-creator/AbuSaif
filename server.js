@@ -217,6 +217,12 @@ async function start() {
       const producerPhone = result.phone;
       const quantity = result.quantity;
       const quotedMsgId = result.quotedMessageId;
+      const remoteJid = msg.key.remoteJid;
+
+      // تحديد بادئة الجروب
+      const targetGroups = config.whatsapp.targetGroups || [];
+      const groupInfo = targetGroups.find(g => g.id === remoteJid);
+      const groupPrefix = groupInfo ? groupInfo.prefix : '';
 
       const captainPhone = await findCaptainPhone(
         quotedMsgId,
@@ -229,19 +235,20 @@ async function start() {
           producer: producerPhone,
           captain: captainPhone || '❓',
           qty: quantity,
+          group: groupInfo ? groupInfo.name : 'Unknown'
         });
 
         try {
-          await sheets.updateTotalsProduction(producerPhone, quantity);
-          logger.info(`✅ انتاج: ${producerPhone} +${quantity}`);
+          await sheets.updateTotalsProduction(producerPhone, quantity, groupPrefix);
+          logger.info(`✅ انتاج: ${producerPhone} +${quantity} [${groupPrefix}]`);
         } catch (error) {
           logger.error('❌ فشل انتاج', { error: error.message });
         }
 
         if (captainPhone) {
           try {
-            await sheets.updateTotalsReception(captainPhone, quantity);
-            logger.info(`✅ استلام: ${captainPhone} +${quantity}`);
+            await sheets.updateTotalsReception(captainPhone, quantity, groupPrefix);
+            logger.info(`✅ استلام: ${captainPhone} +${quantity} [${groupPrefix}]`);
           } catch (error) {
             logger.error('❌ فشل استلام', { error: error.message });
           }
@@ -262,17 +269,21 @@ async function start() {
 
       } else if (result.type === 'cancel') {
         // === إلغاء ===
-        logger.info('❌ إلغاء', { producer: producerPhone, captain: captainPhone || '❓' });
+        logger.info('❌ إلغاء', { 
+          producer: producerPhone, 
+          captain: captainPhone || '❓',
+          group: groupInfo ? groupInfo.name : 'Unknown'
+        });
 
         try {
-          await sheets.updateTotalsProduction(producerPhone, -quantity);
+          await sheets.updateTotalsProduction(producerPhone, -quantity, groupPrefix);
         } catch (error) {
           logger.error('فشل خصم انتاج', { error: error.message });
         }
 
         if (captainPhone) {
           try {
-            await sheets.updateTotalsReception(captainPhone, -quantity);
+            await sheets.updateTotalsReception(captainPhone, -quantity, groupPrefix);
           } catch (error) {
             logger.error('فشل خصم استلام', { error: error.message });
           }

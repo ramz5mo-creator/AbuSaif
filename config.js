@@ -9,9 +9,11 @@
 module.exports = {
   // === إعدادات واتساب ===
   whatsapp: {
-    // معرف الجروب المستهدف (يُملأ بعد أول اتصال)
-    // يمكن الحصول عليه من سجل الرسائل عند أول تشغيل
-    targetGroupId: process.env.TARGET_GROUP_ID || '120363401940570759@g.us',
+    // الجروبات المستهدفة
+    targetGroups: [
+      { id: '120363401940570759@g.us', name: 'Dreamex', prefix: 'دريمكس' },
+      { id: '120363408380060992@g.us', name: 'Nashama', prefix: 'نشامى' }
+    ],
     // مسار حفظ جلسة واتساب (داخل مجلد فرعي لتجنب مشاكل Volume)
     authPath: './auth/session',
   },

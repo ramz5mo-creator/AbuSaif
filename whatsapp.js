@@ -187,9 +187,10 @@ async function connect() {
           discoveredGroups.set(remoteJid, existing);
         }
 
-        // فلتر الجروب: قبول الرسائل من الجروب المستهدف فقط
-        const targetGroup = config.whatsapp.targetGroupId;
-        if (targetGroup && msg.key.remoteJid !== targetGroup) continue;
+        // فلتر الجروب: قبول الرسائل من الجروبات المستهدفة فقط
+        const targetGroups = config.whatsapp.targetGroups || [];
+        const isTarget = targetGroups.some(g => g.id === remoteJid);
+        if (!isTarget) continue;
         if (!remoteJid.endsWith('@g.us')) continue;
 
         // تخزين في الكاش (ليس التفاعلات)
@@ -267,26 +268,29 @@ function stopKeepAlive() {
 
 async function loadGroupParticipants() {
   try {
-    const targetGroup = config.whatsapp.targetGroupId;
-    if (!targetGroup) return;
+    const targetGroups = config.whatsapp.targetGroups || [];
+    if (targetGroups.length === 0) return;
 
-    const metadata = await sock.groupMetadata(targetGroup);
-    if (metadata && metadata.participants) {
-      for (const p of metadata.participants) {
-        // p.id قد يكون LID أو رقم حقيقي
-        if (p.id && p.id.includes('@s.whatsapp.net')) {
-          // رقم حقيقي — لا نحتاج ربط
+    let totalParticipants = 0;
+    for (const group of targetGroups) {
+      try {
+        const metadata = await sock.groupMetadata(group.id);
+        if (metadata && metadata.participants) {
+          for (const p of metadata.participants) {
+            if (p.lid && p.id) {
+              lidToPhoneMap.set(p.lid, p.id);
+            }
+          }
+          totalParticipants += metadata.participants.length;
+          logger.info(`📋 تم تحميل ${metadata.participants.length} مشارك من جروب: ${group.name}`);
         }
-        // إذا كان هناك lid
-        if (p.lid && p.id) {
-          lidToPhoneMap.set(p.lid, p.id);
-        }
+      } catch (e) {
+        logger.warn(`فشل تحميل مشاركي جروب ${group.name}`, { error: e.message });
       }
-      logger.info(`📋 تم تحميل ${metadata.participants.length} مشارك من الجروب`);
-      logger.info(`🔗 LID→Phone: ${lidToPhoneMap.size} ربط`);
     }
+    logger.info(`🔗 الإجمالي: ${lidToPhoneMap.size} ربط LID→Phone لـ ${totalParticipants} مشارك`);
   } catch (error) {
-    logger.warn('فشل تحميل بيانات الجروب', { error: error.message });
+    logger.warn('فشل تحميل بيانات الجروبات', { error: error.message });
   }
 }
 
