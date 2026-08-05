@@ -87,6 +87,37 @@ const httpServer = http.createServer(async (req, res) => {
     html += `<script>setTimeout(()=>location.reload(), 15000);</script></body></html>`;
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
+  } else if (req.url === '/all-groups') {
+    const sock = whatsapp.getSocket();
+    if (!sock) {
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('البوت غير متصل حالياً');
+      return;
+    }
+    try {
+      const groups = await sock.groupFetchAllParticipating();
+      const groupList = Object.values(groups);
+      let html = `<html><head><meta charset="utf-8"><style>
+        body{background:#111;color:#0f0;font-family:monospace;padding:20px;direction:rtl;}
+        table{border-collapse:collapse;width:100%;margin-top:20px;}
+        th,td{border:1px solid #0f0;padding:10px;text-align:center;}
+        th{background:#0f0;color:#000;}
+        tr:hover{background:#1a3a1a;}
+        h1{text-align:center;}
+        .id{font-size:12px;color:#fff;word-break:break-all;user-select:all;background:#333;padding:5px;}
+      </style></head><body>`;
+      html += `<h1>📋 كافة الجروبات المشترك بها (${groupList.length})</h1>`;
+      html += `<table><tr><th>#</th><th>اسم الجروب</th><th>معرف الجروب (JID)</th></tr>`;
+      groupList.forEach((group, i) => {
+        html += `<tr><td>${i+1}</td><td>${group.subject}</td><td><div class="id">${group.id}</div></td></tr>`;
+      });
+      html += `</table></body></html>`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    } catch (e) {
+      res.writeHead(500);
+      res.end('Error: ' + e.message);
+    }
   } else if (req.url === '/logout') {
     // مسح ملفات الجلسة وإعادة التشغيل
     const fs = require('fs');
