@@ -61,7 +61,14 @@ async function connect() {
   isConnecting = true;
 
   try {
+    const fs = require('fs');
     const authPath = path.resolve(config.whatsapp.authPath);
+    
+    // ضمان وجود المجلد قبل البدء
+    if (!fs.existsSync(authPath)) {
+      fs.mkdirSync(authPath, { recursive: true });
+    }
+
     const { state, saveCreds } = await useMultiFileAuthState(authPath);
 
     let version;

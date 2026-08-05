@@ -35,9 +35,14 @@ const httpServer = http.createServer(async (req, res) => {
     if (!currentQR) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(`<html><body style="background:#111;color:#0f0;font-size:20px;text-align:center;padding:40px;font-family:monospace;">
-        <h1>✅ البوت متصل بواتساب</h1>
-        <p>tamCache: ${whatsapp.getCacheStats().tamCache} رسالة</p>
-        <p>آخر تحديث: ${new Date().toLocaleString('ar-JO', {timeZone:'Asia/Amman'})}</p>
+        <div style="border:2px solid #0f0;padding:20px;border-radius:10px;display:inline-block;">
+          <h1>✅ البوت متصل بواتساب</h1>
+          <p>tamCache: ${whatsapp.getCacheStats().tamCache} رسالة</p>
+          <p>آخر تحديث: ${new Date().toLocaleString('ar-JO', {timeZone:'Asia/Amman'})}</p>
+        </div>
+        <div style="margin-top:30px;">
+          <a href="/logout" style="color:#f00;text-decoration:none;border:1px solid #f00;padding:10px;border-radius:5px;">⚠️ تسجيل الخروج ومسح الجلسة</a>
+        </div>
         <script>setTimeout(()=>location.reload(), 30000);</script>
       </body></html>`);
       return;
