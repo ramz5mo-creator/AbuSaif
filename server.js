@@ -89,11 +89,10 @@ const httpServer = http.createServer(async (req, res) => {
     const authPath = path.resolve(config.whatsapp.authPath);
     try {
       if (fs.existsSync(authPath)) {
-        const files = fs.readdirSync(authPath);
-        for (const file of files) {
-          fs.unlinkSync(path.join(authPath, file));
-        }
-        logger.info('🗑️ تم مسح ملفات الجلسة');
+        // حذف المجلد بالكامل وإعادة إنشائه
+        fs.rmSync(authPath, { recursive: true, force: true });
+        fs.mkdirSync(authPath, { recursive: true });
+        logger.info('🗑️ تم مسح مجلد الجلسة بالكامل');
       }
     } catch (e) {
       logger.error('خطأ في مسح الجلسة', { error: e.message });
@@ -101,12 +100,12 @@ const httpServer = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(`<html><body style="background:#111;color:#ff0;font-size:20px;text-align:center;padding:40px;font-family:monospace;">
       <h1>🗑️ تم مسح الجلسة</h1>
-      <p>البوت سيعيد التشغيل خلال 3 ثوانٍ...</p>
-      <p>بعدها افتح الصفحة الرئيسية لمسح QR الجديد</p>
-      <a href="/" style="color:#0f0;font-size:24px;">← العودة للصفحة الرئيسية</a>
+      <p>البوت سيعيد التشغيل الآن...</p>
+      <p>انتظر دقيقة ثم افتح الصفحة الرئيسية لمسح QR الجديد</p>
+      <script>setTimeout(()=>location.href='/', 5000);</script>
     </body></html>`);
-    // إعادة التشغيل بعد 2 ثانية
-    setTimeout(() => process.exit(0), 2000);
+    // إعادة التشغيل فوراً
+    setTimeout(() => process.exit(0), 1000);
   } else {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('AbuSaif Bot v4');
@@ -285,14 +284,12 @@ async function start() {
   // 3. ربط QR
   whatsapp.onQRUpdate(setCurrentQR, clearCurrentQR);
 
-  // 4. الاتصال بواتساب
-  try {
-    await whatsapp.connect();
+  // 4. الاتصال بواتساب (بدون await لمنع تعليق السيرفر)
+  whatsapp.connect().then(() => {
     logger.info('جاري الاتصال بواتساب...');
-  } catch (error) {
-    logger.error('❌ فشل الاتصال', { error: error.message });
-    process.exit(1);
-  }
+  }).catch((error) => {
+    logger.error('❌ فشل الاتصال الأولي', { error: error.message });
+  });
 
   // 5. تحديث الإعدادات دورياً
   setInterval(async () => {

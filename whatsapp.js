@@ -66,9 +66,14 @@ async function connect() {
 
     let version;
     try {
-      const result = await fetchLatestBaileysVersion();
+      // تعيين timeout لجلب الإصدار
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      const result = await fetchLatestBaileysVersion({ signal: controller.signal });
+      clearTimeout(timeoutId);
       version = result.version;
-    } catch {
+    } catch (e) {
+      logger.debug('فشل جلب إصدار Baileys، استخدام افتراضي', { error: e.message });
       version = [2, 3000, 1015901307];
     }
 
