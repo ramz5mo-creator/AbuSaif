@@ -89,10 +89,19 @@ const httpServer = http.createServer(async (req, res) => {
     const authPath = path.resolve(config.whatsapp.authPath);
     try {
       if (fs.existsSync(authPath)) {
-        // حذف المجلد بالكامل وإعادة إنشائه
-        fs.rmSync(authPath, { recursive: true, force: true });
-        fs.mkdirSync(authPath, { recursive: true });
-        logger.info('🗑️ تم مسح مجلد الجلسة بالكامل');
+        const files = fs.readdirSync(authPath);
+        for (const file of files) {
+          const fullPath = path.join(authPath, file);
+          // تجنب حذف مجلدات النظام مثل lost+found
+          if (file === 'lost+found') continue;
+          
+          if (fs.lstatSync(fullPath).isDirectory()) {
+            fs.rmSync(fullPath, { recursive: true, force: true });
+          } else {
+            fs.unlinkSync(fullPath);
+          }
+        }
+        logger.info('🗑️ تم مسح ملفات الجلسة (مع استثناء مجلدات النظام)');
       }
     } catch (e) {
       logger.error('خطأ في مسح الجلسة', { error: e.message });
