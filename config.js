@@ -12,8 +12,8 @@ module.exports = {
     // معرف الجروب المستهدف (يُملأ بعد أول اتصال)
     // يمكن الحصول عليه من سجل الرسائل عند أول تشغيل
     targetGroupId: process.env.TARGET_GROUP_ID || '120363401940570759@g.us',
-    // مسار حفظ جلسة واتساب
-    authPath: './auth',
+    // مسار حفظ جلسة واتساب (داخل مجلد فرعي لتجنب مشاكل Volume)
+    authPath: './auth/session',
   },
 
   // === إعدادات Google Sheets ===
