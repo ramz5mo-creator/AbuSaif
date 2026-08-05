@@ -248,7 +248,7 @@ async function processMessage(msg, sock) {
       return null;
     }
 
-    const quantity = isCancelEmoji ? 1 : extractQuantity(reactionText);
+    const quantity = isCancelEmoji ? extractQuantity(quotedText) : extractQuantity(reactionText);
     const transactionId = uuidv4();
     addProcessedId(messageId);
 

@@ -210,7 +210,8 @@ async function updateTotalsProduction(phone, quantity, groupPrefix = '') {
       }
     }
 
-    const newProduction = currentProduction + quantity;
+        let newProduction = currentProduction + quantity;
+    if (newProduction < 0) newProduction = 0;
 
     if (found) {
       await sheetsApi.spreadsheets.values.update({
@@ -220,12 +221,14 @@ async function updateTotalsProduction(phone, quantity, groupPrefix = '') {
         requestBody: { values: [[newProduction]] },
       });
     } else {
+      // إذا كانت الحركة سالبة ولم يكن الرقم موجوداً أصلاً، نضعه 0
+      const initialProduction = quantity < 0 ? 0 : quantity;
       await sheetsApi.spreadsheets.values.append({
         spreadsheetId,
         range: `'${sheetName}'!A:C`,
         valueInputOption: 'RAW',
         insertDataOption: 'INSERT_ROWS',
-        requestBody: { values: [[phone, quantity, 0]] },
+        requestBody: { values: [[phone, initialProduction, 0]] },
       });
     }
 
@@ -268,7 +271,8 @@ async function updateTotalsReception(phone, quantity, groupPrefix = '') {
       }
     }
 
-    const newReception = currentReception + quantity;
+    let newReception = currentReception + quantity;
+    if (newReception < 0) newReception = 0;
 
     if (found) {
       await sheetsApi.spreadsheets.values.update({
@@ -278,12 +282,14 @@ async function updateTotalsReception(phone, quantity, groupPrefix = '') {
         requestBody: { values: [[newReception]] },
       });
     } else {
+      // إذا كانت الحركة سالبة ولم يكن الرقم موجوداً أصلاً، نضعه 0
+      const initialReception = quantity < 0 ? 0 : quantity;
       await sheetsApi.spreadsheets.values.append({
         spreadsheetId,
         range: `'${sheetName}'!A:C`,
         valueInputOption: 'RAW',
         insertDataOption: 'INSERT_ROWS',
-        requestBody: { values: [[phone, 0, quantity]] },
+        requestBody: { values: [[phone, 0, initialReception]] },
       });
     }
 
