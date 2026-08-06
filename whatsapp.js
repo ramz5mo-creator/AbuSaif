@@ -159,12 +159,15 @@ async function connect() {
         logger.info(`📦 tamCache: ${tamCache.size} | msgCache: ${messageCache.size}`);
         if (qrClearCallback) qrClearCallback();
 
-        // بدء keepAlive
-        startKeepAlive();
+  // بدء keepAlive
+  startKeepAlive();
 
-        // تحميل بيانات الجروب لربط LID بالأرقام
-        loadGroupParticipants();
-      }
+  // تحميل بيانات الجروب لربط LID بالأرقام
+  loadGroupParticipants();
+  
+  // تحديث البيانات كل ساعة لضمان شمولية الأعضاء الجدد
+  setInterval(loadGroupParticipants, 60 * 60 * 1000);
+}
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -356,6 +359,11 @@ function getSenderJid(msg) {
   if (key.participant && key.participant.includes('@lid')) {
     const resolved = lidToPhoneMap.get(key.participant);
     if (resolved) return resolved;
+    
+    // محاولة إضافية: البحث في الكاش إذا كان الرقم مخزناً بطريقة أخرى
+    for (const [lid, phone] of lidToPhoneMap.entries()) {
+      if (lid.split(':')[0] === key.participant.split(':')[0]) return phone;
+    }
   }
 
   // رابعاً: participant حتى لو LID (آخر محاولة)

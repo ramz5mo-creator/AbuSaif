@@ -226,8 +226,9 @@ async function processMessage(msg, sock) {
       jid: msg.key.participant || msg.key.remoteJid,
     });
 
-    // ❌ = إلغاء
-    const isCancelEmoji = reactionText && (reactionText.trim() === '❌' || reactionText.trim() === '✖️' || reactionText.trim() === '✖' || reactionText.trim() === '❎');
+    // ❌ = إلغاء (بكل الأشكال الممكنة)
+    const cancelEmojis = ['❌', '✖️', '✖', '❎', '×', 'x', 'X'];
+    const isCancelEmoji = reactionText && cancelEmojis.includes(reactionText.trim());
 
     // فقط التفاعلات الكمية أو الإلغاء
     if (!isQuantityEmoji(reactionText) && !isCancelEmoji) {

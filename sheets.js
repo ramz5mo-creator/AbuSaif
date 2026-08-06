@@ -337,7 +337,12 @@ async function getCaptainFromTamSheet(messageId) {
     
     // البحث من الأحدث إلى الأقدم
     for (let i = rows.length - 1; i >= 0; i--) {
+      // مطابقة تامة لمعرف الرسالة
       if (rows[i][0] === messageId) {
+        return rows[i][1] || null;
+      }
+      // مطابقة جزئية (في حال تغير المعرف قليلاً)
+      if (messageId && rows[i][0] && (rows[i][0].includes(messageId) || messageId.includes(rows[i][0]))) {
         return rows[i][1] || null;
       }
     }
