@@ -183,6 +183,7 @@ async function ensureDailySheet(sheetName) {
 
 /**
  * التحقق مما إذا كان الرقم مسجلاً ومعتمداً
+ * يدعم المطابقة المرنة (تجاهل مفتاح الدولة)
  */
 async function isUserRegistered(phone) {
   if (!isInitialized || !phone) return false;
@@ -193,8 +194,21 @@ async function isUserRegistered(phone) {
       range: `'${sheetName}'!A:A`,
     });
     const rows = response.data.values || [];
-    // تخطي الرأس والبحث عن الرقم
-    return rows.some(row => row[0] === phone);
+    const cleanInput = phone.replace(/\D/g, '');
+    
+    for (const row of rows) {
+      if (!row[0]) continue;
+      const storedPhone = row[0].toString().replace(/\D/g, '');
+      if (!storedPhone) continue;
+
+      // مطابقة مرنة: إذا كان أحد الرقمين ينتهي بالآخر (بحد أدنى 8 أرقام للموثوقية)
+      if (cleanInput.endsWith(storedPhone) || storedPhone.endsWith(cleanInput)) {
+        if (storedPhone.length >= 8 && cleanInput.length >= 8) {
+          return row[0]; // إرجاع الرقم كما هو مكتوب في الورقة
+        }
+      }
+    }
+    return false;
   } catch (error) {
     logger.debug('فشل التحقق من التسجيل', { error: error.message });
     return false;
@@ -240,14 +254,15 @@ async function updateTotalsProduction(phone, quantity, groupPrefix = '', name = 
     return;
   }
 
-  // التحقق من التسجيل
-  const registered = await isUserRegistered(phone);
-  if (!registered) {
+  // التحقق من التسجيل والحصول على الصيغة المسجلة
+  const registeredPhone = await isUserRegistered(phone);
+  if (!registeredPhone) {
     logger.warn(`🚫 رقم غير مسجل حاول التسجيل (انتاج): ${phone}`);
     await logUnregisteredNumber(phone, name);
     return;
   }
 
+  const targetPhone = registeredPhone; // استخدام الرقم كما هو في ورقة المسجلين
   const sheetName = getTodaySheetName(groupPrefix);
   await ensureDailySheet(sheetName);
 
@@ -263,7 +278,7 @@ async function updateTotalsProduction(phone, quantity, groupPrefix = '', name = 
     let currentProduction = 0;
 
     for (let i = 1; i < rows.length; i++) {
-      if (rows[i][0] === phone) {
+      if (rows[i][0] === targetPhone) {
         found = true;
         rowIndex = i + 1;
         currentProduction = parseFloat(rows[i][1]) || 0;
@@ -289,11 +304,11 @@ async function updateTotalsProduction(phone, quantity, groupPrefix = '', name = 
         range: `'${sheetName}'!A:C`,
         valueInputOption: 'RAW',
         insertDataOption: 'INSERT_ROWS',
-        requestBody: { values: [[phone, initialProduction, 0]] },
+        requestBody: { values: [[targetPhone, initialProduction, 0]] },
       });
     }
 
-    logger.info(`✅ انتاج: ${phone} +${quantity} = ${newProduction} [${sheetName}]`);
+    logger.info(`✅ انتاج: ${targetPhone} +${quantity} = ${newProduction} [${sheetName}]`);
   } catch (error) {
     logger.error('فشل تسجيل الانتاج', { error: error.message, phone, sheet: sheetName });
     throw error;
@@ -309,14 +324,15 @@ async function updateTotalsReception(phone, quantity, groupPrefix = '', name = '
     return;
   }
 
-  // التحقق من التسجيل
-  const registered = await isUserRegistered(phone);
-  if (!registered) {
+  // التحقق من التسجيل والحصول على الصيغة المسجلة
+  const registeredPhone = await isUserRegistered(phone);
+  if (!registeredPhone) {
     logger.warn(`🚫 رقم غير مسجل حاول التسجيل (استلام): ${phone}`);
     await logUnregisteredNumber(phone, name);
     return;
   }
 
+  const targetPhone = registeredPhone; // استخدام الرقم كما هو في ورقة المسجلين
   const sheetName = getTodaySheetName(groupPrefix);
   await ensureDailySheet(sheetName);
 
@@ -332,7 +348,7 @@ async function updateTotalsReception(phone, quantity, groupPrefix = '', name = '
     let currentReception = 0;
 
     for (let i = 1; i < rows.length; i++) {
-      if (rows[i][0] === phone) {
+      if (rows[i][0] === targetPhone) {
         found = true;
         rowIndex = i + 1;
         currentReception = parseFloat(rows[i][2]) || 0;
@@ -358,11 +374,11 @@ async function updateTotalsReception(phone, quantity, groupPrefix = '', name = '
         range: `'${sheetName}'!A:C`,
         valueInputOption: 'RAW',
         insertDataOption: 'INSERT_ROWS',
-        requestBody: { values: [[phone, 0, initialReception]] },
+        requestBody: { values: [[targetPhone, 0, initialReception]] },
       });
     }
 
-    logger.info(`✅ استلام: ${phone} +${quantity} = ${newReception} [${sheetName}]`);
+    logger.info(`✅ استلام: ${targetPhone} +${quantity} = ${newReception} [${sheetName}]`);
   } catch (error) {
     logger.error('فشل تسجيل الاستلام', { error: error.message, phone, sheet: sheetName });
     throw error;
