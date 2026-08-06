@@ -753,6 +753,231 @@ async function recordTransaction(transaction) {
 }
 
 // ====================================================
+// سجل التعديلات
+// ====================================================
+
+/**
+ * إنشاء ورقة سجل التعديلات إذا لم تكن موجودة
+ */
+async function ensureEditLogSheet() {
+  const sheetName = config.sheets.sheetNames.editLog || 'سجل التعديلات';
+  if (existingSheets.has(sheetName)) return;
+  try {
+    await sheetsApi.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: sheetName, rightToLeft: true } } }],
+      },
+    });
+    await sheetsApi.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${sheetName}'!A1:H1`,
+      valueInputOption: 'RAW',
+      requestBody: {
+        values: [['التاريخ', 'رقم المعدِل', 'اسم المعدِل', 'المنتج', 'الكابتن', 'القيمة القديمة', 'القيمة الجديدة', 'الفرق']],
+      },
+    });
+    existingSheets.add(sheetName);
+    logger.info(`📝 تم إنشاء ورقة سجل التعديلات`);
+  } catch (e) {
+    if (e.message?.includes('already exists')) existingSheets.add(sheetName);
+  }
+}
+
+/**
+ * تسجيل عملية تعديل في ورقة سجل التعديلات
+ * @param {object} editData - بيانات التعديل
+ */
+async function logEdit(editData) {
+  if (!isInitialized) return;
+  await ensureEditLogSheet();
+  const sheetName = config.sheets.sheetNames.editLog || 'سجل التعديلات';
+  const now = new Date();
+  const jordanTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
+  const row = [
+    jordanTime.toISOString().replace('T', ' ').substring(0, 19),
+    editData.editorPhone || '',
+    editData.editorName || '',
+    editData.producerPhone || '',
+    editData.captainPhone || '',
+    editData.oldQuantity || 0,
+    editData.newQuantity || 0,
+    (editData.newQuantity || 0) - (editData.oldQuantity || 0),
+  ];
+  try {
+    await sheetsApi.spreadsheets.values.append({
+      spreadsheetId,
+      range: `'${sheetName}'!A:H`,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [row] },
+    });
+    logger.info(`📝 تعديل: ${editData.editorPhone} غيّر من ${editData.oldQuantity} إلى ${editData.newQuantity}`);
+  } catch (error) {
+    logger.error('فشل تسجيل التعديل', { error: error.message });
+  }
+}
+
+/**
+ * التحقق من صلاحية التعديل (الجميع 24 ساعة، المشرف الأسبوع كاملاً)
+ * @param {string} phone - رقم المعدِل
+ * @param {Date} transactionTime - وقت العملية الأصلية
+ * @returns {boolean}
+ */
+async function canEdit(phone, transactionTime) {
+  const now = new Date();
+  const diffHours = (now - new Date(transactionTime)) / (1000 * 60 * 60);
+  const rules = config.sheets.editRules || { userEditHours: 24, supervisorEditHours: 168 };
+
+  // المشرف يمكنه التعديل خلال الأسبوع كاملاً
+  const isSuper = await isSupervisor(phone);
+  if (isSuper && diffHours <= rules.supervisorEditHours) return true;
+
+  // الجميع يمكنهم التعديل خلال 24 ساعة
+  if (diffHours <= rules.userEditHours) return true;
+
+  return false;
+}
+
+/**
+ * البحث عن عملية سابقة بمعرف الرسالة (في سجل الحركات)
+ * @param {string} messageId - معرف الرسالة المستهدفة
+ * @param {string} reactorPhone - رقم من وضع التفاعل (المنتج)
+ * @returns {object|null} بيانات العملية إذا وُجدت
+ */
+async function findTransactionByMessageId(messageId, reactorPhone) {
+  if (!isInitialized || !messageId) return null;
+  const transSheet = config.sheets.sheetNames.transactions || 'سجل الحركات';
+  try {
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${transSheet}'!A:J`,
+    });
+    const rows = response.data.values || [];
+    const cleanReactor = reactorPhone ? reactorPhone.replace(/\D/g, '') : '';
+
+    // البحث من الأحدث إلى الأقدم
+    for (let i = rows.length - 1; i >= 1; i--) {
+      const row = rows[i];
+      const rowId = row[0] || '';
+      const rowProducer = (row[2] || '').replace(/\D/g, '');
+      const rowNotes = row[9] || '';
+      const rowStatus = row[8] || '';
+
+      // تخطي الملغاة
+      if (rowStatus === 'ملغى') continue;
+
+      // مطابقة: معرف العملية يحتوي على messageId أو الملاحظات تحتوي عليه
+      const idMatch = rowId.includes(messageId) || rowNotes.includes(messageId);
+      // مطابقة المنتج (من وضع الإيموجي)
+      const producerMatch = !reactorPhone || 
+        cleanReactor.endsWith(rowProducer) || rowProducer.endsWith(cleanReactor) ||
+        (cleanReactor.length >= 8 && rowProducer.length >= 8 && 
+         (cleanReactor.slice(-9) === rowProducer.slice(-9)));
+
+      if (idMatch && producerMatch) {
+        return {
+          rowIndex: i + 1, // 1-based for Sheets API
+          transactionId: row[0],
+          timestamp: row[1],
+          producerPhone: row[2],
+          captainPhone: row[3],
+          quantity: parseFloat(row[4]) || 0,
+          type: row[5],
+          emoji: row[6],
+          groupPrefix: row[7],
+          status: row[8],
+          notes: row[9],
+        };
+      }
+    }
+    return null;
+  } catch (error) {
+    logger.error('خطأ في البحث عن العملية', { error: error.message });
+    return null;
+  }
+}
+
+/**
+ * معالجة تعديل (تغيير إيموجي على نفس الرسالة)
+ * @param {object} params
+ * @param {string} params.messageId - معرف الرسالة المستهدفة
+ * @param {string} params.editorPhone - رقم من قام بالتعديل
+ * @param {string} params.editorName - اسم المعدِل
+ * @param {number} params.newQuantity - الكمية الجديدة
+ * @param {string} params.groupPrefix - بادئة الجروب
+ * @returns {object} نتيجة العملية {success, message, diff}
+ */
+async function processEdit({ messageId, editorPhone, editorName, newQuantity, groupPrefix }) {
+  if (!isInitialized) return { success: false, message: 'النظام غير مهيأ' };
+
+  // 1. البحث عن العملية الأصلية
+  const transaction = await findTransactionByMessageId(messageId, editorPhone);
+  if (!transaction) {
+    return { success: false, message: 'لم يتم العثور على عملية سابقة لهذه الرسالة' };
+  }
+
+  // 2. التحقق من صلاحية التعديل (الوقت)
+  const allowed = await canEdit(editorPhone, transaction.timestamp);
+  if (!allowed) {
+    return { success: false, message: 'انتهت مهلة التعديل' };
+  }
+
+  // 3. حساب الفرق
+  const oldQuantity = transaction.quantity;
+  const diff = newQuantity - oldQuantity;
+
+  if (diff === 0) {
+    return { success: false, message: 'لا يوجد فرق (نفس الكمية)' };
+  }
+
+  // 4. تطبيق الفرق على الجهتين في الورقة اليومية
+  // تطبيق على المنتج (إنتاج)
+  if (transaction.producerPhone) {
+    await updateTotalsProduction(transaction.producerPhone, diff, groupPrefix || transaction.groupPrefix, editorName);
+  }
+  // تطبيق على الكابتن (استلام)
+  if (transaction.captainPhone) {
+    await updateTotalsReception(transaction.captainPhone, diff, groupPrefix || transaction.groupPrefix, editorName);
+  }
+
+  // 5. تحديث الكمية في سجل الحركات
+  const transSheet = config.sheets.sheetNames.transactions || 'سجل الحركات';
+  try {
+    await sheetsApi.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${transSheet}'!E${transaction.rowIndex}:J${transaction.rowIndex}`,
+      valueInputOption: 'RAW',
+      requestBody: {
+        values: [[
+          newQuantity,
+          transaction.type,
+          transaction.emoji,
+          transaction.groupPrefix,
+          'معدّل',
+          `تعديل من ${oldQuantity} إلى ${newQuantity} بواسطة ${editorPhone} في ${new Date().toISOString()}`
+        ]]
+      }
+    });
+  } catch (error) {
+    logger.error('فشل تحديث سجل الحركات بعد التعديل', { error: error.message });
+  }
+
+  // 6. تسجيل التعديل في ورقة سجل التعديلات
+  await logEdit({
+    editorPhone,
+    editorName,
+    producerPhone: transaction.producerPhone,
+    captainPhone: transaction.captainPhone,
+    oldQuantity,
+    newQuantity,
+  });
+
+  logger.info(`✏️ تعديل ناجح: ${editorPhone} غيّر من ${oldQuantity} إلى ${newQuantity} (فرق: ${diff})`);
+  return { success: true, message: `تم التعديل: ${oldQuantity} → ${newQuantity} (فرق: ${diff > 0 ? '+' : ''}${diff})`, diff };
+}
+
+// ====================================================
 // دوال مساعدة
 // ====================================================
 
@@ -779,6 +1004,11 @@ module.exports = {
   cancelTransaction,
   generateWeeklyReport,
   getTodaySheetName,
+  // التعديل
+  processEdit,
+  findTransactionByMessageId,
+  canEdit,
+  logEdit,
   // deprecated (للتوافق)
   updateBalance,
   updateTotals,

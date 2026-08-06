@@ -240,7 +240,6 @@ async function processMessage(msg, sock) {
       return null;
     }
 
-    const quantity = isCancelEmoji ? extractQuantity(quotedText) : extractQuantity(reactionText);
     const transactionId = uuidv4();
     addProcessedId(messageId);
 
@@ -254,6 +253,9 @@ async function processMessage(msg, sock) {
       orderOwnerPhone = cleanPhone(ownerJid);
       quotedText = whatsapp.extractText(originalMsg) || '';
     }
+
+    // حساب الكمية (بعد تعريف quotedText)
+    const quantity = isCancelEmoji ? extractQuantity(quotedText) : extractQuantity(reactionText);
 
     const resultType = isCancelEmoji ? 'cancel' : 'accept';
 

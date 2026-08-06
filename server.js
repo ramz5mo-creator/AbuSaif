@@ -258,7 +258,37 @@ async function start() {
       );
 
       if (result.type === 'accept') {
-        // === انتاج + استلام ===
+        // === فحص هل هذا تعديل (إيموجي جديد على نفس الرسالة المسجلة سابقاً) ===
+        const existingTransaction = await sheets.findTransactionByMessageId(quotedMsgId, producerPhone);
+        
+        if (existingTransaction && existingTransaction.quantity !== quantity) {
+          // هذا تعديل - تغيير الإيموجي
+          const producerName = whatsapp.getPushName(msg);
+          logger.info('✏️ محاولة تعديل', {
+            producer: producerPhone,
+            oldQty: existingTransaction.quantity,
+            newQty: quantity,
+            msgId: quotedMsgId?.substring(0, 8)
+          });
+
+          const editResult = await sheets.processEdit({
+            messageId: quotedMsgId,
+            editorPhone: producerPhone,
+            editorName: producerName || '',
+            newQuantity: quantity,
+            groupPrefix,
+          });
+
+          if (editResult.success) {
+            logger.info(`✏️ تعديل ناجح: ${editResult.message}`);
+          } else {
+            logger.warn(`⚠️ فشل التعديل: ${editResult.message} - سيتم تسجيل كعملية جديدة`);
+            // إذا فشل التعديل (انتهت المهلة)، لا نسجل عملية جديدة لنفس الرسالة
+          }
+          return;
+        }
+
+        // === انتاج + استلام (عملية جديدة) ===
         logger.info('🎯 تسجيل انتاج+استلام', {
           producer: producerPhone,
           captain: captainPhone || '❓',
@@ -276,7 +306,6 @@ async function start() {
 
         if (captainPhone) {
           try {
-            // ملاحظة: لاسم الكابتن، قد نحتاج لجلب pushName من الرسالة الأصلية، لكن سنكتفي بـ "كابتن" حالياً إذا لم يتوفر
             await sheets.updateTotalsReception(captainPhone, quantity, groupPrefix, 'كابتن');
             logger.info(`✅ استلام: ${captainPhone} +${quantity} [${groupPrefix}]`);
           } catch (error) {
@@ -286,7 +315,7 @@ async function start() {
           logger.warn('⚠️ لم يُعثر على الكابتن!', { msgId: quotedMsgId?.substring(0, 8) });
         }
 
-        // تسجيل في سجل الحركات
+        // تسجيل في سجل الحركات (مع حفظ msgId في الملاحظات للتعديل لاحقاً)
         sheets.recordTransaction({
           transactionId: result.transactionId,
           timestamp: result.timestamp,
@@ -295,6 +324,9 @@ async function start() {
           quantity,
           type: 'انتاج',
           emoji: result.text,
+          groupPrefix,
+          status: 'نشط',
+          notes: `msgId:${quotedMsgId || ''}`
         }).catch(() => {});
 
       } else if (result.type === 'cancel') {
@@ -328,6 +360,9 @@ async function start() {
           quantity,
           type: 'إلغاء',
           emoji: '❌',
+          groupPrefix,
+          status: 'ملغى',
+          notes: `msgId:${quotedMsgId || ''}`
         }).catch(() => {});
       }
 

@@ -33,6 +33,12 @@ module.exports = {
       weeklyReport: 'نهاية الاسبوع',    // كشف نهاية الأسبوع
       registeredUsers: 'المسجلين',      // الأرقام المعتمدة
       unregisteredNumbers: 'أرقام غير مسجلة', // الأرقام للمراجعة
+      editLog: 'سجل التعديلات',          // سجل كل عمليات التعديل
+    },
+    // إعدادات التعديل
+    editRules: {
+      userEditHours: 24,     // الجميع يمكنهم التعديل خلال 24 ساعة
+      supervisorEditHours: 168, // المشرف يمكنه التعديل خلال الأسبوع (168 ساعة)
     },
     weeklyReport: {
       cutoffDay: 5,    // الجمعة (0: الأحد, 5: الجمعة)
