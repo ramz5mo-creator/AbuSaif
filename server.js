@@ -341,18 +341,41 @@ async function start() {
     if (!result) return;
 
     if (result.type === 'accept') {
-      // رسالة "تم" → حفظ في tamCache + سجل_تم فقط
       const captainPhone = result.phone;
       const tamMessageId = result.messageId;
 
       if (captainPhone && tamMessageId) {
         whatsapp.setCaptainForMessage(tamMessageId, captainPhone);
-
-        sheets.saveTamToSheet(tamMessageId, captainPhone).catch((err) => {
-          logger.debug('فشل حفظ تم', { error: err.message });
-        });
-
+        sheets.saveTamToSheet(tamMessageId, captainPhone).catch(() => {});
         logger.info('💾 حفظ "تم"', { captain: captainPhone, msgId: tamMessageId.substring(0, 8) });
+
+        // إذا كان الرد يحتوي على إيموجي كمي مباشرة (مثل رد بـ 👍)
+        if (result.quantity > 0 && result.orderOwnerPhone) {
+          const targetGroups = config.whatsapp.targetGroups || [];
+          const groupInfo = targetGroups.find(g => g.id === result.groupId);
+          const groupPrefix = groupInfo ? groupInfo.prefix : '';
+          
+          try {
+            const name = whatsapp.getPushName(msg);
+            await sheets.updateTotalsProduction(result.orderOwnerPhone, result.quantity, groupPrefix, name);
+            await sheets.updateTotalsReception(captainPhone, result.quantity, groupPrefix, 'كابتن');
+            
+            sheets.recordTransaction({
+              transactionId: result.transactionId,
+              timestamp: result.timestamp,
+              producerPhone: result.orderOwnerPhone,
+              captainPhone: captainPhone,
+              quantity: result.quantity,
+              type: 'استلام (رد)',
+              emoji: '⌨️',
+              groupPrefix: groupPrefix,
+              status: 'نشط',
+              notes: `msgId:${tamMessageId}`
+            }).catch(() => {});
+          } catch (error) {
+            logger.error('فشل تسجيل رد كمي', { error: error.message });
+          }
+        }
       }
     }
     // أي شيء آخر (order) → نتجاهله — لا نسجل الطلبات

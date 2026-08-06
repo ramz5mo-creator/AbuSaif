@@ -86,6 +86,9 @@ async function initialize() {
     }
     logger.info('تم الاتصال بالجدول', { title, sheets: existingSheets.size });
     isInitialized = true;
+    
+    // ضمان وجود أوراق التسجيل
+    await ensureRegistrationSheets();
   } catch (error) {
     if (error.code === 401 || error.code === 403)
       throw new Error('انتهت صلاحية تسجيل الدخول! شغّل: node setup-auth.js');
@@ -467,6 +470,52 @@ async function ensureWeeklySheet(sheetName) {
 }
 
 /**
+ * ضمان وجود أوراق التسجيل
+ */
+async function ensureRegistrationSheets() {
+  const regSheet = config.sheets.sheetNames.registeredUsers || 'المسجلين';
+  const unregSheet = config.sheets.sheetNames.unregisteredNumbers || 'أرقام غير مسجلة';
+
+  // 1. ورقة المسجلين
+  if (!existingSheets.has(regSheet)) {
+    try {
+      await sheetsApi.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [{ addSheet: { properties: { title: regSheet, rightToLeft: true } } }],
+        },
+      });
+      await sheetsApi.spreadsheets.values.update({
+        spreadsheetId,
+        range: `'${regSheet}'!A1:B1`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [['الهاتف', 'الاسم']] },
+      });
+      existingSheets.add(regSheet);
+    } catch (e) { logger.debug('فشل إنشاء ورقة المسجلين', { error: e.message }); }
+  }
+
+  // 2. ورقة غير المسجلين
+  if (!existingSheets.has(unregSheet)) {
+    try {
+      await sheetsApi.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [{ addSheet: { properties: { title: unregSheet, rightToLeft: true } } }],
+        },
+      });
+      await sheetsApi.spreadsheets.values.update({
+        spreadsheetId,
+        range: `'${unregSheet}'!A1:C1`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [['الهاتف', 'الاسم المقترح', 'تاريخ المحاولة']] },
+      });
+      existingSheets.add(unregSheet);
+    } catch (e) { logger.debug('فشل إنشاء ورقة غير المسجلين', { error: e.message }); }
+  }
+}
+
+/**
  * توليد تقرير نهاية الأسبوع
  * يجمع البيانات من سجل الحركات للأسبوع الحالي
  */
@@ -505,7 +554,9 @@ async function generateWeeklyReport() {
       if (!timestamp) continue;
       
       const time = new Date(timestamp);
-      if (time >= lastFriday) {
+      const status = rows[i][8] || 'نشط';
+      
+      if (time >= lastFriday && status === 'نشط') {
         const q = parseFloat(qty) || 0;
         
         if (prodPhone) {
@@ -554,6 +605,107 @@ async function generateWeeklyReport() {
   }
 }
 
+/**
+ * التحقق مما إذا كان المستخدم مشرفاً
+ */
+async function isSupervisor(phone) {
+  if (!isInitialized || !phone) return false;
+  const sheetName = config.sheets.sheetNames.settings || 'الإعدادات';
+  try {
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${sheetName}'!A:B`,
+    });
+    const rows = response.data.values || [];
+    for (const row of rows) {
+      if (row[0] === 'المشرفين' && row[1]) {
+        const supervisors = row[1].split(/[،,]/).map(s => s.trim().replace(/\D/g, '')).filter(Boolean);
+        const cleanPhone = phone.replace(/\D/g, '');
+        // مطابقة نهاية الرقم (لتجاوز مفاتيح الدول أحياناً)
+        return supervisors.some(s => cleanPhone.endsWith(s));
+      }
+    }
+    return false;
+  } catch (error) {
+    return false;
+  }
+}
+
+/**
+ * إلغاء عملية (❌) خلال 48 ساعة
+ */
+async function cancelTransaction(targetId, supervisorPhone) {
+  if (!isInitialized || !targetId) return { success: false, message: 'بيانات غير مكتملة' };
+
+  // 1. التحقق من صلاحية المشرف
+  const isSuper = await isSupervisor(supervisorPhone);
+  if (!isSuper) return { success: false, message: 'ليس لديك صلاحية الإلغاء' };
+
+  const transSheet = config.sheets.sheetNames.transactions || 'سجل الحركات';
+  try {
+    // 2. البحث عن العملية (نبحث في العمود A للمعرف أو أي عمود قد يحتوي على معرف الرسالة)
+    // بما أننا نسجل messageId في سجل الحركات أحياناً، سنبحث في كامل البيانات
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${transSheet}'!A:J`,
+    });
+    const rows = response.data.values || [];
+    let rowIndex = -1;
+    let transactionData = null;
+
+    for (let i = rows.length - 1; i >= 1; i--) {
+      // مطابقة معرف العملية (A) أو معرف الرسالة (نخزنه في الملاحظات J أحياناً أو نبحث عنه)
+      // الأفضل: سنعدل سجل الحركات ليحتوي على معرف الرسالة في عمود منفصل مستقبلاً،
+      // حالياً نبحث في العمود A (معرف العملية) أو J (الملاحظات)
+      if (rows[i][0] === targetId || (rows[i][9] && rows[i][9].includes(targetId))) {
+        rowIndex = i + 1;
+        transactionData = {
+          id: rows[i][0],
+          time: new Date(rows[i][1]),
+          producer: rows[i][2],
+          captain: rows[i][3],
+          qty: parseFloat(rows[i][4]),
+          type: rows[i][5],
+          prefix: rows[i][7],
+          status: rows[i][8]
+        };
+        break;
+      }
+    }
+
+    if (!transactionData) return { success: false, message: 'العملية غير موجودة' };
+    if (transactionData.status === 'ملغى') return { success: false, message: 'العملية ملغاة بالفعل' };
+
+    // 3. التحقق من الوقت (48 ساعة)
+    const now = new Date();
+    const diffHours = (now - transactionData.time) / (1000 * 60 * 60);
+    if (diffHours > 48) return { success: false, message: 'انتهت مهلة الإلغاء (48 ساعة)' };
+
+    // 4. تصفير القيم في الجدول اليومي (خصم ما تم تسجيله)
+    if (transactionData.producer) {
+      await updateTotalsProduction(transactionData.producer, -transactionData.qty, transactionData.prefix, 'كابتن');
+    }
+    if (transactionData.captain) {
+      await updateTotalsReception(transactionData.captain, -transactionData.qty, transactionData.prefix, 'كابتن');
+    }
+
+    // 5. تحديث حالة العملية في سجل الحركات
+    await sheetsApi.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${transSheet}'!I${rowIndex}:J${rowIndex}`,
+      valueInputOption: 'RAW',
+      requestBody: {
+        values: [['ملغى', `تم الإلغاء بواسطة ${supervisorPhone} في ${new Date().toLocaleString('ar-JO')}`]]
+      }
+    });
+
+    return { success: true, message: 'تم إلغاء العملية وتصفير القيم بنجاح' };
+  } catch (error) {
+    logger.error('خطأ في إلغاء العملية', { error: error.message });
+    return { success: false, message: 'خطأ تقني في الإلغاء' };
+  }
+}
+
 async function recordTransaction(transaction) {
   if (!isInitialized) return;
 
@@ -566,12 +718,15 @@ async function recordTransaction(transaction) {
     transaction.quantity || 1,
     transaction.type || '',
     transaction.emoji || '',
+    transaction.groupPrefix || '',
+    transaction.status || 'نشط',
+    transaction.notes || ''
   ];
 
   try {
     await sheetsApi.spreadsheets.values.append({
       spreadsheetId,
-      range: `'${sheetName}'!A:G`,
+      range: `'${sheetName}'!A:J`,
       valueInputOption: 'RAW',
       insertDataOption: 'INSERT_ROWS',
       requestBody: { values: [row] },
@@ -604,7 +759,10 @@ module.exports = {
   getCaptainFromTamSheet,
   // سجل الحركات
   recordTransaction,
+  isSupervisor,
+  cancelTransaction,
   generateWeeklyReport,
+  getTodaySheetName,
   // deprecated (للتوافق)
   updateBalance,
   updateTotals,
