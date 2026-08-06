@@ -71,6 +71,27 @@ const httpServer = http.createServer(async (req, res) => {
     const lookup = whatsapp.lookupPhone(phone);
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ phone, ...lookup }, null, 2));
+  } else if (req.url === '/participants') {
+    try {
+      const sock = whatsapp.getSocket();
+      const targetGroups = config.whatsapp.targetGroups || [];
+      const allParticipants = {};
+      for (const group of targetGroups) {
+        try {
+          const metadata = await sock.groupMetadata(group.id);
+          allParticipants[group.name] = (metadata.participants || []).map(p => ({
+            id: p.id || null,
+            lid: p.lid || null,
+            admin: p.admin || null
+          }));
+        } catch(e) { allParticipants[group.name] = 'error: ' + e.message; }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(allParticipants, null, 2));
+    } catch(e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
   } else if (req.url === '/groups') {
     const groups = whatsapp.getDiscoveredGroups();
     let html = `<html><head><meta charset="utf-8"><style>
