@@ -144,9 +144,16 @@ const httpServer = http.createServer(async (req, res) => {
     const authPath = path.resolve(config.whatsapp.authPath);
     try {
       if (fs.existsSync(authPath)) {
-        // بما أننا نستخدم مجلد فرعي 'session'، يمكننا حذفه بالكامل بأمان
-        fs.rmSync(authPath, { recursive: true, force: true });
-        logger.info('🗑️ تم مسح مجلد الجلسة بالكامل');
+        const files = fs.readdirSync(authPath);
+        for (const file of files) {
+          const curPath = path.join(authPath, file);
+          if (fs.lstatSync(curPath).isDirectory()) {
+            fs.rmSync(curPath, { recursive: true, force: true });
+          } else {
+            fs.unlinkSync(curPath);
+          }
+        }
+        logger.info('🗑️ تم مسح محتويات مجلد الجلسة');
       }
     } catch (e) {
       logger.error('خطأ في مسح الجلسة', { error: e.message });
