@@ -347,22 +347,46 @@ async function start() {
 
       } else if (result.type === 'cancel') {
         // === إلغاء ===
+        // البحث عن العملية الأصلية لمعرفة الكمية الفعلية
+        let cancelQuantity = quantity;
+        let cancelCaptain = captainPhone;
+        let cancelProducer = producerPhone;
+
+        if (quotedMsgId) {
+          try {
+            const existingTx = await sheets.findTransactionByMessageId(quotedMsgId, producerPhone);
+            if (existingTx) {
+              cancelQuantity = existingTx.quantity || quantity;
+              cancelCaptain = existingTx.captainPhone || captainPhone;
+              cancelProducer = existingTx.producerPhone || producerPhone;
+              logger.info('❌ إلغاء بناءً على عملية سابقة', { 
+                originalQty: cancelQuantity, 
+                producer: cancelProducer, 
+                captain: cancelCaptain 
+              });
+            }
+          } catch (e) {
+            logger.debug('لم يتم العثور على عملية سابقة للإلغاء', { error: e.message });
+          }
+        }
+
         logger.info('❌ إلغاء', { 
-          producer: producerPhone, 
-          captain: captainPhone || '❓',
+          producer: cancelProducer, 
+          captain: cancelCaptain || '❓',
+          qty: cancelQuantity,
           group: groupInfo ? groupInfo.name : 'Unknown'
         });
 
         try {
           const producerName = whatsapp.getPushName(msg);
-          await sheets.updateTotalsProduction(producerPhone, -quantity, groupPrefix, producerName);
+          await sheets.updateTotalsProduction(cancelProducer, -cancelQuantity, groupPrefix, producerName);
         } catch (error) {
           logger.error('فشل خصم انتاج', { error: error.message });
         }
 
-        if (captainPhone) {
+        if (cancelCaptain) {
           try {
-            await sheets.updateTotalsReception(captainPhone, -quantity, groupPrefix, 'كابتن');
+            await sheets.updateTotalsReception(cancelCaptain, -cancelQuantity, groupPrefix, 'كابتن');
           } catch (error) {
             logger.error('فشل خصم استلام', { error: error.message });
           }
@@ -371,9 +395,9 @@ async function start() {
         sheets.recordTransaction({
           transactionId: result.transactionId,
           timestamp: result.timestamp,
-          producerPhone,
-          captainPhone: captainPhone || '',
-          quantity,
+          producerPhone: cancelProducer,
+          captainPhone: cancelCaptain || '',
+          quantity: cancelQuantity,
           type: 'إلغاء',
           emoji: '❌',
           groupPrefix,

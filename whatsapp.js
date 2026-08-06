@@ -366,8 +366,15 @@ function getSenderJid(msg) {
     }
   }
 
-  // رابعاً: participant حتى لو LID (آخر محاولة)
-  if (key.participant && !key.participant.endsWith('@g.us')) return key.participant;
+  // رابعاً: participant حتى لو LID (آخر محاولة) - لكن نسجل تحذير
+  if (key.participant && !key.participant.endsWith('@g.us')) {
+    if (key.participant.includes('@lid')) {
+      logger.debug('⚠️ LID غير محلول - سيتم تحديث الخريطة', { lid: key.participant });
+      // جدولة تحديث الخريطة (بدون انتظار)
+      setTimeout(() => loadGroupParticipants(), 1000);
+    }
+    return key.participant;
+  }
   if (key.remoteJid && !key.remoteJid.endsWith('@g.us')) return key.remoteJid;
 
   return null;

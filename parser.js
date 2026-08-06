@@ -60,7 +60,6 @@ function cleanPhone(jid) {
 
   if (!phone) return null;
 
-  // أرقام الأردن 12 خانة (962 + 9 أرقام)
   // إذا كان أطول من 12 → احذف من البداية
   while (phone.length > 12) {
     phone = phone.substring(1);
@@ -68,6 +67,15 @@ function cleanPhone(jid) {
 
   // أقل من 9 أرقام → غير صالح
   if (phone.length < 9) return null;
+
+  // === توحيد الصيغة: دائماً 9 أرقام (بدون مفتاح الدولة 962) ===
+  if (phone.length === 12 && phone.startsWith('962')) {
+    phone = phone.substring(3); // 962791234567 → 791234567
+  } else if (phone.length === 11 && phone.startsWith('96')) {
+    phone = phone.substring(2); // 9679... → 79...
+  } else if (phone.length === 10 && phone.startsWith('0')) {
+    phone = phone.substring(1); // 0791234567 → 791234567
+  }
 
   return phone;
 }

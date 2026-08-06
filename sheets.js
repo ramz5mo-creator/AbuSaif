@@ -37,6 +37,24 @@ const CREDENTIALS_PATH = path.resolve('./oauth-credentials.json');
 // كاش لأسماء الأوراق الموجودة (لتجنب إنشاء مكرر)
 const existingSheets = new Set();
 
+/**
+ * توحيد صيغة رقم الهاتف: دائماً 9 أرقام (بدون مفتاح الدولة 962)
+ * 962791234567 → 791234567
+ * 791234567 → 791234567
+ * 0791234567 → 791234567
+ */
+function normalizePhone(phone) {
+  if (!phone) return null;
+  let p = String(phone).replace(/\D/g, '');
+  if (!p || p.length < 9) return null;
+  // إزالة أي زيادة من البداية
+  while (p.length > 12) p = p.substring(1);
+  if (p.length === 12 && p.startsWith('962')) p = p.substring(3);
+  else if (p.length === 11 && p.startsWith('96')) p = p.substring(2);
+  else if (p.length === 10 && p.startsWith('0')) p = p.substring(1);
+  return p.length >= 9 ? p : null;
+}
+
 // ====================================================
 // تهيئة الاتصال
 // ====================================================
@@ -254,8 +272,9 @@ async function updateTotalsProduction(phone, quantity, groupPrefix = '', name = 
     return;
   }
 
-  // استخدام الرقم كما هو (الجميع يُحسب سواء مسجل أو غير مسجل)
-  const targetPhone = phone.replace(/\D/g, '');
+  // توحيد الرقم (دائماً 9 أرقام بدون مفتاح الدولة)
+  const targetPhone = normalizePhone(phone);
+  if (!targetPhone) return;
   const sheetName = getTodaySheetName(groupPrefix);
   await ensureDailySheet(sheetName);
 
@@ -271,7 +290,7 @@ async function updateTotalsProduction(phone, quantity, groupPrefix = '', name = 
     let currentProduction = 0;
 
     for (let i = 1; i < rows.length; i++) {
-      if (rows[i][0] === targetPhone) {
+      if (normalizePhone(rows[i][0]) === targetPhone) {
         found = true;
         rowIndex = i + 1;
         currentProduction = parseFloat(rows[i][1]) || 0;
@@ -317,8 +336,9 @@ async function updateTotalsReception(phone, quantity, groupPrefix = '', name = '
     return;
   }
 
-  // استخدام الرقم كما هو (الجميع يُحسب سواء مسجل أو غير مسجل)
-  const targetPhone = phone.replace(/\D/g, '');
+  // توحيد الرقم (دائماً 9 أرقام بدون مفتاح الدولة)
+  const targetPhone = normalizePhone(phone);
+  if (!targetPhone) return;
   const sheetName = getTodaySheetName(groupPrefix);
   await ensureDailySheet(sheetName);
 
@@ -334,7 +354,7 @@ async function updateTotalsReception(phone, quantity, groupPrefix = '', name = '
     let currentReception = 0;
 
     for (let i = 1; i < rows.length; i++) {
-      if (rows[i][0] === targetPhone) {
+      if (normalizePhone(rows[i][0]) === targetPhone) {
         found = true;
         rowIndex = i + 1;
         currentReception = parseFloat(rows[i][2]) || 0;
