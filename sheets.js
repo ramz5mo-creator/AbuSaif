@@ -254,15 +254,8 @@ async function updateTotalsProduction(phone, quantity, groupPrefix = '', name = 
     return;
   }
 
-  // التحقق من التسجيل والحصول على الصيغة المسجلة
-  const registeredPhone = await isUserRegistered(phone);
-  if (!registeredPhone) {
-    logger.warn(`🚫 رقم غير مسجل حاول التسجيل (انتاج): ${phone}`);
-    await logUnregisteredNumber(phone, name);
-    return;
-  }
-
-  const targetPhone = registeredPhone; // استخدام الرقم كما هو في ورقة المسجلين
+  // استخدام الرقم كما هو (الجميع يُحسب سواء مسجل أو غير مسجل)
+  const targetPhone = phone.replace(/\D/g, '');
   const sheetName = getTodaySheetName(groupPrefix);
   await ensureDailySheet(sheetName);
 
@@ -324,15 +317,8 @@ async function updateTotalsReception(phone, quantity, groupPrefix = '', name = '
     return;
   }
 
-  // التحقق من التسجيل والحصول على الصيغة المسجلة
-  const registeredPhone = await isUserRegistered(phone);
-  if (!registeredPhone) {
-    logger.warn(`🚫 رقم غير مسجل حاول التسجيل (استلام): ${phone}`);
-    await logUnregisteredNumber(phone, name);
-    return;
-  }
-
-  const targetPhone = registeredPhone; // استخدام الرقم كما هو في ورقة المسجلين
+  // استخدام الرقم كما هو (الجميع يُحسب سواء مسجل أو غير مسجل)
+  const targetPhone = phone.replace(/\D/g, '');
   const sheetName = getTodaySheetName(groupPrefix);
   await ensureDailySheet(sheetName);
 
