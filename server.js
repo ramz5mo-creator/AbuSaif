@@ -41,6 +41,7 @@ const httpServer = http.createServer(async (req, res) => {
           <p>آخر تحديث: ${new Date().toLocaleString('ar-JO', {timeZone:'Asia/Amman'})}</p>
         </div>
         <div style="margin-top:30px;">
+          <a href="/weekly-report" style="color:#0f0;text-decoration:none;border:1px solid #0f0;padding:10px;border-radius:5px;margin-left:10px;">📊 توليد تقرير نهاية الأسبوع</a>
           <a href="/logout" style="color:#f00;text-decoration:none;border:1px solid #f00;padding:10px;border-radius:5px;">⚠️ تسجيل الخروج ومسح الجلسة</a>
         </div>
         <script>setTimeout(()=>location.reload(), 30000);</script>
@@ -114,6 +115,24 @@ const httpServer = http.createServer(async (req, res) => {
       html += `</table></body></html>`;
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(html);
+    } catch (e) {
+      res.writeHead(500);
+      res.end('Error: ' + e.message);
+    }
+  } else if (req.url === '/weekly-report') {
+    try {
+      const success = await sheets.generateWeeklyReport();
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      if (success) {
+        res.end(`<html><body style="background:#111;color:#0f0;text-align:center;padding:40px;font-family:monospace;direction:rtl;">
+          <h1>📊 تم توليد تقرير نهاية الأسبوع بنجاح!</h1>
+          <p>يمكنك الآن مراجعة ورقة "نهاية الاسبوع" في Google Sheets.</p>
+          <br>
+          <a href="/" style="color:#fff;text-decoration:none;border:1px solid #fff;padding:10px;border-radius:5px;">العودة للرئيسية</a>
+        </body></html>`);
+      } else {
+        res.end('فشل توليد التقرير. راجع السجلات.');
+      }
     } catch (e) {
       res.writeHead(500);
       res.end('Error: ' + e.message);
@@ -345,6 +364,22 @@ async function start() {
       logger.debug('فشل تحديث الإعدادات');
     }
   }, config.general.settingsRefreshInterval);
+
+  // 6. التحقق من الإغلاق الأسبوعي (الجمعة 11:00 مساءً)
+  setInterval(async () => {
+    const now = new Date();
+    // توقيت الأردن GMT+3
+    const jordanTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
+    
+    // الجمعة = 5
+    // نتحقق من الدقيقة الصفر لضمان التشغيل مرة واحدة فقط في تلك الساعة
+    if (jordanTime.getUTCDay() === 5 && 
+        jordanTime.getUTCHours() === 23 && 
+        jordanTime.getUTCMinutes() === 0) {
+      logger.info('🕒 موعد الإغلاق الأسبوعي - توليد التقرير...');
+      await sheets.generateWeeklyReport();
+    }
+  }, 60000); // كل دقيقة
 
   logger.info('✅ النظام جاهز. في انتظار الرسائل...');
 }

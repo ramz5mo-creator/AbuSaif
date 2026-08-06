@@ -357,6 +357,137 @@ async function getCaptainFromTamSheet(messageId) {
 // سجل الحركات (للتتبع والمراجعة)
 // ====================================================
 
+/**
+ * إنشاء ورقة نهاية الأسبوع إذا لم تكن موجودة
+ */
+async function ensureWeeklySheet(sheetName) {
+  if (existingSheets.has(sheetName)) return;
+
+  try {
+    await sheetsApi.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{
+          addSheet: {
+            properties: {
+              title: sheetName,
+              rightToLeft: true,
+            },
+          },
+        }],
+      },
+    });
+
+    // إضافة الرؤوس
+    await sheetsApi.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${sheetName}'!A1:D1`,
+      valueInputOption: 'RAW',
+      requestBody: {
+        values: [['الهاتف', 'إجمالي الإنتاج', 'إجمالي الاستلام', 'صافي الرصيد']],
+      },
+    });
+
+    existingSheets.add(sheetName);
+    logger.info(`📊 تم إنشاء ورقة نهاية الأسبوع: ${sheetName}`);
+  } catch (error) {
+    if (error.message?.includes('already exists')) {
+      existingSheets.add(sheetName);
+    } else {
+      logger.error('فشل إنشاء ورقة نهاية الأسبوع', { error: error.message, sheetName });
+      throw error;
+    }
+  }
+}
+
+/**
+ * توليد تقرير نهاية الأسبوع
+ * يجمع البيانات من سجل الحركات للأسبوع الحالي
+ */
+async function generateWeeklyReport() {
+  if (!isInitialized) return;
+
+  const weeklySheetName = config.sheets.sheetNames.weeklyReport || 'نهاية الاسبوع';
+  
+  try {
+    // 1. حساب تاريخ بداية الأسبوع (الجمعة الماضية 11:00 مساءً)
+    const now = new Date();
+    const jordanTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
+    
+    let lastFriday = new Date(jordanTime);
+    const day = lastFriday.getUTCDay(); // 0: Sun, 5: Fri
+    const diff = (day >= 5) ? (day - 5) : (day + 2);
+    lastFriday.setUTCDate(lastFriday.getUTCDate() - diff);
+    lastFriday.setUTCHours(23, 0, 0, 0);
+    
+    // إذا كان اليوم هو الجمعة ولكن قبل 11م، نرجع للأسبوع الماضي
+    if (day === 5 && jordanTime.getUTCHours() < 23) {
+      lastFriday.setUTCDate(lastFriday.getUTCDate() - 7);
+    }
+
+    // 2. جلب البيانات من سجل الحركات
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${config.sheets.sheetNames.transactions}'!A:G`,
+    });
+    
+    const rows = response.data.values || [];
+    const summary = {}; // { phone: { prod: 0, recp: 0 } }
+
+    for (let i = 1; i < rows.length; i++) {
+      const [id, timestamp, prodPhone, captPhone, qty, type] = rows[i];
+      if (!timestamp) continue;
+      
+      const time = new Date(timestamp);
+      if (time >= lastFriday) {
+        const q = parseFloat(qty) || 0;
+        
+        if (prodPhone) {
+          if (!summary[prodPhone]) summary[prodPhone] = { prod: 0, recp: 0 };
+          summary[prodPhone].prod += q;
+        }
+        
+        if (captPhone) {
+          if (!summary[captPhone]) summary[captPhone] = { prod: 0, recp: 0 };
+          summary[captPhone].recp += q;
+        }
+      }
+    }
+
+    // 3. تحديث ورقة نهاية الأسبوع
+    await ensureWeeklySheet(weeklySheetName);
+    
+    const values = [['الهاتف', 'إجمالي الإنتاج', 'إجمالي الاستلام', 'صافي الرصيد']];
+    for (const [phone, data] of Object.entries(summary)) {
+      values.push([
+        phone,
+        data.prod,
+        data.recp,
+        data.prod - data.recp
+      ]);
+    }
+
+    // مسح البيانات القديمة أولاً (باستثناء الرؤوس)
+    await sheetsApi.spreadsheets.values.clear({
+      spreadsheetId,
+      range: `'${weeklySheetName}'!A2:D1000`,
+    });
+
+    await sheetsApi.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${weeklySheetName}'!A1`,
+      valueInputOption: 'RAW',
+      requestBody: { values },
+    });
+
+    logger.info(`📊 تم تحديث تقرير نهاية الأسبوع: ${weeklySheetName} (تم معالجة ${Object.keys(summary).length} رقم)`);
+    return true;
+  } catch (error) {
+    logger.error('فشل توليد تقرير نهاية الأسبوع', { error: error.message });
+    return false;
+  }
+}
+
 async function recordTransaction(transaction) {
   if (!isInitialized) return;
 
@@ -407,6 +538,7 @@ module.exports = {
   getCaptainFromTamSheet,
   // سجل الحركات
   recordTransaction,
+  generateWeeklyReport,
   // deprecated (للتوافق)
   updateBalance,
   updateTotals,
