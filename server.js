@@ -246,6 +246,22 @@ async function start() {
       const quantity = result.quantity;
       const quotedMsgId = result.quotedMessageId;
       const remoteJid = msg.key.remoteJid;
+      const orderOwnerPhone = result.orderOwnerPhone || result.quotedPhone || null;
+
+      // === قاعدة: إذا وضع شخص إيموجي على رسالته هو نفسه → تجاهل ===
+      if (orderOwnerPhone && producerPhone) {
+        const cleanProducer = producerPhone.replace(/\D/g, '');
+        const cleanOwner = orderOwnerPhone.replace(/\D/g, '');
+        if (cleanProducer === cleanOwner ||
+            (cleanProducer.length >= 9 && cleanOwner.length >= 9 &&
+             cleanProducer.slice(-9) === cleanOwner.slice(-9))) {
+          logger.info('⚠️ تجاهل: شخص وضع إيموجي على رسالته هو نفسه', {
+            phone: producerPhone,
+            msgId: quotedMsgId?.substring(0, 8)
+          });
+          return;
+        }
+      }
 
       // تحديد بادئة الجروب
       const targetGroups = config.whatsapp.targetGroups || [];
@@ -254,7 +270,7 @@ async function start() {
 
       const captainPhone = await findCaptainPhone(
         quotedMsgId,
-        result.orderOwnerPhone || result.quotedPhone || null
+        orderOwnerPhone
       );
 
       if (result.type === 'accept') {
