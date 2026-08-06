@@ -66,6 +66,11 @@ const httpServer = http.createServer(async (req, res) => {
   } else if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', ...whatsapp.getCacheStats() }));
+  } else if (req.url.startsWith('/debug/')) {
+    const phone = req.url.replace('/debug/', '').trim();
+    const lookup = whatsapp.lookupPhone(phone);
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ phone, ...lookup }, null, 2));
   } else if (req.url === '/groups') {
     const groups = whatsapp.getDiscoveredGroups();
     let html = `<html><head><meta charset="utf-8"><style>

@@ -441,6 +441,25 @@ function getCacheStats() {
   return { messageCache: messageCache.size, tamCache: tamCache.size, lidMap: lidToPhoneMap.size };
 }
 
+function lookupPhone(phone) {
+  // البحث عن رقم في lidMap (هل موجود كقيمة)
+  const results = [];
+  for (const [lid, jid] of lidToPhoneMap.entries()) {
+    const num = jid.replace('@s.whatsapp.net', '');
+    if (num.includes(phone) || phone.includes(num)) {
+      results.push({ lid, jid: num });
+    }
+  }
+  // البحث في tamCache
+  const tamEntries = [];
+  for (const [msgId, captainPhone] of tamCache.entries()) {
+    if (captainPhone.includes(phone) || phone.includes(captainPhone)) {
+      tamEntries.push({ msgId: msgId.substring(0, 12), captainPhone });
+    }
+  }
+  return { inLidMap: results.length > 0, lidEntries: results, tamEntries: tamEntries.slice(0, 10) };
+}
+
 function getSocket() {
   return sock;
 }
@@ -473,4 +492,5 @@ module.exports = {
   getCachedMessage,
   onQRUpdate,
   getDiscoveredGroups,
+  lookupPhone,
 };
