@@ -978,6 +978,199 @@ async function processEdit({ messageId, editorPhone, editorName, newQuantity, gr
 }
 
 // ====================================================
+// الكشف التفصيلي
+// ====================================================
+
+/**
+ * جلب كشف تفصيلي لرقم معين من سجل الحركات
+ * @param {string} phone - رقم الهاتف المطلوب كشفه
+ * @param {string} groupPrefix - بادئة الجروب
+ * @param {Date|null} fromDate - تاريخ البداية (null = الجمعة الماضية)
+ * @param {Date|null} toDate - تاريخ النهاية (null = الآن)
+ * @returns {object} { success, report, totalProduction, totalReception }
+ */
+async function getDetailedReport(phone, groupPrefix, fromDate = null, toDate = null) {
+  if (!isInitialized || !phone) return { success: false, report: 'بيانات غير مكتملة' };
+
+  const transSheet = config.sheets.sheetNames.transactions || 'سجل الحركات';
+  const cleanPhone = phone.replace(/\D/g, '');
+
+  // حساب فترة الكشف (الجمعة للجمعة)
+  const now = new Date();
+  const jordanNow = new Date(now.getTime() + (3 * 60 * 60 * 1000));
+
+  if (!fromDate) {
+    // الجمعة الماضية 23:00
+    fromDate = new Date(jordanNow);
+    const day = fromDate.getUTCDay(); // 0=Sun, 5=Fri
+    const diff = (day >= 5) ? (day - 5) : (day + 2);
+    fromDate.setUTCDate(fromDate.getUTCDate() - diff);
+    fromDate.setUTCHours(0, 0, 0, 0);
+    // إذا كان اليوم جمعة قبل 11م، نرجع للأسبوع الماضي
+    if (day === 5 && jordanNow.getUTCHours() < 23) {
+      fromDate.setUTCDate(fromDate.getUTCDate() - 7);
+    }
+  }
+  if (!toDate) {
+    toDate = jordanNow;
+  }
+
+  try {
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${transSheet}'!A:J`,
+    });
+    const rows = response.data.values || [];
+
+    // جلب اسم الشخص من ورقة المسجلين
+    const regSheet = config.sheets.sheetNames.registeredUsers || 'المسجلين';
+    let registeredNames = {};
+    try {
+      const regResponse = await sheetsApi.spreadsheets.values.get({
+        spreadsheetId,
+        range: `'${regSheet}'!A:B`,
+      });
+      const regRows = regResponse.data.values || [];
+      for (const row of regRows) {
+        if (row[0]) {
+          registeredNames[row[0].replace(/\D/g, '')] = row[1] || '';
+        }
+      }
+    } catch (e) { /* تجاهل */ }
+
+    // الحصول على اسم صاحب الكشف
+    const ownerName = Object.entries(registeredNames).find(([k]) => 
+      k.endsWith(cleanPhone.slice(-9)) || cleanPhone.endsWith(k.slice(-9))
+    )?.[1] || '';
+
+    // فلترة العمليات
+    const transactions = [];
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row[1]) continue;
+
+      const rowTime = new Date(row[1]);
+      if (isNaN(rowTime.getTime())) continue;
+      if (rowTime < fromDate || rowTime > toDate) continue;
+
+      // فلترة الجروب
+      const rowPrefix = row[7] || '';
+      if (groupPrefix && rowPrefix !== groupPrefix) continue;
+
+      const rowProducer = (row[2] || '').replace(/\D/g, '');
+      const rowCaptain = (row[3] || '').replace(/\D/g, '');
+      const rowStatus = row[8] || '';
+
+      // هل الشخص مشارك في هذه العملية؟
+      const isProducer = cleanPhone.endsWith(rowProducer.slice(-9)) || rowProducer.endsWith(cleanPhone.slice(-9));
+      const isCaptain = cleanPhone.endsWith(rowCaptain.slice(-9)) || rowCaptain.endsWith(cleanPhone.slice(-9));
+
+      if (!isProducer && !isCaptain) continue;
+
+      const qty = parseFloat(row[4]) || 0;
+      const type = row[5] || '';
+      const emoji = row[6] || '';
+
+      // جلب اسم الطرف الآخر
+      let otherPhone = '';
+      let otherName = '';
+      let role = '';
+
+      if (isProducer) {
+        role = 'إنتاج';
+        otherPhone = row[3] || '';
+        const otherClean = otherPhone.replace(/\D/g, '');
+        otherName = Object.entries(registeredNames).find(([k]) => 
+          k.endsWith(otherClean.slice(-9)) || otherClean.endsWith(k.slice(-9))
+        )?.[1] || otherPhone;
+      }
+      if (isCaptain) {
+        role = 'استلام';
+        otherPhone = row[2] || '';
+        const otherClean = otherPhone.replace(/\D/g, '');
+        otherName = Object.entries(registeredNames).find(([k]) => 
+          k.endsWith(otherClean.slice(-9)) || otherClean.endsWith(k.slice(-9))
+        )?.[1] || otherPhone;
+      }
+
+      // إذا كان الشخص منتج وكابتن في نفس العملية (نادر)، نسجله كمنتج
+      if (isProducer && isCaptain) role = 'إنتاج+استلام';
+
+      transactions.push({
+        time: rowTime,
+        qty,
+        type,
+        role,
+        status: rowStatus,
+        otherName,
+        otherPhone,
+        emoji,
+      });
+    }
+
+    if (transactions.length === 0) {
+      return { success: true, report: `لا توجد عمليات لهذا الرقم في الفترة المحددة`, totalProduction: 0, totalReception: 0 };
+    }
+
+    // ترتيب حسب التاريخ
+    transactions.sort((a, b) => a.time - b.time);
+
+    // تجميع حسب اليوم
+    const days = {};
+    let totalProduction = 0;
+    let totalReception = 0;
+
+    for (const t of transactions) {
+      const dayKey = t.time.toISOString().substring(0, 10);
+      if (!days[dayKey]) days[dayKey] = [];
+      days[dayKey].push(t);
+
+      if (t.status === 'ملغى' || t.status === 'ملغاة') continue;
+      if (t.role === 'إنتاج') totalProduction += t.qty;
+      else if (t.role === 'استلام') totalReception += t.qty;
+    }
+
+    // بناء نص الكشف
+    const dayNames = ['الأحد', 'الإثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+    let report = `📊 *كشف تفصيلي*\n`;
+    report += `👤 ${ownerName || phone}\n`;
+    report += `📱 ${phone}\n`;
+    report += `📅 ${fromDate.toISOString().substring(0, 10)} → ${toDate.toISOString().substring(0, 10)}\n`;
+    report += `📦 الجروب: ${groupPrefix}\n`;
+    report += `━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+    for (const [dayKey, dayTransactions] of Object.entries(days)) {
+      const d = new Date(dayKey);
+      const dayName = dayNames[d.getUTCDay()];
+      report += `━━━ ${dayName} ${dayKey.substring(5)} ━━━\n`;
+
+      for (const t of dayTransactions) {
+        const timeStr = t.time.toISOString().substring(11, 16);
+        let icon = '🟢';
+        if (t.role === 'استلام') icon = '🔵';
+        if (t.status === 'ملغى' || t.status === 'ملغاة') icon = '❌';
+        if (t.type === 'إلغاء') icon = '❌';
+        if (t.status === 'معدّل') icon = '✏️';
+
+        const direction = t.role === 'إنتاج' ? '→ استلم:' : '← من:';
+        report += `${icon} ${timeStr} | ${t.role} ${t.qty} ${direction} ${t.otherName}\n`;
+      }
+      report += `\n`;
+    }
+
+    report += `━━━━━━━━━━━━━━━━━━━━\n`;
+    report += `📦 إجمالي الإنتاج: ${totalProduction}\n`;
+    report += `📥 إجمالي الاستلام: ${totalReception}\n`;
+    report += `📊 الصافي: ${totalProduction - totalReception >= 0 ? '+' : ''}${totalProduction - totalReception}`;
+
+    return { success: true, report, totalProduction, totalReception };
+  } catch (error) {
+    logger.error('فشل جلب الكشف التفصيلي', { error: error.message });
+    return { success: false, report: 'خطأ تقني في جلب الكشف' };
+  }
+}
+
+// ====================================================
 // دوال مساعدة
 // ====================================================
 
@@ -1009,6 +1202,8 @@ module.exports = {
   findTransactionByMessageId,
   canEdit,
   logEdit,
+  // الكشف التفصيلي
+  getDetailedReport,
   // deprecated (للتوافق)
   updateBalance,
   updateTotals,

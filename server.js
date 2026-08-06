@@ -370,7 +370,55 @@ async function start() {
     }
 
     // ====================================================
-    // حالة 2: رسالة نصية
+    // حالة 2: أوامر المشرف (كشف تفصيلي)
+    // ====================================================
+    const rawText = whatsapp.extractText(msg) || '';
+    const trimmedText = rawText.trim();
+
+    // أمر الكشف: "كشف 962797210303" أو "كشف 962797210303 01/08 06/08"
+    const reportMatch = trimmedText.match(/^كشف\s+(\d{9,15})(?:\s+(\d{1,2}\/\d{1,2})\s+(\d{1,2}\/\d{1,2}))?$/i);
+    if (reportMatch) {
+      const senderJid = whatsapp.getSenderJid(msg);
+      const senderPhone = parser.cleanPhone(senderJid) || senderJid.split('@')[0].replace(/\D/g, '');
+
+      // فقط المشرف يمكنه طلب الكشف
+      const isSuper = await sheets.isSupervisor(senderPhone);
+      if (isSuper) {
+        const targetPhone = reportMatch[1];
+        const remoteJid = msg.key.remoteJid;
+        const targetGroups = config.whatsapp.targetGroups || [];
+        const groupInfo = targetGroups.find(g => g.id === remoteJid);
+        const groupPrefix = groupInfo ? groupInfo.prefix : '';
+
+        // تحديد الفترة (إذا حددها المشرف)
+        let fromDate = null;
+        let toDate = null;
+        if (reportMatch[2] && reportMatch[3]) {
+          const year = new Date().getFullYear();
+          const [fd, fm] = reportMatch[2].split('/');
+          const [td, tm] = reportMatch[3].split('/');
+          fromDate = new Date(`${year}-${fm.padStart(2,'0')}-${fd.padStart(2,'0')}T00:00:00Z`);
+          toDate = new Date(`${year}-${tm.padStart(2,'0')}-${td.padStart(2,'0')}T23:59:59Z`);
+        }
+
+        logger.info('📋 طلب كشف تفصيلي', { supervisor: senderPhone, target: targetPhone, group: groupPrefix });
+
+        try {
+          const reportResult = await sheets.getDetailedReport(targetPhone, groupPrefix, fromDate, toDate);
+          
+          // إرسال الكشف رسالة خاصة للمشرف
+          const supervisorJid = senderJid.includes('@') ? senderJid : `${senderPhone}@s.whatsapp.net`;
+          await sock.sendMessage(supervisorJid, { text: reportResult.report });
+          logger.info('✅ تم إرسال الكشف التفصيلي خاص', { to: senderPhone });
+        } catch (error) {
+          logger.error('فشل إرسال الكشف', { error: error.message });
+        }
+        return; // بصمت - لا رد في الجروب
+      }
+    }
+
+    // ====================================================
+    // حالة 3: رسالة نصية (تم / رد)
     // ====================================================
     const result = await parser.processMessage(msg, sock);
     if (!result) return;
