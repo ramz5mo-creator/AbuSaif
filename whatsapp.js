@@ -165,8 +165,8 @@ async function connect() {
   // تحميل بيانات الجروب لربط LID بالأرقام
   loadGroupParticipants();
   
-  // تحديث البيانات كل ساعة لضمان شمولية الأعضاء الجدد
-  setInterval(loadGroupParticipants, 60 * 60 * 1000);
+  // تحديث البيانات كل 10 دقائق لضمان تغطية 100% من الأعضاء
+  setInterval(loadGroupParticipants, 10 * 60 * 1000);
 }
     });
 
@@ -349,29 +349,44 @@ function getSenderJid(msg) {
   const key = msg.key || {};
 
   // أولاً: الأرقام الحقيقية المباشرة
-  if (key.senderPn) return key.senderPn;
-  if (key.participantPn) return key.participantPn;
+  if (key.senderPn) {
+    // بناء خريطة LID تلقائياً من الرسائل الواردة
+    if (key.participant && key.participant.includes('@lid')) {
+      lidToPhoneMap.set(key.participant, key.senderPn);
+    }
+    return key.senderPn;
+  }
+  if (key.participantPn) {
+    if (key.participant && key.participant.includes('@lid')) {
+      lidToPhoneMap.set(key.participant, key.participantPn);
+    }
+    return key.participantPn;
+  }
 
   // ثانياً: participant إذا كان رقم حقيقي
   if (key.participant && key.participant.includes('@s.whatsapp.net')) return key.participant;
 
-  // ثالثاً: حل LID من الكاش
+  // ثالثاً: البحث في msg.participant (بعض الرسائل تحمله هنا)
+  if (msg.participant && msg.participant.includes('@s.whatsapp.net')) return msg.participant;
+
+  // رابعاً: حل LID من الكاش
   if (key.participant && key.participant.includes('@lid')) {
     const resolved = lidToPhoneMap.get(key.participant);
     if (resolved) return resolved;
     
-    // محاولة إضافية: البحث في الكاش إذا كان الرقم مخزناً بطريقة أخرى
+    // محاولة إضافية: البحث بالجزء الأول من LID
+    const lidPrefix = key.participant.split(':')[0];
     for (const [lid, phone] of lidToPhoneMap.entries()) {
-      if (lid.split(':')[0] === key.participant.split(':')[0]) return phone;
+      if (lid.split(':')[0] === lidPrefix) return phone;
     }
   }
 
-  // رابعاً: participant حتى لو LID (آخر محاولة) - لكن نسجل تحذير
+  // خامساً: participant حتى لو LID (آخر محاولة) - لكن نسجل تحذير
   if (key.participant && !key.participant.endsWith('@g.us')) {
     if (key.participant.includes('@lid')) {
-      logger.debug('⚠️ LID غير محلول - سيتم تحديث الخريطة', { lid: key.participant });
-      // جدولة تحديث الخريطة (بدون انتظار)
-      setTimeout(() => loadGroupParticipants(), 1000);
+      logger.warn('⚠️ LID غير محلول', { lid: key.participant });
+      // جدولة تحديث الخريطة فوراً
+      setTimeout(() => loadGroupParticipants(), 500);
     }
     return key.participant;
   }
