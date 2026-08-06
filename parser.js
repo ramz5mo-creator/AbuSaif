@@ -348,11 +348,27 @@ async function processMessage(msg, sock) {
   // ====================================================
   
   // استخراج بيانات صاحب الطلب الأصلي من الرد
-  const quotedOwnerJid = 
+  let quotedOwnerJid = 
     contextInfo?.senderPn ||
     contextInfo?.participantPn ||
-    (contextInfo?.participant?.includes('@s.whatsapp.net') ? contextInfo.participant : null) ||
-    contextInfo?.participant;
+    (contextInfo?.participant?.includes('@s.whatsapp.net') ? contextInfo.participant : null);
+  
+  // إذا كان participant هو LID، نحاول حله من الكاش أو عبر pushName
+  if (!quotedOwnerJid && contextInfo?.participant) {
+    if (contextInfo.participant.includes('@lid')) {
+      // محاولة حل LID من الرسالة المقتبسة المخزنة
+      const cachedQuotedMsg = whatsapp.getCachedMessage(contextInfo?.stanzaId);
+      if (cachedQuotedMsg) {
+        quotedOwnerJid = whatsapp.getSenderJid(cachedQuotedMsg);
+      }
+      // إذا لم يُحل، نستخدم participant كما هو
+      if (!quotedOwnerJid || quotedOwnerJid.includes('@lid')) {
+        quotedOwnerJid = contextInfo.participant;
+      }
+    } else {
+      quotedOwnerJid = contextInfo.participant;
+    }
+  }
   const orderOwnerPhone = cleanPhone(quotedOwnerJid);
   const quotedText =
     contextInfo?.quotedMessage?.conversation ||

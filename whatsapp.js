@@ -17,6 +17,7 @@ const {
 const { Boom } = require('@hapi/boom');
 const qrcode = require('qrcode-terminal');
 const QRCode = require('qrcode');
+const fs = require('fs');
 const path = require('path');
 const config = require('./config');
 const logger = require('./logger');
@@ -31,6 +32,18 @@ const tamCache = new Map();
 // كاش لربط LID بالأرقام الحقيقية
 // { lid@lid: phone@s.whatsapp.net }
 const lidToPhoneMap = new Map();
+
+// مسار حفظ lidMap على القرص
+const LID_MAP_PATH = path.resolve(config.whatsapp.authPath, '..', 'lid-map.json');
+
+// مرجع لدالة sheets.loadRegisteredUsers (lazy لتجنب circular dependency)
+let sheetsModule = null;
+function getSheets() {
+  if (!sheetsModule) {
+    try { sheetsModule = require('./sheets'); } catch (e) { /* تجاهل */ }
+  }
+  return sheetsModule;
+}
 
 // كاش الجروبات المكتشفة { groupId: { name, messageCount, lastMessage } }
 const discoveredGroups = new Map();
@@ -61,13 +74,15 @@ async function connect() {
   isConnecting = true;
 
   try {
-    const fs = require('fs');
     const authPath = path.resolve(config.whatsapp.authPath);
     
     // ضمان وجود المجلد قبل البدء
     if (!fs.existsSync(authPath)) {
       fs.mkdirSync(authPath, { recursive: true });
     }
+
+    // تحميل lidMap من القرص عند بدء التشغيل
+    loadLidMap();
 
     const { state, saveCreds } = await useMultiFileAuthState(authPath);
 
@@ -165,8 +180,19 @@ async function connect() {
   // تحميل بيانات الجروب لربط LID بالأرقام
   loadGroupParticipants();
   
+  // تحميل أسماء المسجلين لحل LID عبر pushName
+  const sheets = getSheets();
+  if (sheets && sheets.loadRegisteredUsers) {
+    sheets.loadRegisteredUsers().catch(() => {});
+  }
+  
   // تحديث البيانات كل 10 دقائق لضمان تغطية 100% من الأعضاء
-  setInterval(loadGroupParticipants, 10 * 60 * 1000);
+  setInterval(() => {
+    loadGroupParticipants();
+    // تحديث أسماء المسجلين كل 10 دقائق أيضاً
+    const s = getSheets();
+    if (s && s.loadRegisteredUsers) s.loadRegisteredUsers(true).catch(() => {});
+  }, 10 * 60 * 1000);
 }
     });
 
@@ -298,6 +324,87 @@ async function loadGroupParticipants() {
 }
 
 // ====================================================
+// حفظ وتحميل lidMap من/إلى القرص
+// ====================================================
+
+/**
+ * حفظ lidMap على القرص (يُستدعى عند كل تحديث جديد)
+ */
+function saveLidMap() {
+  try {
+    const dir = path.dirname(LID_MAP_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const obj = Object.fromEntries(lidToPhoneMap);
+    fs.writeFileSync(LID_MAP_PATH, JSON.stringify(obj, null, 2));
+    logger.debug(`💾 تم حفظ lidMap (${lidToPhoneMap.size} ربط)`);
+  } catch (e) {
+    logger.warn('فشل حفظ lidMap', { error: e.message });
+  }
+}
+
+/**
+ * تحميل lidMap من القرص عند بدء التشغيل
+ */
+function loadLidMap() {
+  try {
+    if (fs.existsSync(LID_MAP_PATH)) {
+      const data = JSON.parse(fs.readFileSync(LID_MAP_PATH, 'utf8'));
+      let count = 0;
+      for (const [lid, phone] of Object.entries(data)) {
+        if (lid && phone) {
+          lidToPhoneMap.set(lid, phone);
+          count++;
+        }
+      }
+      logger.info(`📂 تم تحميل ${count} ربط LID من القرص`);
+    }
+  } catch (e) {
+    logger.warn('فشل تحميل lidMap من القرص', { error: e.message });
+  }
+}
+
+/**
+ * إضافة ربط جديد لـ lidMap مع حفظ تلقائي
+ */
+let lidMapDirty = false;
+let lidMapSaveTimer = null;
+
+function addLidMapping(lid, phone) {
+  if (!lid || !phone) return;
+  if (lidToPhoneMap.get(lid) === phone) return; // لا تغيير
+  lidToPhoneMap.set(lid, phone);
+  lidMapDirty = true;
+  // حفظ مؤجل (كل 5 ثواني) لتجنب الكتابة المتكررة
+  if (!lidMapSaveTimer) {
+    lidMapSaveTimer = setTimeout(() => {
+      lidMapSaveTimer = null;
+      if (lidMapDirty) {
+        saveLidMap();
+        lidMapDirty = false;
+      }
+    }, 5000);
+  }
+}
+
+/**
+ * محاولة حل LID عبر مطابقة pushName مع ورقة المسجلين
+ */
+function resolveLidByPushName(lid, pushName) {
+  if (!lid || !pushName || pushName === 'غير معروف') return null;
+  const sheets = getSheets();
+  if (!sheets || !sheets.findPhoneByName) return null;
+  
+  const phone = sheets.findPhoneByName(pushName);
+  if (phone) {
+    const jid = `${phone}@s.whatsapp.net`;
+    addLidMapping(lid, jid);
+    logger.info(`🔗 تم ربط LID بالاسم: ${pushName} → ${phone}`, { lid: lid.substring(0, 12) });
+    return jid;
+  }
+  return null;
+}
+
+// ====================================================
 // استخراج الأرقام
 // ====================================================
 
@@ -352,13 +459,13 @@ function getSenderJid(msg) {
   if (key.senderPn) {
     // بناء خريطة LID تلقائياً من الرسائل الواردة
     if (key.participant && key.participant.includes('@lid')) {
-      lidToPhoneMap.set(key.participant, key.senderPn);
+      addLidMapping(key.participant, key.senderPn);
     }
     return key.senderPn;
   }
   if (key.participantPn) {
     if (key.participant && key.participant.includes('@lid')) {
-      lidToPhoneMap.set(key.participant, key.participantPn);
+      addLidMapping(key.participant, key.participantPn);
     }
     return key.participantPn;
   }
@@ -379,14 +486,18 @@ function getSenderJid(msg) {
     for (const [lid, phone] of lidToPhoneMap.entries()) {
       if (lid.split(':')[0] === lidPrefix) return phone;
     }
+    
+    // خامساً: محاولة حل LID عبر pushName من ورقة المسجلين
+    if (msg.pushName) {
+      const resolvedByName = resolveLidByPushName(key.participant, msg.pushName);
+      if (resolvedByName) return resolvedByName;
+    }
   }
 
-  // خامساً: participant حتى لو LID (آخر محاولة) - لكن نسجل تحذير
+  // سادساً: participant حتى لو LID (آخر محاولة) - لكن نسجل تحذير
   if (key.participant && !key.participant.endsWith('@g.us')) {
     if (key.participant.includes('@lid')) {
-      logger.warn('⚠️ LID غير محلول', { lid: key.participant });
-      // جدولة تحديث الخريطة فوراً
-      setTimeout(() => loadGroupParticipants(), 500);
+      logger.warn('⚠️ LID غير محلول', { lid: key.participant, pushName: msg.pushName || '' });
     }
     return key.participant;
   }
@@ -493,4 +604,6 @@ module.exports = {
   onQRUpdate,
   getDiscoveredGroups,
   lookupPhone,
+  resolveLidByPushName,
+  addLidMapping,
 };

@@ -4,10 +4,11 @@
  * 
  * هيكل الأوراق:
  *
- * ورقة يومية (اسمها = التاريخ مثل "2026-08-04"):
+ * ورقة يومية (اسمها = التاريخ مثل "دريمكس-2026-08-04"):
  *   A: الهاتف
- *   B: #الانتاج
- *   C: الاستلام
+ *   B: الاسم
+ *   C: #الانتاج
+ *   D: الاستلام
  *   (تُنشأ تلقائياً كل يوم)
  *
  * ورقة "سجل_تم" (A:C):
@@ -36,6 +37,11 @@ const CREDENTIALS_PATH = path.resolve('./oauth-credentials.json');
 
 // كاش لأسماء الأوراق الموجودة (لتجنب إنشاء مكرر)
 const existingSheets = new Set();
+
+// كاش أسماء المسجلين { normalizedPhone → name }
+let registeredUsersCache = new Map();
+let lastRegisteredUsersLoad = 0;
+const REGISTERED_USERS_CACHE_TTL = 5 * 60 * 1000; // 5 دقائق
 
 /**
  * توحيد صيغة رقم الهاتف: دائماً 9 أرقام (بدون مفتاح الدولة 962)
@@ -107,6 +113,9 @@ async function initialize() {
     
     // ضمان وجود أوراق التسجيل
     await ensureRegistrationSheets();
+    
+    // تحميل أسماء المسجلين في الكاش
+    await loadRegisteredUsers();
   } catch (error) {
     if (error.code === 401 || error.code === 403)
       throw new Error('انتهت صلاحية تسجيل الدخول! شغّل: node setup-auth.js');
@@ -131,6 +140,90 @@ async function loadSettings() {
   } catch (error) {
     logger.debug('فشل تحميل الإعدادات', { error: error.message });
   }
+}
+
+// ====================================================
+// تحميل أسماء المسجلين من ورقة "المسجلين"
+// ====================================================
+
+/**
+ * تحميل أسماء المسجلين من Google Sheets
+ * يُرجع Map من normalizedPhone → name
+ * يستخدم كاش بمدة 5 دقائق لتقليل الاستعلامات
+ */
+async function loadRegisteredUsers(forceRefresh = false) {
+  if (!isInitialized) return registeredUsersCache;
+  
+  const now = Date.now();
+  if (!forceRefresh && registeredUsersCache.size > 0 && (now - lastRegisteredUsersLoad) < REGISTERED_USERS_CACHE_TTL) {
+    return registeredUsersCache;
+  }
+
+  const sheetName = config.sheets.sheetNames.registeredUsers || 'المسجلين';
+  try {
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${sheetName}'!A:B`,
+    });
+    const rows = response.data.values || [];
+    const newCache = new Map();
+    
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (row[0]) {
+        const np = normalizePhone(row[0]);
+        if (np) {
+          newCache.set(np, row[1] || '');
+        }
+      }
+    }
+    
+    registeredUsersCache = newCache;
+    lastRegisteredUsersLoad = now;
+    logger.info(`📚 تم تحميل ${newCache.size} مسجل من ورقة المسجلين`);
+    return registeredUsersCache;
+  } catch (error) {
+    logger.warn('فشل تحميل المسجلين', { error: error.message });
+    return registeredUsersCache;
+  }
+}
+
+/**
+ * البحث عن اسم مسجل برقم الهاتف
+ */
+function getRegisteredName(phone) {
+  if (!phone) return '';
+  const np = normalizePhone(phone);
+  if (!np) return '';
+  return registeredUsersCache.get(np) || '';
+}
+
+/**
+ * البحث عن رقم هاتف بالاسم (pushName)
+ * يُستخدم لحل مشكلة LID غير المحلول
+ */
+function findPhoneByName(pushName) {
+  if (!pushName || pushName === 'غير معروف') return null;
+  const cleanName = pushName.trim().toLowerCase();
+  
+  // بحث مطابق تماماً
+  for (const [phone, name] of registeredUsersCache.entries()) {
+    if (name && name.trim().toLowerCase() === cleanName) {
+      return phone;
+    }
+  }
+  
+  // بحث جزئي (الاسم يحتوي على pushName أو العكس)
+  for (const [phone, name] of registeredUsersCache.entries()) {
+    if (name) {
+      const regName = name.trim().toLowerCase();
+      if (regName.includes(cleanName) || cleanName.includes(regName)) {
+        return phone;
+      }
+    }
+  }
+  
+  return null;
 }
 
 // ====================================================
@@ -172,13 +265,13 @@ async function ensureDailySheet(sheetName) {
       },
     });
 
-    // إضافة الرؤوس
+    // إضافة الرؤوس (4 أعمدة: الهاتف، الاسم، #الانتاج، الاستلام)
     await sheetsApi.spreadsheets.values.update({
       spreadsheetId,
-      range: `'${sheetName}'!A1:C1`,
+      range: `'${sheetName}'!A1:D1`,
       valueInputOption: 'RAW',
       requestBody: {
-        values: [['الهاتف', '#الانتاج', 'الاستلام']],
+        values: [['الهاتف', 'الاسم', '#الانتاج', 'الاستلام']],
       },
     });
 
@@ -265,6 +358,8 @@ async function logUnregisteredNumber(phone, name = 'غير معروف') {
 
 /**
  * تسجيل انتاج للمنتج (من وضع الإيموجي)
+ * الورقة اليومية: A=الهاتف, B=الاسم, C=#الانتاج, D=الاستلام
+ * متوافق مع الورقات القديمة (3 أعمدة) والجديدة (4 أعمدة)
  */
 async function updateTotalsProduction(phone, quantity, groupPrefix = '', name = 'غير معروف') {
   if (!isInitialized || !phone) {
@@ -272,55 +367,82 @@ async function updateTotalsProduction(phone, quantity, groupPrefix = '', name = 
     return;
   }
 
-  // توحيد الرقم (دائماً 9 أرقام بدون مفتاح الدولة)
   const targetPhone = normalizePhone(phone);
   if (!targetPhone) return;
   const sheetName = getTodaySheetName(groupPrefix);
   await ensureDailySheet(sheetName);
 
+  // الحصول على الاسم من ورقة المسجلين (أولوية) أو من pushName
+  const registeredName = getRegisteredName(targetPhone);
+  const displayName = registeredName || name || 'غير معروف';
+
   try {
     const response = await sheetsApi.spreadsheets.values.get({
       spreadsheetId,
-      range: `'${sheetName}'!A:C`,
+      range: `'${sheetName}'!A:D`,
     });
 
     const rows = response.data.values || [];
     let found = false;
     let rowIndex = -1;
     let currentProduction = 0;
+    
+    // اكتشاف هيكل الورقة (قديمة 3 أعمدة أو جديدة 4 أعمدة)
+    const headers = rows[0] || [];
+    const hasNameCol = headers.length >= 4 && headers[1] === 'الاسم';
+    const prodColIdx = hasNameCol ? 2 : 1; // C أو B
 
     for (let i = 1; i < rows.length; i++) {
       if (normalizePhone(rows[i][0]) === targetPhone) {
         found = true;
         rowIndex = i + 1;
-        currentProduction = parseFloat(rows[i][1]) || 0;
+        currentProduction = parseFloat(rows[i][prodColIdx]) || 0;
         break;
       }
     }
 
-        let newProduction = currentProduction + quantity;
+    let newProduction = currentProduction + quantity;
     if (newProduction < 0) newProduction = 0;
 
     if (found) {
-      await sheetsApi.spreadsheets.values.update({
-        spreadsheetId,
-        range: `'${sheetName}'!B${rowIndex}`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [[newProduction]] },
-      });
+      // تحديث الإنتاج + الاسم (إذا كانت الورقة جديدة)
+      if (hasNameCol) {
+        await sheetsApi.spreadsheets.values.update({
+          spreadsheetId,
+          range: `'${sheetName}'!B${rowIndex}:C${rowIndex}`,
+          valueInputOption: 'RAW',
+          requestBody: { values: [[displayName, newProduction]] },
+        });
+      } else {
+        await sheetsApi.spreadsheets.values.update({
+          spreadsheetId,
+          range: `'${sheetName}'!B${rowIndex}`,
+          valueInputOption: 'RAW',
+          requestBody: { values: [[newProduction]] },
+        });
+      }
     } else {
-      // إذا كانت الحركة سالبة ولم يكن الرقم موجوداً أصلاً، نضعه 0
       const initialProduction = quantity < 0 ? 0 : quantity;
-      await sheetsApi.spreadsheets.values.append({
-        spreadsheetId,
-        range: `'${sheetName}'!A:C`,
-        valueInputOption: 'RAW',
-        insertDataOption: 'INSERT_ROWS',
-        requestBody: { values: [[targetPhone, initialProduction, 0]] },
-      });
+      if (hasNameCol) {
+        await sheetsApi.spreadsheets.values.append({
+          spreadsheetId,
+          range: `'${sheetName}'!A:D`,
+          valueInputOption: 'RAW',
+          insertDataOption: 'INSERT_ROWS',
+          requestBody: { values: [[targetPhone, displayName, initialProduction, 0]] },
+        });
+      } else {
+        await sheetsApi.spreadsheets.values.append({
+          spreadsheetId,
+          range: `'${sheetName}'!A:C`,
+          valueInputOption: 'RAW',
+          insertDataOption: 'INSERT_ROWS',
+          requestBody: { values: [[targetPhone, initialProduction, 0]] },
+        });
+      }
     }
 
-    logger.info(`✅ انتاج: ${targetPhone} +${quantity} = ${newProduction} [${sheetName}]`);
+    logger.info(`✅ انتاج: ${targetPhone} (${displayName}) +${quantity} = ${newProduction} [${sheetName}]`);
   } catch (error) {
     logger.error('فشل تسجيل الانتاج', { error: error.message, phone, sheet: sheetName });
     throw error;
@@ -329,6 +451,8 @@ async function updateTotalsProduction(phone, quantity, groupPrefix = '', name = 
 
 /**
  * تسجيل استلام للكابتن (من كتب "تم")
+ * الورقة اليومية: A=الهاتف, B=الاسم, C=#الانتاج, D=الاستلام
+ * متوافق مع الورقات القديمة (3 أعمدة) والجديدة (4 أعمدة)
  */
 async function updateTotalsReception(phone, quantity, groupPrefix = '', name = 'غير معروف') {
   if (!isInitialized || !phone) {
@@ -336,16 +460,19 @@ async function updateTotalsReception(phone, quantity, groupPrefix = '', name = '
     return;
   }
 
-  // توحيد الرقم (دائماً 9 أرقام بدون مفتاح الدولة)
   const targetPhone = normalizePhone(phone);
   if (!targetPhone) return;
   const sheetName = getTodaySheetName(groupPrefix);
   await ensureDailySheet(sheetName);
 
+  // الحصول على الاسم من ورقة المسجلين (أولوية) أو من pushName
+  const registeredName = getRegisteredName(targetPhone);
+  const displayName = registeredName || name || 'غير معروف';
+
   try {
     const response = await sheetsApi.spreadsheets.values.get({
       spreadsheetId,
-      range: `'${sheetName}'!A:C`,
+      range: `'${sheetName}'!A:D`,
     });
 
     const rows = response.data.values || [];
@@ -353,11 +480,16 @@ async function updateTotalsReception(phone, quantity, groupPrefix = '', name = '
     let rowIndex = -1;
     let currentReception = 0;
 
+    // اكتشاف هيكل الورقة
+    const headers = rows[0] || [];
+    const hasNameCol = headers.length >= 4 && headers[1] === 'الاسم';
+    const recColIdx = hasNameCol ? 3 : 2; // D أو C
+
     for (let i = 1; i < rows.length; i++) {
       if (normalizePhone(rows[i][0]) === targetPhone) {
         found = true;
         rowIndex = i + 1;
-        currentReception = parseFloat(rows[i][2]) || 0;
+        currentReception = parseFloat(rows[i][recColIdx]) || 0;
         break;
       }
     }
@@ -366,25 +498,48 @@ async function updateTotalsReception(phone, quantity, groupPrefix = '', name = '
     if (newReception < 0) newReception = 0;
 
     if (found) {
-      await sheetsApi.spreadsheets.values.update({
-        spreadsheetId,
-        range: `'${sheetName}'!C${rowIndex}`,
-        valueInputOption: 'RAW',
-        requestBody: { values: [[newReception]] },
-      });
+      if (hasNameCol) {
+        // تحديث الاسم + الاستلام (عمود B و D)
+        await sheetsApi.spreadsheets.values.batchUpdate({
+          spreadsheetId,
+          requestBody: {
+            valueInputOption: 'RAW',
+            data: [
+              { range: `'${sheetName}'!B${rowIndex}`, values: [[displayName]] },
+              { range: `'${sheetName}'!D${rowIndex}`, values: [[newReception]] },
+            ],
+          },
+        });
+      } else {
+        await sheetsApi.spreadsheets.values.update({
+          spreadsheetId,
+          range: `'${sheetName}'!C${rowIndex}`,
+          valueInputOption: 'RAW',
+          requestBody: { values: [[newReception]] },
+        });
+      }
     } else {
-      // إذا كانت الحركة سالبة ولم يكن الرقم موجوداً أصلاً، نضعه 0
       const initialReception = quantity < 0 ? 0 : quantity;
-      await sheetsApi.spreadsheets.values.append({
-        spreadsheetId,
-        range: `'${sheetName}'!A:C`,
-        valueInputOption: 'RAW',
-        insertDataOption: 'INSERT_ROWS',
-        requestBody: { values: [[targetPhone, 0, initialReception]] },
-      });
+      if (hasNameCol) {
+        await sheetsApi.spreadsheets.values.append({
+          spreadsheetId,
+          range: `'${sheetName}'!A:D`,
+          valueInputOption: 'RAW',
+          insertDataOption: 'INSERT_ROWS',
+          requestBody: { values: [[targetPhone, displayName, 0, initialReception]] },
+        });
+      } else {
+        await sheetsApi.spreadsheets.values.append({
+          spreadsheetId,
+          range: `'${sheetName}'!A:C`,
+          valueInputOption: 'RAW',
+          insertDataOption: 'INSERT_ROWS',
+          requestBody: { values: [[targetPhone, 0, initialReception]] },
+        });
+      }
     }
 
-    logger.info(`✅ استلام: ${targetPhone} +${quantity} = ${newReception} [${sheetName}]`);
+    logger.info(`✅ استلام: ${targetPhone} (${displayName}) +${quantity} = ${newReception} [${sheetName}]`);
   } catch (error) {
     logger.error('فشل تسجيل الاستلام', { error: error.message, phone, sheet: sheetName });
     throw error;
@@ -1191,6 +1346,10 @@ async function updateOrderStatus() { /* deprecated */ }
 module.exports = {
   initialize,
   loadSettings,
+  // المسجلين
+  loadRegisteredUsers,
+  getRegisteredName,
+  findPhoneByName,
   // الورقة اليومية
   updateTotalsProduction,
   updateTotalsReception,

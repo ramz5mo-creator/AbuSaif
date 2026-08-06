@@ -348,7 +348,9 @@ async function start() {
 
         if (captainPhone) {
           try {
-            await sheets.updateTotalsReception(captainPhone, quantity, groupPrefix, 'كابتن');
+            // الحصول على اسم الكابتن من ورقة المسجلين
+            const captainName = sheets.getRegisteredName(captainPhone) || 'كابتن';
+            await sheets.updateTotalsReception(captainPhone, quantity, groupPrefix, captainName);
             logger.info(`✅ استلام: ${captainPhone} +${quantity} [${groupPrefix}]`);
           } catch (error) {
             logger.error('❌ فشل استلام', { error: error.message });
@@ -412,7 +414,8 @@ async function start() {
 
         if (cancelCaptain) {
           try {
-            await sheets.updateTotalsReception(cancelCaptain, -cancelQuantity, groupPrefix, 'كابتن');
+            const cancelCaptainName = sheets.getRegisteredName(cancelCaptain) || 'كابتن';
+            await sheets.updateTotalsReception(cancelCaptain, -cancelQuantity, groupPrefix, cancelCaptainName);
           } catch (error) {
             logger.error('فشل خصم استلام', { error: error.message });
           }
@@ -505,9 +508,11 @@ async function start() {
           const groupPrefix = groupInfo ? groupInfo.prefix : '';
           
           try {
-            const name = whatsapp.getPushName(msg);
-            await sheets.updateTotalsProduction(result.orderOwnerPhone, result.quantity, groupPrefix, name);
-            await sheets.updateTotalsReception(captainPhone, result.quantity, groupPrefix, 'كابتن');
+            const ownerName = whatsapp.getPushName(msg); // pushName للمستلم (الراد)
+            const captainRegName = sheets.getRegisteredName(captainPhone) || ownerName;
+            const producerRegName = sheets.getRegisteredName(result.orderOwnerPhone) || 'منتج';
+            await sheets.updateTotalsProduction(result.orderOwnerPhone, result.quantity, groupPrefix, producerRegName);
+            await sheets.updateTotalsReception(captainPhone, result.quantity, groupPrefix, captainRegName);
             
             sheets.recordTransaction({
               transactionId: result.transactionId,
