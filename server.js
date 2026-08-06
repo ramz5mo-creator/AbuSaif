@@ -38,11 +38,13 @@ const httpServer = http.createServer(async (req, res) => {
         <div style="border:2px solid #0f0;padding:20px;border-radius:10px;display:inline-block;">
           <h1>✅ البوت متصل بواتساب</h1>
           <p>tamCache: ${whatsapp.getCacheStats().tamCache} رسالة</p>
+          <p>نظام التسجيل: <span style="color:#ff0;">مُفعّل (المسجلين فقط)</span></p>
           <p>آخر تحديث: ${new Date().toLocaleString('ar-JO', {timeZone:'Asia/Amman'})}</p>
         </div>
         <div style="margin-top:30px;">
-          <a href="/weekly-report" style="color:#0f0;text-decoration:none;border:1px solid #0f0;padding:10px;border-radius:5px;margin-left:10px;">📊 توليد تقرير نهاية الأسبوع</a>
-          <a href="/logout" style="color:#f00;text-decoration:none;border:1px solid #f00;padding:10px;border-radius:5px;">⚠️ تسجيل الخروج ومسح الجلسة</a>
+          <a href="/weekly-report" style="color:#0f0;text-decoration:none;border:1px solid #0f0;padding:10px;border-radius:5px;margin-left:10px;">📊 تقرير نهاية الأسبوع</a>
+          <a href="/groups" style="color:#0f0;text-decoration:none;border:1px solid #0f0;padding:10px;border-radius:5px;margin-left:10px;">👥 الجروبات</a>
+          <a href="/logout" style="color:#f00;text-decoration:none;border:1px solid #f00;padding:10px;border-radius:5px;">⚠️ تسجيل الخروج</a>
         </div>
         <script>setTimeout(()=>location.reload(), 30000);</script>
       </body></html>`);
@@ -265,7 +267,8 @@ async function start() {
         });
 
         try {
-          await sheets.updateTotalsProduction(producerPhone, quantity, groupPrefix);
+          const producerName = whatsapp.getPushName(msg);
+          await sheets.updateTotalsProduction(producerPhone, quantity, groupPrefix, producerName);
           logger.info(`✅ انتاج: ${producerPhone} +${quantity} [${groupPrefix}]`);
         } catch (error) {
           logger.error('❌ فشل انتاج', { error: error.message });
@@ -273,7 +276,8 @@ async function start() {
 
         if (captainPhone) {
           try {
-            await sheets.updateTotalsReception(captainPhone, quantity, groupPrefix);
+            // ملاحظة: لاسم الكابتن، قد نحتاج لجلب pushName من الرسالة الأصلية، لكن سنكتفي بـ "كابتن" حالياً إذا لم يتوفر
+            await sheets.updateTotalsReception(captainPhone, quantity, groupPrefix, 'كابتن');
             logger.info(`✅ استلام: ${captainPhone} +${quantity} [${groupPrefix}]`);
           } catch (error) {
             logger.error('❌ فشل استلام', { error: error.message });
@@ -302,14 +306,15 @@ async function start() {
         });
 
         try {
-          await sheets.updateTotalsProduction(producerPhone, -quantity, groupPrefix);
+          const producerName = whatsapp.getPushName(msg);
+          await sheets.updateTotalsProduction(producerPhone, -quantity, groupPrefix, producerName);
         } catch (error) {
           logger.error('فشل خصم انتاج', { error: error.message });
         }
 
         if (captainPhone) {
           try {
-            await sheets.updateTotalsReception(captainPhone, -quantity, groupPrefix);
+            await sheets.updateTotalsReception(captainPhone, -quantity, groupPrefix, 'كابتن');
           } catch (error) {
             logger.error('فشل خصم استلام', { error: error.message });
           }

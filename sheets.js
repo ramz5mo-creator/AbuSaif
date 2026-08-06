@@ -179,11 +179,69 @@ async function ensureDailySheet(sheetName) {
 // ====================================================
 
 /**
+ * التحقق مما إذا كان الرقم مسجلاً ومعتمداً
+ */
+async function isUserRegistered(phone) {
+  if (!isInitialized || !phone) return false;
+  const sheetName = config.sheets.sheetNames.registeredUsers || 'المسجلين';
+  try {
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${sheetName}'!A:A`,
+    });
+    const rows = response.data.values || [];
+    // تخطي الرأس والبحث عن الرقم
+    return rows.some(row => row[0] === phone);
+  } catch (error) {
+    logger.debug('فشل التحقق من التسجيل', { error: error.message });
+    return false;
+  }
+}
+
+/**
+ * تسجيل رقم غير معروف للمراجعة
+ */
+async function logUnregisteredNumber(phone, name = 'غير معروف') {
+  if (!isInitialized || !phone) return;
+  const sheetName = config.sheets.sheetNames.unregisteredNumbers || 'أرقام غير مسجلة';
+  try {
+    // التحقق أولاً إذا كان الرقم موجوداً بالفعل في قائمة الانتظار
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${sheetName}'!A:A`,
+    });
+    const rows = response.data.values || [];
+    if (rows.some(row => row[0] === phone)) return;
+
+    await sheetsApi.spreadsheets.values.append({
+      spreadsheetId,
+      range: `'${sheetName}'!A:C`,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: {
+        values: [[phone, name, new Date().toISOString()]],
+      },
+    });
+    logger.info(`📝 تم تسجيل رقم غير معروف للمراجعة: ${phone}`);
+  } catch (error) {
+    logger.debug('فشل تسجيل رقم غير معروف', { error: error.message });
+  }
+}
+
+/**
  * تسجيل انتاج للمنتج (من وضع الإيموجي)
  */
-async function updateTotalsProduction(phone, quantity, groupPrefix = '') {
+async function updateTotalsProduction(phone, quantity, groupPrefix = '', name = 'غير معروف') {
   if (!isInitialized || !phone) {
     logger.warn('updateTotalsProduction: لا يمكن التسجيل', { initialized: isInitialized, phone });
+    return;
+  }
+
+  // التحقق من التسجيل
+  const registered = await isUserRegistered(phone);
+  if (!registered) {
+    logger.warn(`🚫 رقم غير مسجل حاول التسجيل (انتاج): ${phone}`);
+    await logUnregisteredNumber(phone, name);
     return;
   }
 
@@ -242,9 +300,17 @@ async function updateTotalsProduction(phone, quantity, groupPrefix = '') {
 /**
  * تسجيل استلام للكابتن (من كتب "تم")
  */
-async function updateTotalsReception(phone, quantity, groupPrefix = '') {
+async function updateTotalsReception(phone, quantity, groupPrefix = '', name = 'غير معروف') {
   if (!isInitialized || !phone) {
     logger.warn('updateTotalsReception: لا يمكن التسجيل', { initialized: isInitialized, phone });
+    return;
+  }
+
+  // التحقق من التسجيل
+  const registered = await isUserRegistered(phone);
+  if (!registered) {
+    logger.warn(`🚫 رقم غير مسجل حاول التسجيل (استلام): ${phone}`);
+    await logUnregisteredNumber(phone, name);
     return;
   }
 

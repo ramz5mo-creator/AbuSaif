@@ -374,6 +374,13 @@ function getSenderJid(msg) {
 }
 
 /**
+ * استخراج اسم المستخدم (Push Name) من الرسالة
+ */
+function getPushName(msg) {
+  return msg?.pushName || 'غير معروف';
+}
+
+/**
  * عرض قائمة الجروبات
  */
 async function listGroups() {
@@ -440,6 +447,7 @@ module.exports = {
   isReaction,
   getReactionTargetId,
   getSenderJid,
+  getPushName,
   getCachedMessage,
   onQRUpdate,
   getDiscoveredGroups,

@@ -81,39 +81,37 @@ function cleanPhone(jid) {
 function emojiToNumber(text) {
   if (!text) return null;
 
-  // تنظيف الـ variation selectors (U+FE0F و U+20E3)
-  // ثم البحث عن الأرقام الإيموجية
-  const cleaned = text.replace(/\uFE0F|\u20E3/g, '').trim();
+  // 👍 = 1 (قاعدة خاصة)
+  if (text.trim() === '👍') return 1;
 
-  // خريطة الإيموجيات بعد إزالة الـ variation selectors
-  // 0️⃣ = 0\uFE0F\u20E3 → بعد التنظيف = '0'
-  // لكن نحتاج للتعامل مع الصيغة الأصلية أيضاً
+  // خريطة الإيموجيات الأساسية (بما فيها الأشكال المختلفة)
   const emojiMap = {
-    '0️⃣': 0, '1️⃣': 1, '2️⃣': 2, '3️⃣': 3, '4️⃣': 4,
-    '5️⃣': 5, '6️⃣': 6, '7️⃣': 7, '8️⃣': 8, '9️⃣': 9,
-    '🔟': 10,
-    // صيغ بديلة بدون variation selector
-    '0⃣': 0, '1⃣': 1, '2⃣': 2, '3⃣': 3, '4⃣': 4,
-    '5⃣': 5, '6⃣': 6, '7⃣': 7, '8⃣': 8, '9⃣': 9,
+    '0️⃣': '0', '1️⃣': '1', '2️⃣': '2', '3️⃣': '3', '4️⃣': '4',
+    '5️⃣': '5', '6️⃣': '6', '7️⃣': '7', '8️⃣': '8', '9️⃣': '9',
+    '🔟': '10', '0⃣': '0', '1⃣': '1', '2⃣': '2', '3⃣': '3', 
+    '4⃣': '4', '5⃣': '5', '6⃣': '6', '7⃣': '7', '8⃣': '8', '9⃣': '9',
+    '0': '0', '1': '1', '2': '2', '3': '3', '4': '4',
+    '5': '5', '6': '6', '7': '7', '8': '8', '9': '9'
   };
 
-  // محاولة مطابقة مباشرة
-  const trimmed = text.trim();
-  if (emojiMap[trimmed] !== undefined) {
-    return emojiMap[trimmed];
+  // تنظيف النص من variation selectors لتسهيل المطابقة
+  let result = text.replace(/\uFE0F|\u20E3/g, '');
+  
+  // استبدال الإيموجيات بأرقام نصية
+  let combinedNumberStr = '';
+  // نقوم بالمرور على النص حرفاً حرفاً (أو إيموجي إيموجي)
+  const characters = [...result];
+  for (const char of characters) {
+    if (emojiMap[char] !== undefined) {
+      combinedNumberStr += emojiMap[char];
+    } else if (/\d/.test(char)) {
+      combinedNumberStr += char;
+    }
   }
 
-  // استبدال الإيموجيات بأرقام
-  let result = text;
-  for (const [emoji, num] of Object.entries(emojiMap)) {
-    result = result.split(emoji).join(String(num));
-  }
-
-  // استخراج الرقم
-  const numbers = result.replace(/[^\d]/g, '');
-  if (numbers) {
-    const n = parseInt(numbers, 10);
-    if (n > 0) return n;
+  if (combinedNumberStr) {
+    const n = parseInt(combinedNumberStr, 10);
+    if (!isNaN(n) && n > 0) return n;
   }
 
   return null;
@@ -129,22 +127,15 @@ function isQuantityEmoji(text) {
   // 👍 مباشرة
   if (t === '👍') return true;
 
-  // إيموجيات الأرقام المعروفة
-  const quantityEmojis = [
-    '1️⃣','2️⃣','3️⃣','4️⃣','5️⃣',
-    '6️⃣','7️⃣','8️⃣','9️⃣','0️⃣','🔟',
-    '1⃣','2⃣','3⃣','4⃣','5⃣',
-    '6⃣','7⃣','8⃣','9⃣','0⃣',
-  ];
+  // تنظيف الـ variation selectors للتحقق
+  const cleaned = t.replace(/\uFE0F|\u20E3/g, '');
+  
+  // إذا كان النص بعد التنظيف يحتوي فقط على أرقام، فهو إيموجي رقمي (لأن الأرقام العادية ستظهر كأرقام)
+  // ولكن المستخدم طلب إيموجيات الأرقام فقط، لذا نتحقق أن النص الأصلي يحتوي على إيموجيات
+  const hasEmojiDigits = /[\u0030-\u0039]\u20E3/.test(t) || t.includes('🔟');
+  const isPureNumber = /^\d+$/.test(cleaned);
 
-  for (const emoji of quantityEmojis) {
-    if (t === emoji || t.includes(emoji)) return true;
-  }
-
-  // رقم عادي وحده (مثل "3" أو "5")
-  if (/^\d+$/.test(t)) return true;
-
-  return false;
+  return (hasEmojiDigits || t === '👍') && isPureNumber;
 }
 
 /**
@@ -320,39 +311,12 @@ async function processMessage(msg, sock) {
 
   // ====================================================
   // حالة 2أ: رسالة أصلية (ليست ردًا)
-  // إذا تبدأ بـ "تم" حتى لو ليست رداً → اعتبرها accept
-  // وإلا → طلب جديد
+  // أي رسالة ليست رداً تعتبر "طلب" (Production)
   // ====================================================
   if (!isReply) {
-    // إذا الرسالة تبدأ بكلمة استلام (تم/هات/تن/اوك) → اعتبرها accept
-    if (text && isAcceptMessage(text)) {
-      const transactionId = uuidv4();
-      addProcessedId(messageId);
-      logger.info('🎯 رسالة تم (بدون رد)', {
-        id: transactionId.substring(0, 8),
-        captain: senderPhone,
-        text: text.substring(0, 30),
-      });
-      return {
-        transactionId,
-        messageId,
-        type: 'accept',
-        phone: senderPhone,
-        acceptorPhone: senderPhone,
-        quotedPhone: '',
-        orderOwnerPhone: '',
-        quantity: 1,
-        text,
-        quotedText: '',
-        quotedMessageId: '',
-        timestamp: new Date().toISOString(),
-        groupId: msg.key.remoteJid,
-        source: 'direct',
-      };
-    }
-
-    // الرسائل الصوتية والمرئية ليس لها نص - نسجلها كطلب
-    if (!text && msgType === 'other') {
+    // إذا كانت الرسالة مجرد إيموجي رقمي أو 👍 بدون رد → نتجاهلها كطلب لأنها غالباً خطأ
+    if (text && isQuantityEmoji(text)) {
+      logger.debug('تجاهل إيموجي كمي بدون رد', { phone: senderPhone, text });
       return null;
     }
 
@@ -367,18 +331,13 @@ async function processMessage(msg, sock) {
     };
   }
 
-  // إذا لم يكن هناك نص في الرد → تجاهل
-  if (!text) return null;
-
   // ====================================================
-  // حالة 2ب: رد على رسالة → تحقق من كلمة الاستلام
+  // حالة 2ب: رد على رسالة (Reply)
+  // أي رد على رسالة يعتبر "استلام" (Receipt) بغض النظر عن النص
+  // ولكن التسجيل الفعلي يعتمد على الإيموجيات لاحقاً
   // ====================================================
-  if (!isAcceptMessage(text)) {
-    logger.debug('رد لكن ليس استلاماً', { phone: senderPhone, text: text.substring(0, 30) });
-    return null;
-  }
-
-  // contextInfo.participant قد يكون LID - نحاول senderPn أولاً
+  
+  // استخراج بيانات صاحب الطلب الأصلي من الرد
   const quotedOwnerJid = 
     contextInfo?.senderPn ||
     contextInfo?.participantPn ||
@@ -392,29 +351,29 @@ async function processMessage(msg, sock) {
     '';
   const quotedMessageId = contextInfo?.stanzaId || '';
 
-  // استخراج الكمية من النص بعد كلمة الاستلام
-  const textAfterWord = text.replace(/^(تم|هات|تن|اوك)\s*/i, '').trim();
-  const quantity = extractQuantity(textAfterWord || text);
+  // التحقق من الكمية في نص الرد (إذا كان إيموجيات أرقام فقط)
+  const quantity = isQuantityEmoji(text) ? emojiToNumber(text) : 0;
 
   const transactionId = uuidv4();
   addProcessedId(messageId);
 
-  logger.info('🎯 رد استلام', {
+  logger.info('🎯 رد استلام (محاولة)', {
     id: transactionId.substring(0, 8),
     acceptor: senderPhone,
     owner: orderOwnerPhone || 'غير معروف',
     qty: quantity,
+    text: text.substring(0, 30)
   });
 
   return {
     transactionId,
     messageId,
     type: 'accept',
-    phone: senderPhone,             // المستلم → رصيده يقل
+    phone: senderPhone,             // المستلم
     acceptorPhone: senderPhone,
     quotedPhone: orderOwnerPhone || '',
     orderOwnerPhone: orderOwnerPhone || '',
-    quantity,
+    quantity,                       // قد يكون 0 إذا لم يكن إيموجي رقمي
     text,
     quotedText: quotedText.substring(0, 200),
     quotedMessageId,
