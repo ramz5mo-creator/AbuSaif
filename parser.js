@@ -247,7 +247,27 @@ async function processMessage(msg, sock) {
 
     // استخراج رقم هاتف من وضع التفاعل
     const senderJid = whatsapp.getSenderJid(msg);
-    const acceptorPhone = cleanPhone(senderJid);
+    let acceptorPhone = cleanPhone(senderJid);
+    
+    // إذا كان المرسل LID غير محلول — نحاول حله أولاً
+    if (!acceptorPhone && senderJid && senderJid.includes('@lid')) {
+      // محاولة حل LID من الخريطة
+      const lidMap = whatsapp.getLidToPhoneMap();
+      const resolved = lidMap.get(senderJid);
+      if (resolved) {
+        acceptorPhone = cleanPhone(resolved);
+        logger.info(`✅ حل LID في التفاعل: ${senderJid.substring(0,15)} → ${acceptorPhone}`);
+      } else {
+        // استخدام LID كمعرف مؤقت (مثلما يفعل معالج الرسائل)
+        acceptorPhone = senderJid;
+        logger.warn(`⚠️ تفاعل من LID غير محلول — استخدام LID كمعرف مؤقت`, {
+          lid: senderJid.substring(0, 15),
+        });
+        // إضافة LID لقائمة الحل التلقائي
+        whatsapp.queueLidForResolve(senderJid);
+      }
+    }
+    
     if (!acceptorPhone) {
       logger.warn('⚠️ تفاعل بدون رقم هاتف صالح', {
         participant: msg.key.participant,
@@ -267,7 +287,27 @@ async function processMessage(msg, sock) {
     if (originalMsg) {
       const ownerJid = whatsapp.getSenderJid(originalMsg);
       orderOwnerPhone = cleanPhone(ownerJid);
+      // إذا كان صاحب الرسالة LID غير محلول — نحاول حله
+      if (!orderOwnerPhone && ownerJid && ownerJid.includes('@lid')) {
+        const lidMap = whatsapp.getLidToPhoneMap();
+        const resolvedOwner = lidMap.get(ownerJid);
+        if (resolvedOwner) {
+          orderOwnerPhone = cleanPhone(resolvedOwner);
+        } else {
+          // استخدام LID كمعرف مؤقت
+          orderOwnerPhone = ownerJid;
+          whatsapp.queueLidForResolve(ownerJid);
+        }
+      }
       quotedText = whatsapp.extractText(originalMsg) || '';
+    }
+    
+    // محاولة استرجاع صاحب الرسالة من tamCache إذا لم يوجد في الكاش
+    if (!orderOwnerPhone) {
+      const captainFromCache = whatsapp.getCaptainByMessageId(targetMessageId);
+      if (captainFromCache) {
+        orderOwnerPhone = captainFromCache.includes('@lid') ? captainFromCache : cleanPhone(captainFromCache + '@s.whatsapp.net') || captainFromCache;
+      }
     }
 
     // حساب الكمية (بعد تعريف quotedText)

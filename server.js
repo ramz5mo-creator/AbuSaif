@@ -723,6 +723,46 @@ async function findCaptainPhone(quotedMessageId, fallbackPhone) {
 }
 
 // ====================================================
+// دالة مساعدة: حل LID إلى رقم هاتف حقيقي
+// تُستخدم قبل كل تسجيل في الشيت
+// ====================================================
+async function resolveLidPhone(phone) {
+  if (!phone) return phone;
+  // إذا لم يكن LID → أرجعه كما هو
+  if (!phone.includes('@lid')) return phone;
+  
+  // محاولة 1: من lidToPhoneMap
+  const lidMap = whatsapp.getLidToPhoneMap();
+  const fromMap = lidMap.get(phone);
+  if (fromMap && !fromMap.includes('@lid')) {
+    const clean = fromMap.split('@')[0].replace(/\D/g, '');
+    if (clean.length >= 9) {
+      logger.info(`✅ حل LID للتسجيل (lidMap): ${phone.substring(0,15)} → ${clean}`);
+      return clean;
+    }
+  }
+  
+  // محاولة 2: USyncQuery مباشرة
+  try {
+    const directResolved = await whatsapp.resolveLidDirect(phone);
+    if (directResolved && !directResolved.includes('@lid')) {
+      const clean = directResolved.split('@')[0].replace(/\D/g, '');
+      if (clean.length >= 9) {
+        logger.info(`✅ حل LID للتسجيل (USyncQuery): ${phone.substring(0,15)} → ${clean}`);
+        return clean;
+      }
+    }
+  } catch (e) {
+    logger.debug('فشل حل LID عبر USyncQuery', { error: e.message });
+  }
+  
+  // إذا لم يُحل → أرجع LID كما هو (سيُسجل كرقم مؤقت)
+  logger.warn(`⚠️ LID لم يُحل للتسجيل: ${phone.substring(0,15)} — سيُسجل كـ LID مؤقت`);
+  whatsapp.queueLidForResolve(phone);
+  return phone.split('@')[0]; // أرجع الجزء الرقمي فقط
+}
+
+// ====================================================
 // بدء التشغيل
 // ====================================================
 async function start() {
@@ -1001,14 +1041,23 @@ async function start() {
         }
 
         // === انتاج + استلام (عملية جديدة) ===
-        // صاحب الطلب = realProducerPhone (عابدين)
-        // واضع الإيموجي = producerPhone (قد يكون عابدين أو شخص آخر)
-        const finalProducerPhone = realProducerPhone || producerPhone;
+        // صاحب الطلب = realProducerPhone
+        // واضع الإيموجي = producerPhone
+        let finalProducerPhone = realProducerPhone || producerPhone;
+        
+        // حل LID إلى رقم حقيقي قبل التسجيل
+        if (finalProducerPhone && finalProducerPhone.includes('@lid')) {
+          finalProducerPhone = await resolveLidPhone(finalProducerPhone);
+        }
+        let resolvedCaptainForSheet = captainPhone;
+        if (resolvedCaptainForSheet && resolvedCaptainForSheet.includes('@lid')) {
+          resolvedCaptainForSheet = await resolveLidPhone(resolvedCaptainForSheet);
+        }
         
         logger.info('🎯 تسجيل انتاج+استلام', {
           producer: finalProducerPhone,
           emojiBy: producerPhone,
-          captain: captainPhone || '❓',
+          captain: resolvedCaptainForSheet || '❓',
           qty: quantity,
           group: groupInfo ? groupInfo.name : 'Unknown'
         });
@@ -1021,12 +1070,11 @@ async function start() {
           logger.error('❌ فشل انتاج', { error: error.message });
         }
 
-        if (captainPhone) {
+        if (resolvedCaptainForSheet) {
           try {
-            // الحصول على اسم الكابتن من ورقة المسجلين
-            const captainName = sheets.getRegisteredName(captainPhone) || 'كابتن';
-            await sheets.updateTotalsReception(captainPhone, quantity, groupPrefix, captainName);
-            logger.info(`✅ استلام: ${captainPhone} +${quantity} [${groupPrefix}]`);
+            const captainName = sheets.getRegisteredName(resolvedCaptainForSheet) || 'كابتن';
+            await sheets.updateTotalsReception(resolvedCaptainForSheet, quantity, groupPrefix, captainName);
+            logger.info(`✅ استلام: ${resolvedCaptainForSheet} +${quantity} [${groupPrefix}]`);
           } catch (error) {
             logger.error('❌ فشل استلام', { error: error.message });
           }
@@ -1034,12 +1082,12 @@ async function start() {
           logger.warn('⚠️ لم يُعثر على الكابتن!', { msgId: quotedMsgId?.substring(0, 8) });
         }
 
-        // تسجيل في سجل الحركات (مع حفظ msgId في الملاحظات للتعديل لاحقاً)
+        // تسجيل في سجل الحركات
         sheets.recordTransaction({
           transactionId: result.transactionId,
           timestamp: result.timestamp,
           producerPhone: finalProducerPhone,
-          captainPhone: captainPhone || '',
+          captainPhone: resolvedCaptainForSheet || '',
           quantity,
           type: 'انتاج',
           emoji: result.text,
