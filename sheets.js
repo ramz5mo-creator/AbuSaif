@@ -2134,6 +2134,136 @@ async function findTransactionByMessageIdIncludingCancelled(messageId, reactorPh
   }
 }
 
+// ====================================================
+// خريطة LID الدائمة — تحميل/حفظ في Google Sheets
+// ورقة مخفية باسم LID_MAP
+// عمود A: LID | عمود B: رقم الهاتف | عمود C: آخر تحديث
+// ====================================================
+
+const LID_MAP_SHEET = 'LID_MAP';
+
+/**
+ * إنشاء ورقة LID_MAP إذا لم تكن موجودة
+ */
+async function ensureLidMapSheet() {
+  if (existingSheets.has(LID_MAP_SHEET)) return;
+  try {
+    // تحقق إذا كانت موجودة بالفعل
+    const meta = await sheetsApi.spreadsheets.get({ spreadsheetId });
+    const exists = meta.data.sheets?.some(s => s.properties?.title === LID_MAP_SHEET);
+    if (exists) { existingSheets.add(LID_MAP_SHEET); return; }
+    // إنشاء الورقة
+    await sheetsApi.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: LID_MAP_SHEET, hidden: true } } }],
+      },
+    });
+    // رأس الأعمدة
+    await sheetsApi.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${LID_MAP_SHEET}'!A1:C1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [['LID', 'رقم الهاتف', 'آخر تحديث']] },
+    });
+    existingSheets.add(LID_MAP_SHEET);
+    logger.info('✅ تم إنشاء ورقة LID_MAP');
+  } catch (e) {
+    if (e.message?.includes('already exists')) existingSheets.add(LID_MAP_SHEET);
+    else logger.debug('فشل ensureLidMapSheet', { error: e.message });
+  }
+}
+
+/**
+ * تحميل خريطة LID من Google Sheets عند بدء التشغيل
+ * @returns {Map<string, string>} خريطة LID → رقم هاتف
+ */
+async function loadLidMapFromSheets() {
+  if (!isInitialized) return new Map();
+  try {
+    await ensureLidMapSheet();
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${LID_MAP_SHEET}'!A:B`,
+    });
+    const rows = response.data.values || [];
+    const map = new Map();
+    for (let i = 1; i < rows.length; i++) {
+      const lid = (rows[i][0] || '').trim();
+      const phone = (rows[i][1] || '').trim();
+      if (lid && phone) map.set(lid, phone);
+    }
+    logger.info(`🗃️ تم تحميل خريطة LID من Sheets: ${map.size} ربط`);
+    return map;
+  } catch (e) {
+    logger.debug('فشل تحميل LID_MAP من Sheets', { error: e.message });
+    return new Map();
+  }
+}
+
+/**
+ * حفظ خريطة LID كاملة في Google Sheets (كتابة كاملة)
+ * يستبدل المحتوى كله مرة واحدة
+ * @param {Map<string, string>} lidMap - خريطة LID → رقم هاتف
+ */
+async function saveLidMapToSheets(lidMap) {
+  if (!isInitialized || !lidMap || lidMap.size === 0) return;
+  try {
+    await ensureLidMapSheet();
+    const now = new Date().toISOString();
+    const rows = [['LID', 'رقم الهاتف', 'آخر تحديث']];
+    for (const [lid, phone] of lidMap.entries()) {
+      // تخزين فقط الربطات الصحيحة (ليس base-prefix المكررة)
+      if (!lid.includes('@lid')) continue;
+      if (!phone.includes('@s.whatsapp.net') && !/^\d{9,12}$/.test(phone.replace(/\D/g,''))) continue;
+      rows.push([lid, phone, now]);
+    }
+    // مسح الورقة وإعادة الكتابة
+    await sheetsApi.spreadsheets.values.clear({
+      spreadsheetId,
+      range: `'${LID_MAP_SHEET}'!A:C`,
+    });
+    await sheetsApi.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${LID_MAP_SHEET}'!A1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: rows },
+    });
+    logger.info(`💾 حفظ خريطة LID في Sheets: ${rows.length - 1} ربط`);
+  } catch (e) {
+    logger.debug('فشل حفظ LID_MAP في Sheets', { error: e.message });
+  }
+}
+
+/**
+ * تحديث تدريجي (إضافة ربطات جديدة فقط دون مسح كامل)
+ * أسرع من الحفظ الكامل — يُستخدم بعد كل دفعة حل
+ * @param {Map<string, string>} newEntries - الربطات الجديدة فقط
+ */
+async function appendLidMapToSheets(newEntries) {
+  if (!isInitialized || !newEntries || newEntries.size === 0) return;
+  try {
+    await ensureLidMapSheet();
+    const now = new Date().toISOString();
+    const rows = [];
+    for (const [lid, phone] of newEntries.entries()) {
+      if (!lid.includes('@lid')) continue;
+      rows.push([lid, phone, now]);
+    }
+    if (rows.length === 0) return;
+    await sheetsApi.spreadsheets.values.append({
+      spreadsheetId,
+      range: `'${LID_MAP_SHEET}'!A:C`,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: rows },
+    });
+    logger.info(`➕ إضافة ${rows.length} ربط جديد لـ LID_MAP في Sheets`);
+  } catch (e) {
+    logger.debug('فشل appendLidMapToSheets', { error: e.message });
+  }
+}
+
 /**
  * الطبقة 4: تحديث السجلات القديمة في سجل الحركات عند حل LID
  * يبحث عن سجلات مخزنة بـ LID مؤقت ويستبدلها بالرقم الحقيقي
@@ -2243,6 +2373,10 @@ module.exports = {
   createDashboardSheet,
   // المحذوف
   saveDeletedMessage,
+  // خريطة LID الدائمة
+  loadLidMapFromSheets,
+  saveLidMapToSheets,
+  appendLidMapToSheets,
   // الطبقة 4: تحديث السجلات القديمة عند حل LID
   backfillLidRecords,
   // deprecated (للتوافق)

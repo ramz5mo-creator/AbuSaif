@@ -53,6 +53,15 @@ function getSheets() {
 // كاش الجروبات المكتشفة { groupId: { name, messageCount, lastMessage } }
 const discoveredGroups = new Map();
 
+// مرجع lazy لـ members-db (lazy لتجنب circular dependency)
+let membersDbModule = null;
+function getMembersDb() {
+  if (!membersDbModule) {
+    try { membersDbModule = require('./members-db'); } catch (e) { /* تجاهل */ }
+  }
+  return membersDbModule;
+}
+
 let sock = null;
 let messageHandler = null;
 let reconnectAttempts = 0;
@@ -182,27 +191,45 @@ async function connect() {
   // بدء keepAlive
   startKeepAlive();
 
-  // تحميل بيانات الجروب لربط LID بالأرقام
-  loadGroupParticipants();
-  
-  // تحميل أسماء المسجلين لحل LID عبر pushName
+  // تحميل أسماء المسجلين
   const sheets = getSheets();
   if (sheets && sheets.loadRegisteredUsers) {
     sheets.loadRegisteredUsers().catch(() => {});
   }
-  
-  // تحديث البيانات كل 10 دقائق لضمان تغطية 100% من الأعضاء
-  setInterval(() => {
+
+  // الطبقة 1: تحميل قاعدة بيانات Members من Sheets (المصدر الدائم)
+  getMembersDb().initialize().then(() => {
+    return getMembersDb().loadFromSheets();
+  }).then(({ lidToPhone: sheetsLids }) => {
+    // دمج بيانات Sheets في lidToPhoneMap المحلية
+    let merged = 0;
+    for (const [lid, phone] of sheetsLids.entries()) {
+      if (lid && phone && !lidToPhoneMap.has(lid)) {
+        lidToPhoneMap.set(lid, phone);
+        merged++;
+      }
+    }
+    logger.info(`🗃️ دمج ${merged} ربط جديد من Members DB في الخريطة المحلية`);
+    
+    // الطبقة 2: تحميل بيانات groupMetadata ومقارنتها
+    return loadGroupParticipantsAndSync();
+  }).catch(e => {
+    logger.debug('members-db init error', { error: e.message });
+    // فالباك: تحميل من groupMetadata فقط
     loadGroupParticipants();
-    // تحديث أسماء المسجلين كل 10 دقائق أيضاً
+  });
+
+  // تحديث كل 30 دقيقة: مقارنة الأعضاء وحل الجدد فقط
+  setInterval(() => {
+    loadGroupParticipantsAndSync().catch(() => {});
     const s = getSheets();
     if (s && s.loadRegisteredUsers) s.loadRegisteredUsers(true).catch(() => {});
-  }, 10 * 60 * 1000);
-  
-  // بدء الحل التلقائي للـ LIDs بعد 60 ثانية (انتظار استقرار الاتصال)
+  }, 30 * 60 * 1000);
+
+  // بدء الحل التلقائي للـ LIDs بعد 90 ثانية (بعد تحميل Members DB)
   setTimeout(() => {
     startAutoResolveLids().catch(e => logger.debug('startAutoResolveLids error', { error: e.message }));
-  }, 60 * 1000);
+  }, 90 * 1000);
 }
     });
 
@@ -550,6 +577,68 @@ async function loadGroupParticipants() {
 }
 
 /**
+ * تحميل بيانات groupMetadata ومزامنتها مع Members DB
+ * يحل فقط الأعضاء الجدد غير الموجودين في Members DB
+ */
+async function loadGroupParticipantsAndSync() {
+  if (!sock) return;
+  const db = getMembersDb();
+  const targetGroups = config.whatsapp.targetGroups || [];
+  const newMembers = []; // أعضاء جدد لحلهم وحفظهم
+  const allMembers = []; // جميع الأعضاء للحفظ الكامل
+
+  for (const group of targetGroups) {
+    try {
+      const metadata = await sock.groupMetadata(group.id);
+      if (!metadata?.participants) continue;
+
+      for (const p of metadata.participants) {
+        const pId = p.id || '';
+        const pLid = p.lid || '';
+        const role = (p.admin === 'admin' || p.admin === 'superadmin') ? 'مشرف' : 'عضو';
+
+        if (pLid && pId.includes('@s.whatsapp.net')) {
+          // عضو معروف — ربط LID بالرقم
+          const phone = pId.split('@')[0].replace(/\D/g, '').slice(-9);
+          lidToPhoneMap.set(pLid, pId);
+          const base = pLid.split(':')[0];
+          if (base !== pLid) lidToPhoneMap.set(base + '@lid', pId);
+
+          allMembers.push({ lid: pLid, phone, name: '', group: group.name, role });
+
+          // تحديث Members DB في الذاكرة
+          if (db) db.upsertMember({ lid: pLid, phone, group: group.name, role });
+
+        } else if (pId.includes('@lid') || (pLid && !pId.includes('@s.whatsapp.net'))) {
+          // LID غير محلول — تحقق إذا كان في Members DB
+          const effectiveLid = pId.includes('@lid') ? pId : pLid;
+          const existingPhone = lidToPhoneMap.get(effectiveLid) || (db && db.resolvePhone(effectiveLid));
+
+          if (!existingPhone) {
+            // عضو جديد غير معروف — أضفه لقائمة الحل
+            newMembers.push({ lid: effectiveLid, group: group.name, role });
+            queueLidForResolve(effectiveLid);
+          } else {
+            // معروف من Members DB — تحديث الخريطة المحلية
+            lidToPhoneMap.set(effectiveLid, existingPhone);
+          }
+        } else if (pId.includes('@s.whatsapp.net') && !pLid) {
+          // عضو بدون LID — حفظ برقمه مباشرة
+          const phone = pId.split('@')[0].replace(/\D/g, '').slice(-9);
+          allMembers.push({ lid: '', phone, name: '', group: group.name, role });
+          if (db) db.upsertMember({ lid: '', phone, group: group.name, role });
+        }
+      }
+      logger.info(`📊 ${group.name}: ${metadata.participants.length} عضو | جدد غير محلول: ${newMembers.length}`);
+    } catch (e) {
+      logger.warn(`فشل تحميل ${group.name}`, { error: e.message });
+    }
+  }
+
+  logger.info(`🔗 الإجمالي: ${lidToPhoneMap.size} ربط | جدد للحل: ${newMembers.length}`);
+}
+
+/**
  * مزامنة فورية لجميع أعضاء الجروب — يُستدعى بأمر النقطة
  * يجلب groupMetadata ويربط LID بالرقم لكل عضو
  * @param {string} groupId - معرف الجروب (اختياري — إذا فارغ يعمل على جميع الجروبات)
@@ -639,7 +728,7 @@ function saveLidMap() {
 }
 
 /**
- * تحميل lidMap من القرص عند بدء التشغيل
+ * تحميل lidMap من القرص (مؤقت لحين تحميل Sheets)
  */
 function loadLidMap() {
   try {
@@ -652,10 +741,62 @@ function loadLidMap() {
           count++;
         }
       }
-      logger.info(`📂 تم تحميل ${count} ربط LID من القرص`);
+      logger.info(`📂 تم تحميل ${count} ربط LID من القرص (مؤقت)`);
     }
   } catch (e) {
     logger.warn('فشل تحميل lidMap من القرص', { error: e.message });
+  }
+}
+
+/**
+ * تحميل lidMap من Google Sheets (المصدر الدائم)
+ * يُستدعى بعد استقرار الاتصال بواتساب
+ */
+async function loadLidMapFromSheets() {
+  const sheets = getSheets();
+  if (!sheets || !sheets.loadLidMapFromSheets) return;
+  try {
+    const sheetsMap = await sheets.loadLidMapFromSheets();
+    if (sheetsMap && sheetsMap.size > 0) {
+      let added = 0;
+      for (const [lid, phone] of sheetsMap.entries()) {
+        if (!lidToPhoneMap.has(lid)) {
+          lidToPhoneMap.set(lid, phone);
+          added++;
+        }
+      }
+      logger.info(`🗃️ تم تحميل خريطة LID من Sheets: ${sheetsMap.size} ربط (جديد: ${added})`);
+      // حفظ نسخة محلية أيضاً
+      saveLidMap();
+    }
+  } catch (e) {
+    logger.debug('فشل تحميل lidMap من Sheets', { error: e.message });
+  }
+}
+
+/**
+ * حفظ lidMap في Google Sheets (بعد اكتمال بناء الخريطة)
+ */
+async function saveLidMapToSheets() {
+  const sheets = getSheets();
+  if (!sheets || !sheets.saveLidMapToSheets) return;
+  try {
+    await sheets.saveLidMapToSheets(lidToPhoneMap);
+  } catch (e) {
+    logger.debug('فشل حفظ lidMap في Sheets', { error: e.message });
+  }
+}
+
+/**
+ * إضافة ربطات جديدة فقط لـ Sheets (أسرع من الحفظ الكامل)
+ */
+async function appendNewLidsToSheets(newEntries) {
+  const sheets = getSheets();
+  if (!sheets || !sheets.appendLidMapToSheets || !newEntries || newEntries.size === 0) return;
+  try {
+    await sheets.appendLidMapToSheets(newEntries);
+  } catch (e) {
+    logger.debug('فشل appendNewLidsToSheets', { error: e.message });
   }
 }
 
@@ -726,12 +867,16 @@ async function resolveLidDirect(lid) {
       // محاولة 1: item.id مباشرة
       if (item.id && item.id.includes('@s.whatsapp.net')) {
         addLidMapping(lid, item.id);
+        const db = getMembersDb();
+        if (db) db.upsertMember({ lid, phone: item.id.split('@')[0].replace(/\D/g,'').slice(-9) });
         logger.info(`✅ resolveLidDirect: ${lid.substring(0, 15)} → ${item.id.split('@')[0]}`);
         return item.id;
       }
       // محاولة 2: item.contact.id
       if (item.contact && item.contact.id && item.contact.id.includes('@s.whatsapp.net')) {
         addLidMapping(lid, item.contact.id);
+        const db2 = getMembersDb();
+        if (db2) db2.upsertMember({ lid, phone: item.contact.id.split('@')[0].replace(/\D/g,'').slice(-9) });
         logger.info(`✅ resolveLidDirect(contact): ${lid.substring(0, 15)} → ${item.contact.id.split('@')[0]}`);
         return item.contact.id;
       }
@@ -1101,7 +1246,12 @@ async function autoResolveLidsBatch() {
         _lidResolveQueue.delete(lid);
         // تتبع النجاحات لتحديث السجلات القديمة (الطبقة 4)
         const phone = result.split('@')[0].replace(/\D/g, '');
-        if (phone.length >= 9) _newlyResolvedLids.set(lid, phone);
+        if (phone.length >= 9) {
+          _newlyResolvedLids.set(lid, phone);
+          // تحديث Members DB بالرقم الحقيقي
+          const db = getMembersDb();
+          if (db) db.upsertMember({ lid, phone: phone.slice(-9) });
+        }
         logger.info(`✅ autoResolve: ${lid.substring(0,15)} → ${phone}`);
       } else {
         // فشل — احتفظ به في القائمة لمحاولة لاحقة

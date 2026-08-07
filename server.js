@@ -677,6 +677,22 @@ const httpServer = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     }
+  } else if (req.url === '/members-db' || req.url === '/api/members-db') {
+    // حالة قاعدة بيانات Members
+    try {
+      const membersDb = require('./members-db');
+      const stats = membersDb.getStats();
+      const unresolved = membersDb.getUnresolvedLids().slice(0, 20);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        stats,
+        unresolvedSample: unresolved,
+        lidMapSize: whatsapp.getLidToPhoneMap ? whatsapp.getLidToPhoneMap().size : 0,
+      }, null, 2));
+    } catch(e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
   } else {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('AbuSaif Bot v4');
