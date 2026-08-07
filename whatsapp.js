@@ -293,6 +293,36 @@ async function connect() {
               } else {
                 // سجل الاسم غير المحلول للمراجعة اليدوية
                 logger.warn(`⚠️ LID غير محلول: ${msg.pushName}`, { lid: senderJid?.substring(0, 15) });
+                // محاولة أخيرة: جلب بيانات العضو من groupMetadata مباشرة
+                if (sock && remoteJid && senderJid && senderJid.includes('@lid')) {
+                  (async () => {
+                    try {
+                      const meta = await sock.groupMetadata(remoteJid);
+                      if (meta?.participants) {
+                        for (const p of meta.participants) {
+                          // مطابقة LID
+                          const pLid = p.lid || '';
+                          const pId = p.id || '';
+                          const sLid = senderJid.split(':')[0];
+                          const pLidBase = pLid.split(':')[0];
+                          if (pLid === senderJid || pLidBase === sLid) {
+                            if (pId && pId.includes('@s.whatsapp.net')) {
+                              addLidMapping(senderJid, pId);
+                              logger.info(`✅ ربط LID من groupMetadata: ${msg.pushName} → ${pId.split('@')[0]}`, { lid: senderJid.substring(0, 15) });
+                              const s = getSheets();
+                              if (s && s.updateWhatsappName && msg.pushName) {
+                                s.updateWhatsappName(pId.replace('@s.whatsapp.net', ''), msg.pushName).catch(() => {});
+                              }
+                            }
+                            break;
+                          }
+                        }
+                      }
+                    } catch (e) {
+                      logger.debug('فشل جلب groupMetadata لحل LID', { error: e.message });
+                    }
+                  })();
+                }
               }
             }
           }
@@ -423,13 +453,27 @@ async function loadGroupParticipants() {
       try {
         const metadata = await sock.groupMetadata(group.id);
         if (metadata && metadata.participants) {
+          let linked = 0;
+          let unlinked = 0;
           for (const p of metadata.participants) {
-            if (p.lid && p.id) {
-              lidToPhoneMap.set(p.lid, p.id);
+            const pId = p.id || '';
+            const pLid = p.lid || '';
+            if (pLid && pId && pId.includes('@s.whatsapp.net')) {
+              // ربط LID بالرقم الحقيقي
+              lidToPhoneMap.set(pLid, pId);
+              // أيضاً: ربط بدون رقم الجلسة (prefix فقط)
+              const lidBase = pLid.split(':')[0];
+              if (lidBase && lidBase !== pLid) {
+                lidToPhoneMap.set(lidBase + '@lid', pId);
+              }
+              linked++;
+            } else if (pId && pId.includes('@s.whatsapp.net') && !pLid) {
+              // عضو بدون LID — سيرسل برقمه مباشرة
+              unlinked++;
             }
           }
           totalParticipants += metadata.participants.length;
-          logger.info(`📋 تم تحميل ${metadata.participants.length} مشارك من جروب: ${group.name}`);
+          logger.info(`📋 جروب ${group.name}: ${metadata.participants.length} عضو | مربوط: ${linked} | بدون LID: ${unlinked}`);
         }
       } catch (e) {
         logger.warn(`فشل تحميل مشاركي جروب ${group.name}`, { error: e.message });
@@ -645,18 +689,29 @@ function getSenderJid(msg) {
   // ثالثاً: البحث في msg.participant (بعض الرسائل تحمله هنا)
   if (msg.participant && msg.participant.includes('@s.whatsapp.net')) return msg.participant;
 
-  // رابعاً: حل LID من الكاش
+    // رابعاً: حل LID من الكاش
   if (key.participant && key.participant.includes('@lid')) {
+    // مطابقة تامة
     const resolved = lidToPhoneMap.get(key.participant);
     if (resolved) return resolved;
-    
-    // محاولة إضافية: البحث بالجزء الأول من LID
+    // محاولة 1: البحث بالجزء الأول من LID (بدون رقم الجلسة)
     const lidPrefix = key.participant.split(':')[0];
-    for (const [lid, phone] of lidToPhoneMap.entries()) {
-      if (lid.split(':')[0] === lidPrefix) return phone;
+    // جرب المفتاح المخزن بالبادئة
+    const baseKey = lidPrefix + '@lid';
+    const resolvedBase = lidToPhoneMap.get(baseKey);
+    if (resolvedBase) {
+      // حددنا الرقم — أضف المفتاح الكامل للمرة القادمة
+      addLidMapping(key.participant, resolvedBase);
+      return resolvedBase;
     }
-    
-    // خامساً: محاولة حل LID عبر pushName من ورقة المسجلين
+    // محاولة 2: بحث خطي في جميع المفاتيح
+    for (const [lid, phone] of lidToPhoneMap.entries()) {
+      if (lid.split(':')[0] === lidPrefix) {
+        addLidMapping(key.participant, phone);
+        return phone;
+      }
+    }
+    // محاولة 3: حل LID عبر pushName من ورقة المسجلين
     if (msg.pushName) {
       const resolvedByName = resolveLidByPushName(key.participant, msg.pushName);
       if (resolvedByName) return resolvedByName;
