@@ -7,12 +7,11 @@
  */
 
 // ====================================================
-// مسار التخزين الدائم (Railway Volume أو المجلد المحلي)
-// عند إضافة Volume في Railway، اضبط:
-//   VOLUME_PATH=/data   (أو أي مسار تختاره للـ Volume)
-// إذا لم يكن VOLUME_PATH موجوداً، يُستخدم المجلد المحلي ./data
+// مسار التخزين الدائم (Railway Volume)
+// الـ Volume مربوط بـ /app/auth في Railway
+// الكود يحفظ في VOLUME_PATH مباشرة، ومجلد auth/session داخله
 // ====================================================
-const VOLUME_PATH = process.env.VOLUME_PATH || './data';
+const VOLUME_PATH = process.env.VOLUME_PATH || '/app/auth';
 
 module.exports = {
   // مسار التخزين الدائم (يُستخدم في جميع أنحاء النظام)
@@ -26,8 +25,8 @@ module.exports = {
       { id: '120363408380060992@g.us', name: 'Nashama', prefix: 'نشامى' },
       { id: '120363407744839853@g.us', name: 'AlSaif', prefix: 'السيف' }
     ],
-    // مسار حفظ جلسة واتساب — يستخدم VOLUME_PATH إذا كان متاحاً
-    authPath: `${VOLUME_PATH}/auth/session`,
+    // مسار حفظ جلسة واتساب — الـ Volume مربوط بـ /app/auth مباشرة، فنحفظ جلسة في مجلد فرعي session
+    authPath: `${VOLUME_PATH}/session`,
   },
 
   // === إعدادات Google Sheets ===
