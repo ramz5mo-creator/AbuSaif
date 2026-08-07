@@ -575,6 +575,28 @@ async function start() {
     }
 
     // ====================================================
+    // حالة 2.5: أمر النقطة — مزامنة LID سرية (للمشرف فقط)
+    // ====================================================
+    if (trimmedText === '.') {
+      const senderJid = whatsapp.getSenderJid(msg);
+      const senderPhone = parser.cleanPhone(senderJid) || (senderJid || '').split('@')[0].replace(/\D/g, '');
+      const isSuper = await sheets.isSupervisor(senderPhone);
+      
+      if (isSuper) {
+        const remoteJid = msg.key.remoteJid;
+        logger.info('🔄 أمر مزامنة LID من المشرف', { phone: senderPhone });
+        
+        try {
+          const syncResult = await whatsapp.syncGroupLids(remoteJid);
+          logger.info(`✅ مزامنة كاملة: ${syncResult.newLinks} ربط جديد من إجمالي ${syncResult.total}`);
+        } catch (err) {
+          logger.warn('فشل أمر المزامنة', { error: err.message });
+        }
+        return; // بصمت تام — لا رد في الجروب
+      }
+    }
+
+    // ====================================================
     // حالة 3: رسالة نصية (تم / رد)
     // ====================================================
     const result = await parser.processMessage(msg, sock);

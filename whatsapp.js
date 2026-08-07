@@ -395,6 +395,57 @@ async function loadGroupParticipants() {
   }
 }
 
+/**
+ * مزامنة فورية لجميع أعضاء الجروب — يُستدعى بأمر النقطة
+ * يجلب groupMetadata ويربط LID بالرقم لكل عضو
+ * @param {string} groupId - معرف الجروب (اختياري — إذا فارغ يعمل على جميع الجروبات)
+ * @returns {{ newLinks: number, total: number }}
+ */
+async function syncGroupLids(groupId) {
+  if (!sock) return { newLinks: 0, total: 0 };
+  
+  const targetGroups = config.whatsapp.targetGroups || [];
+  const groups = groupId
+    ? targetGroups.filter(g => g.id === groupId)
+    : targetGroups;
+  
+  let newLinks = 0;
+  let total = 0;
+  
+  for (const group of groups) {
+    try {
+      const metadata = await sock.groupMetadata(group.id);
+      if (!metadata?.participants) continue;
+      
+      for (const p of metadata.participants) {
+        total++;
+        // p.id = الرقم الحقيقي (JID)
+        // p.lid = المعرف المشفر
+        if (p.lid && p.id) {
+          const existed = lidToPhoneMap.has(p.lid);
+          lidToPhoneMap.set(p.lid, p.id);
+          if (!existed) newLinks++;
+        }
+        // أيضاً العكس: إذا كان id هو LID وليس رقماً
+        if (p.id?.includes('@lid') && p.lid) {
+          const existed = lidToPhoneMap.has(p.id);
+          lidToPhoneMap.set(p.id, p.lid);
+          if (!existed) newLinks++;
+        }
+      }
+      logger.info(`🔄 syncGroupLids: ${group.name} → ${metadata.participants.length} عضو`);
+    } catch (e) {
+      logger.warn(`فشل مزامنة جروب ${group.name}`, { error: e.message });
+    }
+  }
+  
+  // حفظ التحديثات على القرص
+  if (newLinks > 0) saveLidMapDebounced();
+  
+  logger.info(`✅ syncGroupLids: ${newLinks} ربط جديد من إجمالي ${total}`);
+  return { newLinks, total };
+}
+
 // ====================================================
 // حفظ وتحميل lidMap من/إلى القرص
 // ====================================================
@@ -721,4 +772,5 @@ module.exports = {
   getOrderByReplyId,
   getPushNameFromCachedMessage,
   resolvePhoneByPushName,
+  syncGroupLids,
 };
