@@ -13,6 +13,8 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  USyncQuery,
+  USyncUser,
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const qrcode = require('qrcode-terminal');
@@ -626,6 +628,40 @@ function addLidMapping(lid, phone) {
 }
 
 /**
+ * حل LID مباشرة من واتساب عبر USyncQuery.withLid()
+ * الحل الجذري الذي لا يعتمد على الاسم أو groupMetadata
+ */
+async function resolveLidDirect(lid) {
+  if (!sock || !lid || !lid.includes('@lid')) return null;
+  // تحقق أولاً من الكاش المحلي
+  const cached = resolveLid(lid);
+  if (cached && cached.includes('@s.whatsapp.net')) return cached;
+  try {
+    const query = new USyncQuery().withContactProtocol().withLIDProtocol();
+    query.withUser(new USyncUser().withLid(lid));
+    const results = await sock.executeUSyncQuery(query);
+    if (results && results.list && results.list.length > 0) {
+      const item = results.list[0];
+      // محاولة 1: item.id مباشرة
+      if (item.id && item.id.includes('@s.whatsapp.net')) {
+        addLidMapping(lid, item.id);
+        logger.info(`✅ resolveLidDirect: ${lid.substring(0, 15)} → ${item.id.split('@')[0]}`);
+        return item.id;
+      }
+      // محاولة 2: item.contact.id
+      if (item.contact && item.contact.id && item.contact.id.includes('@s.whatsapp.net')) {
+        addLidMapping(lid, item.contact.id);
+        logger.info(`✅ resolveLidDirect(contact): ${lid.substring(0, 15)} → ${item.contact.id.split('@')[0]}`);
+        return item.contact.id;
+      }
+    }
+  } catch (e) {
+    logger.debug('فشل resolveLidDirect', { error: e.message, lid: lid.substring(0, 15) });
+  }
+  return null;
+}
+
+/**
  * محاولة حل LID عبر مطابقة pushName مع ورقة المسجلين
  */
 function resolveLidByPushName(lid, pushName) {
@@ -978,6 +1014,7 @@ module.exports = {
   lookupPhone,
   resolveLidByPushName,
   resolveLid,
+  resolveLidDirect,
   addLidMapping,
   setOrderForReply,
   getOrderByReplyId,

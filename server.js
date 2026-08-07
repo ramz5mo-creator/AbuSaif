@@ -697,13 +697,29 @@ async function start() {
                 whatsapp.addLidMapping(captainFromTam, resolvedByName);
                 if (quotedMsgId) whatsapp.setCaptainForMessage(quotedMsgId, resolvedCaptain);
               } else {
-                logger.warn(`⚠️ كابتن LID لا يزال غير محلول عند الإيموجي`, {
-                  lid: resolvedCaptain.substring(0,15),
-                  pushName: captainPushName
-                });
+                // محاولة 3: resolveLidDirect عبر USyncQuery
+                const directResolved = await whatsapp.resolveLidDirect(resolvedCaptain);
+                if (directResolved && !directResolved.includes('@lid')) {
+                  logger.info(`✅ حل LID الكابتن عند الإيموجي (USyncQuery): ${resolvedCaptain.substring(0,15)} → ${directResolved}`);
+                  resolvedCaptain = directResolved;
+                  if (quotedMsgId) whatsapp.setCaptainForMessage(quotedMsgId, resolvedCaptain);
+                } else {
+                  logger.warn(`⚠️ كابتن LID لا يزال غير محلول عند الإيموجي`, {
+                    lid: resolvedCaptain.substring(0,15),
+                    pushName: captainPushName
+                  });
+                }
               }
             } else {
-              logger.warn(`⚠️ كابتن LID بدون pushName`, { lid: resolvedCaptain.substring(0,15) });
+              // محاولة 3 (بدون pushName): resolveLidDirect عبر USyncQuery
+              const directResolved = await whatsapp.resolveLidDirect(resolvedCaptain);
+              if (directResolved && !directResolved.includes('@lid')) {
+                logger.info(`✅ حل LID الكابتن عند الإيموجي (USyncQuery/noPushName): ${resolvedCaptain.substring(0,15)} → ${directResolved}`);
+                resolvedCaptain = directResolved;
+                if (quotedMsgId) whatsapp.setCaptainForMessage(quotedMsgId, resolvedCaptain);
+              } else {
+                logger.warn(`⚠️ كابتن LID بدون pushName`, { lid: resolvedCaptain.substring(0,15) });
+              }
             }
           }
         }
@@ -1051,10 +1067,24 @@ async function start() {
               whatsapp.addLidMapping(captainPhone, resolvedByName);
               captainPhone = resolvedByName;
             } else {
-              logger.warn(`⚠️ كابتن LID غير محلول — سيُحفظ بالـ LID مؤقتاً`, { lid: captainPhone.substring(0,15), pushName: captainPushName });
+              // محاولة 3: resolveLidDirect عبر USyncQuery
+              const directResolvedTam = await whatsapp.resolveLidDirect(captainPhone);
+              if (directResolvedTam && !directResolvedTam.includes('@lid')) {
+                logger.info(`✅ حل LID الكابتن عند تم (USyncQuery): ${captainPhone.substring(0,15)} → ${directResolvedTam}`);
+                captainPhone = directResolvedTam;
+              } else {
+                logger.warn(`⚠️ كابتن LID غير محلول — سيُحفظ بالـ LID مؤقتاً`, { lid: captainPhone.substring(0,15), pushName: captainPushName });
+              }
             }
           } else {
-            logger.warn(`⚠️ كابتن LID بدون pushName`, { lid: captainPhone.substring(0,15) });
+            // محاولة 3 (بدون pushName): resolveLidDirect عبر USyncQuery
+            const directResolvedTam = await whatsapp.resolveLidDirect(captainPhone);
+            if (directResolvedTam && !directResolvedTam.includes('@lid')) {
+              logger.info(`✅ حل LID الكابتن عند تم (USyncQuery/noPushName): ${captainPhone.substring(0,15)} → ${directResolvedTam}`);
+              captainPhone = directResolvedTam;
+            } else {
+              logger.warn(`⚠️ كابتن LID بدون pushName`, { lid: captainPhone.substring(0,15) });
+            }
           }
         }
       }
