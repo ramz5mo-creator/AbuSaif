@@ -1426,6 +1426,84 @@ async function getOrderOwnerByMessageId() { return null; }
 async function updateOrderStatus() { /* deprecated */ }
 
 // ====================================================
+// لوحة التحكم — API للواجهة الويب
+// ====================================================
+
+/**
+ * جلب قائمة الأوراق اليومية لجروب محدد
+ * @param {string} prefix - بادئة الجروب (مثل 'دريمكس')
+ * @returns {Array<{name, date, totalProduction, totalReception}>}
+ */
+async function getDaysList(prefix) {
+  if (!isInitialized) return [];
+  try {
+    const meta = await sheetsApi.spreadsheets.get({ spreadsheetId });
+    const sheets = meta.data.sheets || [];
+    const pattern = new RegExp(`^${prefix}-(\\d{4}-\\d{2}-\\d{2})$`);
+    const days = [];
+    
+    for (const sheet of sheets) {
+      const title = sheet.properties.title;
+      const match = title.match(pattern);
+      if (!match) continue;
+      const date = match[1];
+      
+      // جلب مجموع الانتاج والاستلام
+      try {
+        const res = await sheetsApi.spreadsheets.values.get({
+          spreadsheetId,
+          range: `'${title}'!A:D`,
+        });
+        const rows = (res.data.values || []).slice(1); // تخطي الرأس
+        let totalProd = 0, totalRecv = 0;
+        for (const row of rows) {
+          if (!row[0]) continue;
+          totalProd += parseInt(row[2]) || 0;
+          totalRecv += parseInt(row[3]) || 0;
+        }
+        days.push({ name: title, date, totalProduction: totalProd, totalReception: totalRecv, rows: rows.length });
+      } catch (e) {
+        days.push({ name: title, date, totalProduction: 0, totalReception: 0, rows: 0 });
+      }
+    }
+    
+    // ترتيب تنازلي (الأحدث أولاً)
+    days.sort((a, b) => b.date.localeCompare(a.date));
+    return days;
+  } catch (error) {
+    logger.warn('فشل getDaysList', { error: error.message });
+    return [];
+  }
+}
+
+/**
+ * جلب بيانات يوم محدد
+ * @param {string} sheetName - اسم الورقة (مثل 'دريمكس-2026-08-07')
+ * @returns {Array<{phone, name, production, reception}>}
+ */
+async function getDayData(sheetName) {
+  if (!isInitialized) return [];
+  try {
+    const res = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${sheetName}'!A:D`,
+    });
+    const rows = (res.data.values || []).slice(1);
+    return rows
+      .filter(r => r[0])
+      .map(r => ({
+        phone: r[0] || '',
+        name: r[1] || '',
+        production: parseInt(r[2]) || 0,
+        reception: parseInt(r[3]) || 0,
+      }));
+  } catch (error) {
+    logger.warn('فشل getDayData', { error: error.message });
+    return [];
+  }
+}
+
+// ====================================================
 // ورقة المحذوف — تسجيل الرسائل المحذوفة
 // ====================================================
 
@@ -1522,6 +1600,9 @@ module.exports = {
   logEdit,
   // الكشف التفصيلي
   getDetailedReport,
+  // لوحة التحكم
+  getDaysList,
+  getDayData,
   // المحذوف
   saveDeletedMessage,
   // deprecated (للتوافق)

@@ -195,6 +195,207 @@ const httpServer = http.createServer(async (req, res) => {
     </body></html>`);
     // إعادة التشغيل فوراً
     setTimeout(() => process.exit(0), 1000);
+  } else if (req.url === '/dashboard') {
+    // لوحة التحكم الرئيسية
+    const groups = config.whatsapp.targetGroups || [];
+    const html = `<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>لوحة التحكم — AbuSaif</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{background:linear-gradient(135deg,#0a0a1a 0%,#0d1b2a 100%);min-height:100vh;font-family:'Segoe UI',Tahoma,sans-serif;color:#e0e0e0;}
+    .header{background:rgba(0,0,0,0.4);backdrop-filter:blur(10px);padding:20px 30px;border-bottom:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:space-between;}
+    .header h1{font-size:24px;color:#fff;font-weight:700;}
+    .header .subtitle{color:#888;font-size:14px;margin-top:4px;}
+    .status-dot{width:10px;height:10px;border-radius:50%;background:#00ff88;display:inline-block;margin-left:8px;animation:pulse 2s infinite;}
+    @keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.4;}}
+    .container{padding:30px;max-width:1200px;margin:0 auto;}
+    .page-title{font-size:20px;color:#aaa;margin-bottom:25px;}
+    .groups-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:20px;}
+    .group-card{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:16px;padding:25px;cursor:pointer;transition:all 0.3s;text-decoration:none;color:inherit;display:block;}
+    .group-card:hover{background:rgba(255,255,255,0.1);border-color:rgba(99,179,237,0.5);transform:translateY(-3px);box-shadow:0 10px 30px rgba(0,0,0,0.3);}
+    .group-icon{width:56px;height:56px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:26px;margin-bottom:15px;}
+    .group-name{font-size:20px;font-weight:700;color:#fff;margin-bottom:6px;}
+    .group-meta{color:#888;font-size:13px;}
+    .group-arrow{float:left;color:#63b3ed;font-size:20px;margin-top:-5px;}
+    .card-dreamex .group-icon{background:linear-gradient(135deg,#667eea,#764ba2);}
+    .card-nashama .group-icon{background:linear-gradient(135deg,#f093fb,#f5576c);}
+    .card-alsaif .group-icon{background:linear-gradient(135deg,#4facfe,#00f2fe);}
+    .card-default .group-icon{background:linear-gradient(135deg,#43e97b,#38f9d7);}
+    .loading{text-align:center;padding:60px;color:#666;}
+    .back-btn{display:inline-flex;align-items:center;gap:8px;color:#63b3ed;text-decoration:none;font-size:14px;padding:8px 16px;border:1px solid rgba(99,179,237,0.3);border-radius:8px;transition:all 0.2s;}
+    .back-btn:hover{background:rgba(99,179,237,0.1);}
+    .days-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;}
+    .day-card{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:20px;cursor:pointer;transition:all 0.3s;text-decoration:none;color:inherit;display:block;}
+    .day-card:hover{background:rgba(255,255,255,0.09);border-color:rgba(99,179,237,0.4);transform:translateY(-2px);}
+    .day-date{font-size:18px;font-weight:700;color:#fff;margin-bottom:12px;}
+    .day-stats{display:flex;gap:12px;}
+    .stat{flex:1;background:rgba(0,0,0,0.3);border-radius:8px;padding:10px;text-align:center;}
+    .stat-val{font-size:22px;font-weight:700;}
+    .stat-lbl{font-size:11px;color:#888;margin-top:2px;}
+    .prod .stat-val{color:#68d391;}
+    .recv .stat-val{color:#63b3ed;}
+    .today-badge{background:linear-gradient(135deg,#f6d365,#fda085);color:#000;font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;margin-right:8px;vertical-align:middle;}
+    .data-table{width:100%;border-collapse:collapse;margin-top:20px;}
+    .data-table th{background:rgba(255,255,255,0.08);padding:12px 16px;text-align:right;font-size:13px;color:#aaa;border-bottom:1px solid rgba(255,255,255,0.1);}
+    .data-table td{padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:14px;}
+    .data-table tr:hover td{background:rgba(255,255,255,0.04);}
+    .data-table .phone{color:#888;font-size:12px;direction:ltr;text-align:left;}
+    .data-table .name{font-weight:600;color:#fff;}
+    .data-table .prod{color:#68d391;font-weight:700;font-size:16px;text-align:center;}
+    .data-table .recv{color:#63b3ed;font-weight:700;font-size:16px;text-align:center;}
+    .totals-bar{display:flex;gap:20px;margin-bottom:25px;}
+    .total-box{background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:16px 24px;flex:1;text-align:center;}
+    .total-box .val{font-size:32px;font-weight:800;}
+    .total-box .lbl{font-size:12px;color:#888;margin-top:4px;}
+    .total-prod .val{color:#68d391;}
+    .total-recv .val{color:#63b3ed;}
+    .total-diff .val{color:#f6ad55;}
+    .spinner{display:inline-block;width:20px;height:20px;border:2px solid rgba(255,255,255,0.2);border-top-color:#63b3ed;border-radius:50%;animation:spin 0.8s linear infinite;}
+    @keyframes spin{to{transform:rotate(360deg);}}
+    #content{min-height:300px;}
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>✨ لوحة التحكم <span class="status-dot"></span></h1>
+      <div class="subtitle">نظام تجريد الطلبات — AbuSaif</div>
+    </div>
+    <div style="color:#888;font-size:13px;" id="clock"></div>
+  </div>
+  <div class="container">
+    <div id="content">
+      <div class="loading">جاري التحميل...</div>
+    </div>
+  </div>
+  <script>
+    const GROUPS = ${JSON.stringify(groups.map(g => ({ name: g.name, prefix: g.prefix, id: g.id })))};
+    
+    function updateClock() {
+      const now = new Date();
+      const t = now.toLocaleString('ar-JO', {timeZone:'Asia/Amman',hour:'2-digit',minute:'2-digit',second:'2-digit',weekday:'long',day:'numeric',month:'long'});
+      document.getElementById('clock').textContent = t;
+    }
+    setInterval(updateClock, 1000); updateClock();
+
+    function getCardClass(name) {
+      const n = name.toLowerCase();
+      if(n.includes('dream')) return 'card-dreamex';
+      if(n.includes('nasha')) return 'card-nashama';
+      if(n.includes('saif')) return 'card-alsaif';
+      return 'card-default';
+    }
+    function getIcon(name) {
+      const n = name.toLowerCase();
+      if(n.includes('dream')) return '🚀';
+      if(n.includes('nasha')) return '💥';
+      if(n.includes('saif')) return '⚔️';
+      return '📊';
+    }
+
+    function showGroups() {
+      let html = '<p class="page-title">اختر جروباً لعرض بياناته</p><div class="groups-grid">';
+      for(const g of GROUPS) {
+        const cls = getCardClass(g.name);
+        html += \`<a class="group-card \${cls}" onclick="showDays('\${g.prefix}','\${g.name}');return false;" href="#">
+          <div class="group-icon">\${getIcon(g.name)}</div>
+          <div class="group-name">\${g.prefix}</div>
+          <div class="group-meta">\${g.name}</div>
+          <span class="group-arrow">&larr;</span>
+        </a>\`;
+      }
+      html += '</div>';
+      document.getElementById('content').innerHTML = html;
+    }
+
+    async function showDays(prefix, name) {
+      document.getElementById('content').innerHTML = '<div class="loading"><div class="spinner"></div> جاري جلب البيانات...</div>';
+      const res = await fetch('/api/days?prefix=' + encodeURIComponent(prefix));
+      const days = await res.json();
+      const today = new Date().toLocaleDateString('sv-SE', {timeZone:'Asia/Amman'});
+      let html = \`<a class="back-btn" onclick="showGroups();return false;" href="#">&rarr; الجروبات</a>
+        <h2 style="margin:20px 0 25px;color:#fff;font-size:22px;">📅 أيام \${prefix}</h2>\`;
+      if(!days.length) { html += '<p style="color:#888;">\u0644ا توجد بيانات حتى الآن</p>'; }
+      else {
+        html += '<div class="days-grid">';
+        for(const d of days) {
+          const isToday = d.date === today;
+          const dateLabel = new Date(d.date + 'T00:00:00').toLocaleDateString('ar-JO', {weekday:'long',day:'numeric',month:'long',year:'numeric'});
+          html += \`<a class="day-card" onclick="showDay('\${d.name}','\${d.date}');return false;" href="#">
+            <div class="day-date">\${isToday ? '<span class="today-badge">اليوم</span>' : ''}\${dateLabel}</div>
+            <div class="day-stats">
+              <div class="stat prod"><div class="stat-val">\${d.totalProduction}</div><div class="stat-lbl">الانتاج</div></div>
+              <div class="stat recv"><div class="stat-val">\${d.totalReception}</div><div class="stat-lbl">الاستلام</div></div>
+              <div class="stat"><div class="stat-val" style="color:#f6ad55;">\${d.rows}</div><div class="stat-lbl">شخص</div></div>
+            </div>
+          </a>\`;
+        }
+        html += '</div>';
+      }
+      document.getElementById('content').innerHTML = html;
+    }
+
+    async function showDay(sheetName, date) {
+      document.getElementById('content').innerHTML = '<div class="loading"><div class="spinner"></div> جاري جلب بيانات اليوم...</div>';
+      const res = await fetch('/api/day?sheet=' + encodeURIComponent(sheetName));
+      const rows = await res.json();
+      const parts = sheetName.split('-');
+      const prefix = parts[0];
+      const dateLabel = new Date(date + 'T00:00:00').toLocaleDateString('ar-JO', {weekday:'long',day:'numeric',month:'long',year:'numeric'});
+      const totalProd = rows.reduce((s,r)=>s+r.production,0);
+      const totalRecv = rows.reduce((s,r)=>s+r.reception,0);
+      const diff = totalProd - totalRecv;
+      let html = \`<a class="back-btn" onclick="showDays('\${prefix}','\${prefix}');return false;" href="#">&rarr; أيام \${prefix}</a>
+        <h2 style="margin:20px 0 20px;color:#fff;font-size:20px;">📆 \${dateLabel}</h2>
+        <div class="totals-bar">
+          <div class="total-box total-prod"><div class="val">\${totalProd}</div><div class="lbl">إجمالي الانتاج</div></div>
+          <div class="total-box total-recv"><div class="val">\${totalRecv}</div><div class="lbl">إجمالي الاستلام</div></div>
+          <div class="total-box total-diff"><div class="val">\${diff >= 0 ? '+' : ''}\${diff}</div><div class="lbl">الفرق</div></div>
+        </div>\`;
+      if(!rows.length) { html += '<p style="color:#888;">لا توجد بيانات لهذا اليوم</p>'; }
+      else {
+        html += '<table class="data-table"><thead><tr><th>الاسم</th><th>الهاتف</th><th style="text-align:center;">الانتاج</th><th style="text-align:center;">الاستلام</th></tr></thead><tbody>';
+        const sorted = [...rows].sort((a,b) => (b.production+b.reception)-(a.production+a.reception));
+        for(const r of sorted) {
+          html += \`<tr><td class="name">\${r.name || '—'}</td><td class="phone">\${r.phone}</td><td class="prod">\${r.production || '—'}</td><td class="recv">\${r.reception || '—'}</td></tr>\`;
+        }
+        html += '</tbody></table>';
+      }
+      document.getElementById('content').innerHTML = html;
+    }
+
+    showGroups();
+  </script>
+</body>
+</html>`;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+  } else if (req.url.startsWith('/api/days')) {
+    const urlObj = new URL(req.url, 'http://localhost');
+    const prefix = urlObj.searchParams.get('prefix') || '';
+    try {
+      const days = await sheets.getDaysList(prefix);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(days));
+    } catch(e) {
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: e.message }));
+    }
+  } else if (req.url.startsWith('/api/day')) {
+    const urlObj = new URL(req.url, 'http://localhost');
+    const sheetName = urlObj.searchParams.get('sheet') || '';
+    try {
+      const data = await sheets.getDayData(sheetName);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(data));
+    } catch(e) {
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: e.message }));
+    }
   } else {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('AbuSaif Bot v4');
