@@ -242,6 +242,15 @@ async function connect() {
           type: msg.message.reactionMessage ? 'reaction' : Object.keys(msg.message)[0],
           name: msg.pushName || '',
         });
+        
+        // حفظ pushName مربوطاً بالرقم لحل LID وتحديث اسم واتساب في الشيت
+        if (msg.pushName && senderJid && senderJid.includes('@s.whatsapp.net')) {
+          const phoneNum = senderJid.replace('@s.whatsapp.net', '');
+          const s = getSheets();
+          if (s && s.updateWhatsappName) {
+            s.updateWhatsappName(phoneNum, msg.pushName).catch(() => {});
+          }
+        }
 
         if (messageHandler) {
           try {

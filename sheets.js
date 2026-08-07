@@ -38,7 +38,9 @@ const CREDENTIALS_PATH = path.resolve('./oauth-credentials.json');
 // كاش لأسماء الأوراق الموجودة (لتجنب إنشاء مكرر)
 const existingSheets = new Set();
 
-// كاش أسماء المسجلين { normalizedPhone → name }
+// كاش أسماء المسجلين { normalizedPhone → { name, whatsappName } }
+// name: الاسم الرسمي (عمود B)
+// whatsappName: اسم واتساب (عمود C) - اختياري
 let registeredUsersCache = new Map();
 let lastRegisteredUsersLoad = 0;
 const REGISTERED_USERS_CACHE_TTL = 5 * 60 * 1000; // 5 دقائق
@@ -161,9 +163,10 @@ async function loadRegisteredUsers(forceRefresh = false) {
 
   const sheetName = config.sheets.sheetNames.registeredUsers || 'المسجلين';
   try {
+    // نقرأ A:C للحصول على: A=الهاتف، B=الاسم الرسمي، C=اسم واتساب (اختياري)
     const response = await sheetsApi.spreadsheets.values.get({
       spreadsheetId,
-      range: `'${sheetName}'!A:B`,
+      range: `'${sheetName}'!A:C`,
     });
     const rows = response.data.values || [];
     const newCache = new Map();
@@ -173,7 +176,10 @@ async function loadRegisteredUsers(forceRefresh = false) {
       if (row[0]) {
         const np = normalizePhone(row[0]);
         if (np) {
-          newCache.set(np, row[1] || '');
+          newCache.set(np, {
+            name: (row[1] || '').trim(),
+            whatsappName: (row[2] || '').trim(),  // عمود C: اسم واتساب
+          });
         }
       }
     }
@@ -190,40 +196,116 @@ async function loadRegisteredUsers(forceRefresh = false) {
 
 /**
  * البحث عن اسم مسجل برقم الهاتف
+ * يُرجع الاسم الرسمي (عمود B) أو اسم واتساب (عمود C) إذا وجد
  */
 function getRegisteredName(phone) {
   if (!phone) return '';
   const np = normalizePhone(phone);
   if (!np) return '';
-  return registeredUsersCache.get(np) || '';
+  const entry = registeredUsersCache.get(np);
+  if (!entry) return '';
+  // إذا كان الكاش قديماً (string) أو جديداً (object)
+  if (typeof entry === 'string') return entry;
+  return entry.name || entry.whatsappName || '';
 }
 
 /**
  * البحث عن رقم هاتف بالاسم (pushName)
- * يُستخدم لحل مشكلة LID غير المحلول
+ * يبحث في الاسم الرسمي (B) واسم واتساب (C) معاً
  */
 function findPhoneByName(pushName) {
   if (!pushName || pushName === 'غير معروف') return null;
   const cleanName = pushName.trim().toLowerCase();
   
-  // بحث مطابق تماماً
-  for (const [phone, name] of registeredUsersCache.entries()) {
-    if (name && name.trim().toLowerCase() === cleanName) {
-      return phone;
-    }
+  // مساعد: استخراج الأسماء من الكاش (سواء string أو object)
+  function getNames(entry) {
+    if (!entry) return [];
+    if (typeof entry === 'string') return [entry.trim().toLowerCase()].filter(Boolean);
+    return [
+      (entry.name || '').trim().toLowerCase(),
+      (entry.whatsappName || '').trim().toLowerCase()
+    ].filter(Boolean);
   }
   
-  // بحث جزئي (الاسم يحتوي على pushName أو العكس)
-  for (const [phone, name] of registeredUsersCache.entries()) {
-    if (name) {
-      const regName = name.trim().toLowerCase();
-      if (regName.includes(cleanName) || cleanName.includes(regName)) {
-        return phone;
-      }
-    }
+  // 1. بحث مطابق تماماً في أي من العمودين
+  for (const [phone, entry] of registeredUsersCache.entries()) {
+    const names = getNames(entry);
+    if (names.some(n => n === cleanName)) return phone;
+  }
+  
+  // 2. بحث جزئي (الاسم يحتوي على pushName أو العكس)
+  for (const [phone, entry] of registeredUsersCache.entries()) {
+    const names = getNames(entry);
+    if (names.some(n => n.includes(cleanName) || cleanName.includes(n))) return phone;
   }
   
   return null;
+}
+
+/**
+ * تحديث اسم واتساب (عمود C) في ورقة المسجلين تلقائياً
+ * يُستدعى عند كل رسالة واردة من شخص مسجل
+ * يحدّث فقط إذا كان الاسم جديداً أو تغيّر لتجنّب الكتابة المتكررة
+ */
+// كاش لتتبع آخر اسم واتساب محفوظ لكل رقم { normalizedPhone: lastWhatsappName }
+const whatsappNameCache = new Map();
+
+async function updateWhatsappName(phone, pushName) {
+  if (!isInitialized || !phone || !pushName) return;
+  const np = normalizePhone(phone);
+  if (!np) return;
+  
+  // لا نحدّث إذا لم يكن مسجلاً
+  const entry = registeredUsersCache.get(np);
+  if (!entry) return;
+  
+  const currentWA = typeof entry === 'string' ? '' : (entry.whatsappName || '');
+  
+  // لا نحدّث إذا كان الاسم نفسه
+  if (currentWA === pushName) return;
+  
+  // لا نحدّث أكثر من مرة كل دقيقتين لنفس الرقم
+  const lastUpdate = whatsappNameCache.get(np);
+  const now = Date.now();
+  if (lastUpdate && (now - lastUpdate.time) < 2 * 60 * 1000 && lastUpdate.name === pushName) return;
+  
+  whatsappNameCache.set(np, { name: pushName, time: now });
+  
+  // تحديث الكاش محلياً
+  if (typeof entry === 'string') {
+    registeredUsersCache.set(np, { name: entry, whatsappName: pushName });
+  } else {
+    registeredUsersCache.set(np, { ...entry, whatsappName: pushName });
+  }
+  
+  // تحديث ورقة المسجلين في Google Sheets (عمود C)
+  const sheetName = config.sheets.sheetNames.registeredUsers || 'المسجلين';
+  try {
+    // البحث عن صف الرقم في الورقة
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${sheetName}'!A:A`,
+    });
+    const rows = response.data.values || [];
+    let rowIndex = -1;
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][0] && normalizePhone(rows[i][0]) === np) {
+        rowIndex = i + 1; // 1-indexed
+        break;
+      }
+    }
+    if (rowIndex === -1) return; // ليس مسجلاً
+    
+    await sheetsApi.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${sheetName}'!C${rowIndex}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [[pushName]] },
+    });
+    logger.debug(`📱 تحديث اسم واتساب: ${np} → ${pushName}`);
+  } catch (error) {
+    logger.debug('فشل تحديث اسم واتساب', { error: error.message });
+  }
 }
 
 // ====================================================
@@ -664,9 +746,9 @@ async function ensureRegistrationSheets() {
       });
       await sheetsApi.spreadsheets.values.update({
         spreadsheetId,
-        range: `'${regSheet}'!A1:B1`,
+        range: `'${regSheet}'!A1:C1`,
         valueInputOption: 'RAW',
-        requestBody: { values: [['الهاتف', 'الاسم']] },
+        requestBody: { values: [['الهاتف', 'الاسم', 'اسم واتساب']] },
       });
       existingSheets.add(regSheet);
     } catch (e) { logger.debug('فشل إنشاء ورقة المسجلين', { error: e.message }); }
@@ -1350,6 +1432,7 @@ module.exports = {
   loadRegisteredUsers,
   getRegisteredName,
   findPhoneByName,
+  updateWhatsappName,
   // الورقة اليومية
   updateTotalsProduction,
   updateTotalsReception,
