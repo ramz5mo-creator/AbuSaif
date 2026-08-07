@@ -522,6 +522,16 @@ const httpServer = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     }
+  } else if (req.url === '/refresh-dashboard' || req.url === '/api/refresh-dashboard') {
+    // تحديث ورقة الرئيسية يدوياً
+    try {
+      await sheets.createDashboardSheet();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ success: true, message: 'تم تحديث ورقة الرئيسية بنجاح' }));
+    } catch(e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
   } else {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('AbuSaif Bot v4');
@@ -579,12 +589,13 @@ async function start() {
   try {
     await sheets.initialize();
     logger.info('✅ Google Sheets متصل');
-    await sheets.loadSettings();
+        await sheets.loadSettings();
     logger.info('✅ الإعدادات محمّلة');
+    // إنشاء/تحديث ورقة الرئيسية عند بدء التشغيل
+    sheets.createDashboardSheet().catch(e => logger.warn('فشل تحديث الرئيسية', { error: e.message }));
   } catch (error) {
     logger.warn('⚠️ Google Sheets غير متاح', { error: error.message });
   }
-
   // 2. معالج الرسائل
   whatsapp.setMessageHandler(async (msg, sock) => {
 
@@ -1002,6 +1013,10 @@ async function start() {
     }
   }, config.general.settingsRefreshInterval);
 
+  // 6b. تحديث ورقة الرئيسية كل 30 دقيقة
+  setInterval(async () => {
+    sheets.createDashboardSheet().catch(e => logger.debug('فشل تحديث الرئيسية', { error: e.message }));
+  }, 30 * 60 * 1000);
   // 6. التحقق من الإغلاق الأسبوعي (الجمعة 11:00 مساءً)
   setInterval(async () => {
     const now = new Date();

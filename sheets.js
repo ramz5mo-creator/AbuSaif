@@ -1573,6 +1573,244 @@ async function saveDeletedMessage(data) {
   }
 }
 
+// ====================================================
+// ورقة الرئيسية (لوحة التحكم) داخل الشيت
+// ====================================================
+
+/**
+ * إنشاء أو تحديث ورقة الرئيسية في الشيت
+ * تعرض ملخصاً لكل جروب مع روابط مباشرة لجميع الأوراق
+ */
+async function createDashboardSheet() {
+  if (!isInitialized) return;
+  const DASHBOARD_NAME = '🏠 الرئيسية';
+  const groups = config.whatsapp.targetGroups;
+
+  try {
+    // جلب بيانات الشيت كاملة
+    const meta = await sheetsApi.spreadsheets.get({ spreadsheetId });
+    const allSheets = meta.data.sheets || [];
+    const allTitles = allSheets.map(s => s.properties.title);
+
+    // إنشاء الورقة إذا لم تكن موجودة
+    if (!allTitles.includes(DASHBOARD_NAME)) {
+      await sheetsApi.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [{
+            addSheet: {
+              properties: {
+                title: DASHBOARD_NAME,
+                index: 0,
+                rightToLeft: true,
+                gridProperties: { rowCount: 200, columnCount: 10 }
+              }
+            }
+          }]
+        }
+      });
+      logger.info('🏠 تم إنشاء ورقة الرئيسية');
+    }
+
+    // جلب sheetId لورقة الرئيسية
+    const metaAfter = await sheetsApi.spreadsheets.get({ spreadsheetId });
+    const allSheetsAfter = metaAfter.data.sheets || [];
+    const dashSheet = allSheetsAfter.find(s => s.properties.title === DASHBOARD_NAME);
+    const dashSheetId = dashSheet?.properties?.sheetId;
+
+    // جمع بيانات كل جروب
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('ar-JO', { timeZone: 'Asia/Amman', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const timeStr = now.toLocaleTimeString('ar-JO', { timeZone: 'Asia/Amman', hour: '2-digit', minute: '2-digit' });
+
+    // بناء بيانات الورقة
+    const values = [];
+    const formatting = []; // طلبات التنسيق
+
+    // السطر 1: عنوان رئيسي
+    values.push(['📊 لوحة التحكم — نظام تجريد الطلبات', '', '', '', '', '', '', '', '', '']);
+    // السطر 2: التاريخ والوقت
+    values.push(['آخر تحديث: ' + dateStr + ' الساعة ' + timeStr, '', '', '', '', '', '', '', '', '']);
+    // سطر 3: فارغ
+    values.push(['', '', '', '', '', '', '', '', '', '']);
+
+    let currentRow = 3; // بداية من السطر 4 (فهرس الأوراق)
+
+    // فهرس الأوراق الثابتة (المسجلين، سجل الحركات، المحذوف، سجل التعديلات)
+    const fixedSheets = [
+      { title: '👥 المسجلين', name: 'المسجلين' },
+      { title: '📜 سجل الحركات', name: 'سجل الحركات' },
+      { title: '🗑️ المحذوف', name: 'المحذوف' },
+      { title: '✏️ سجل التعديلات', name: 'سجل التعديلات' },
+      { title: '⚠️ أرقام غير مسجلة', name: 'أرقام غير مسجلة' },
+    ];
+
+    values.push(['📂 الأوراق العامة', '', '', '', '', '', '', '', '', '']);
+    currentRow++;
+
+    for (const fs of fixedSheets) {
+      if (allTitles.includes(fs.name)) {
+        const sheetObj = allSheetsAfter.find(s => s.properties.title === fs.name);
+        const gid = sheetObj?.properties?.sheetId;
+        const link = gid !== undefined
+          ? `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=${gid}`
+          : '';
+        values.push([fs.title, link ? '=HYPERLINK("' + link + '","انتقال ←")' : 'غير متاح', '', '', '', '', '', '', '', '']);
+        currentRow++;
+      }
+    }
+
+    // سطر فارغ
+    values.push(['', '', '', '', '', '', '', '', '', '']);
+    currentRow++;
+
+    // بيانات كل جروب
+    for (const group of groups) {
+      const prefix = group.prefix;
+      const pattern = new RegExp(`^${prefix}-(\\d{4}-\\d{2}-\\d{2})$`);
+
+      // جمع أوراق هذا الجروب مرتبة تنازلياً
+      const groupSheets = allSheetsAfter
+        .filter(s => pattern.test(s.properties.title))
+        .sort((a, b) => b.properties.title.localeCompare(a.properties.title));
+
+      // حساب إجمالي الجروب
+      let totalProd = 0, totalRecv = 0;
+      const dayRows = [];
+      for (const s of groupSheets) {
+        try {
+          const res = await sheetsApi.spreadsheets.values.get({
+            spreadsheetId,
+            range: `'${s.properties.title}'!C:D`,
+          });
+          const rows = (res.data.values || []).slice(1);
+          let dp = 0, dr = 0;
+          for (const r of rows) {
+            dp += parseInt(r[0]) || 0;
+            dr += parseInt(r[1]) || 0;
+          }
+          totalProd += dp;
+          totalRecv += dr;
+          const gid = s.properties.sheetId;
+          const link = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=${gid}`;
+          dayRows.push({ title: s.properties.title, prod: dp, recv: dr, link });
+        } catch (e) {
+          dayRows.push({ title: s.properties.title, prod: 0, recv: 0, link: '' });
+        }
+      }
+
+      // عنوان الجروب
+      values.push(['📌 ' + prefix + ' — إجمالي: انتاج ' + totalProd + ' | استلام ' + totalRecv, '', '', '', '', '', '', '', '', '']);
+      currentRow++;
+
+      // رأس الجدول
+      values.push(['اليوم', 'الانتاج', 'الاستلام', 'رابط', '', '', '', '', '', '']);
+      currentRow++;
+
+      // أسطر الأيام
+      for (const d of dayRows) {
+        const dateLabel = d.title.replace(prefix + '-', '');
+        const hyperlink = d.link ? '=HYPERLINK("' + d.link + '","' + dateLabel + '")' : dateLabel;
+        values.push([hyperlink, d.prod, d.recv, d.link ? '=HYPERLINK("' + d.link + '","فتح ←")' : '', '', '', '', '', '', '']);
+        currentRow++;
+      }
+
+      // سطر فاصل
+      values.push(['', '', '', '', '', '', '', '', '', '']);
+      currentRow++;
+    }
+
+    // كتابة البيانات في الورقة
+    await sheetsApi.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${DASHBOARD_NAME}'!A1`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values },
+    });
+
+    // تنسيق احترافي: عرض الأعمدة
+    if (dashSheetId !== undefined) {
+      const requests = [
+        // تجميد السطر 1 (عنوان)
+        {
+          repeatCell: {
+            range: { sheetId: dashSheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 10 },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 0.13, green: 0.13, blue: 0.24 },
+                textFormat: { bold: true, fontSize: 14, foregroundColor: { red: 1, green: 1, blue: 1 } },
+                horizontalAlignment: 'CENTER',
+              }
+            },
+            fields: 'userEnteredFormat'
+          }
+        },
+        // تجميد السطر 2 (تاريخ)
+        {
+          repeatCell: {
+            range: { sheetId: dashSheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: 10 },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 0.18, green: 0.18, blue: 0.32 },
+                textFormat: { italic: true, fontSize: 10, foregroundColor: { red: 0.7, green: 0.7, blue: 0.9 } },
+                horizontalAlignment: 'CENTER',
+              }
+            },
+            fields: 'userEnteredFormat'
+          }
+        },
+        // ضبط عرض العمود A
+        {
+          updateDimensionProperties: {
+            range: { sheetId: dashSheetId, dimension: 'COLUMNS', startIndex: 0, endIndex: 1 },
+            properties: { pixelSize: 280 },
+            fields: 'pixelSize'
+          }
+        },
+        // ضبط عرض عمود B وC
+        {
+          updateDimensionProperties: {
+            range: { sheetId: dashSheetId, dimension: 'COLUMNS', startIndex: 1, endIndex: 3 },
+            properties: { pixelSize: 90 },
+            fields: 'pixelSize'
+          }
+        },
+        // ضبط عرض عمود D
+        {
+          updateDimensionProperties: {
+            range: { sheetId: dashSheetId, dimension: 'COLUMNS', startIndex: 3, endIndex: 4 },
+            properties: { pixelSize: 100 },
+            fields: 'pixelSize'
+          }
+        },
+        // تجميد السطر 1 (دمج الخلايا)
+        {
+          mergeCells: {
+            range: { sheetId: dashSheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 10 },
+            mergeType: 'MERGE_ALL'
+          }
+        },
+        // تجميد السطر 2
+        {
+          mergeCells: {
+            range: { sheetId: dashSheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: 10 },
+            mergeType: 'MERGE_ALL'
+          }
+        },
+      ];
+
+      await sheetsApi.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: { requests },
+      });
+    }
+
+    logger.info('🏠 تم تحديث ورقة الرئيسية');
+  } catch (error) {
+    logger.warn('فشل إنشاء/تحديث ورقة الرئيسية', { error: error.message });
+  }
+}
+
 /**
  * جلب جميع المسجلين كمصفوفة { phone, name, whatsappName }
  */
@@ -1617,6 +1855,7 @@ module.exports = {
   // لوحة التحكم
   getDaysList,
   getDayData,
+  createDashboardSheet,
   // المحذوف
   saveDeletedMessage,
   // deprecated (للتوافق)
