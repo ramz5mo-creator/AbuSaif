@@ -632,17 +632,34 @@ async function start() {
       const orderOwnerPhone = result.orderOwnerPhone || result.quotedPhone || null;
 
       // === قاعدة: إذا وضع شخص إيموجي على رسالته هو نفسه → تجاهل
-      // ملاحظة: هذا ينطبق فقط عندما يضع شخص إيموجي على رسالته الأصلية
-      // وليس عندما يضع شخص إيموجي على رسالة "تم" الخاصة برده على طلب شخص آخر
-      const _producerFromOrderEarly = quotedMsgId ? whatsapp.getOrderByReplyId(quotedMsgId) : null;
-      const _realOwner = _producerFromOrderEarly || orderOwnerPhone;
-      if (_realOwner && producerPhone) {
+      // لكن هذه القاعدة لا تنطبق إذا كان الإيموجي على رسالة "تم" لكابتن آخر
+      // لأن صاحب الطلب (أمجد) يضع إيموجي على رد الكابتن (يعقوب) لتحديد الكمية
+      const _captainFromTamEarly = quotedMsgId ? whatsapp.getCaptainByMessageId(quotedMsgId) : null;
+      if (!_captainFromTamEarly) {
+        // فقط إذا لم يكن الإيموجي على رسالة "تم" — نطبق قاعدة التجاهل الذاتي
+        const _producerFromOrderEarly = quotedMsgId ? whatsapp.getOrderByReplyId(quotedMsgId) : null;
+        const _realOwner = _producerFromOrderEarly || orderOwnerPhone;
+        if (_realOwner && producerPhone) {
+          const cleanProducer = producerPhone.replace(/\D/g, '');
+          const cleanOwner = _realOwner.replace(/\D/g, '');
+          if (cleanProducer === cleanOwner ||
+              (cleanProducer.length >= 9 && cleanOwner.length >= 9 &&
+               cleanProducer.slice(-9) === cleanOwner.slice(-9))) {
+            logger.info('⚠️ تجاهل: شخص وضع إيموجي على رسالته هو نفسه', {
+              phone: producerPhone,
+              msgId: quotedMsgId?.substring(0, 8)
+            });
+            return;
+          }
+        }
+      } else {
+        // الإيموجي على رسالة "تم" — تحقق فقط أن واضع الإيموجي ليس الكابتن نفسه
         const cleanProducer = producerPhone.replace(/\D/g, '');
-        const cleanOwner = _realOwner.replace(/\D/g, '');
-        if (cleanProducer === cleanOwner ||
-            (cleanProducer.length >= 9 && cleanOwner.length >= 9 &&
-             cleanProducer.slice(-9) === cleanOwner.slice(-9))) {
-          logger.info('⚠️ تجاهل: شخص وضع إيموجي على رسالته هو نفسه', {
+        const cleanCaptain = _captainFromTamEarly.replace(/\D/g, '');
+        if (cleanProducer === cleanCaptain ||
+            (cleanProducer.length >= 9 && cleanCaptain.length >= 9 &&
+             cleanProducer.slice(-9) === cleanCaptain.slice(-9))) {
+          logger.info('⚠️ تجاهل: الكابتن وضع إيموجي على رسالته هو نفسه', {
             phone: producerPhone,
             msgId: quotedMsgId?.substring(0, 8)
           });
