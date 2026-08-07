@@ -265,6 +265,66 @@ async function connect() {
       }
     });
 
+    // === اكتشاف حذف الرسائل ===
+    sock.ev.on('messages.delete', async (item) => {
+      try {
+        // item قد يكون { keys: [...] } أو { jid, ids: [...] }
+        const keys = item?.keys || (item?.ids ? item.ids.map(id => ({ id, remoteJid: item.jid })) : []);
+        
+        for (const key of keys) {
+          const msgId = key?.id || key;
+          const remoteJid = key?.remoteJid || item?.jid || '';
+          
+          // فقط من الجروبات المستهدفة
+          const targetGroups = config.whatsapp.targetGroups || [];
+          const isTarget = targetGroups.some(g => g.id === remoteJid);
+          if (!isTarget) continue;
+          
+          // جلب الرسالة من الكاش
+          const cachedMsg = messageCache.get(msgId);
+          
+          let phone = '';
+          let name = '';
+          let text = '';
+          
+          if (cachedMsg) {
+            const senderJid = getSenderJid(cachedMsg);
+            phone = senderJid ? senderJid.replace('@s.whatsapp.net', '').replace('@lid', '') : '';
+            name = cachedMsg.pushName || '';
+            text = extractText(cachedMsg) || '';
+            // إذا كان النص فارغاً حدد نوع الرسالة
+            if (!text) {
+              const m = cachedMsg.message || {};
+              if (m.imageMessage) text = `[صورة] ${m.imageMessage.caption || ''}`;
+              else if (m.audioMessage) text = '[رسالة صوتية]';
+              else if (m.videoMessage) text = `[فيديو] ${m.videoMessage.caption || ''}`;
+              else if (m.stickerMessage) text = '[ستيكر]';
+              else if (m.documentMessage) text = `[ملف] ${m.documentMessage.fileName || ''}`;
+              else text = '[رسالة غير نصية]';
+            }
+          } else {
+            text = '[لم تُخزّن الرسالة]';
+          }
+          
+          // إذا لم يكن لدينا اسم من الكاش، نبحث في المسجلين
+          if (!name && phone) {
+            const s = getSheets();
+            if (s && s.getRegisteredName) name = s.getRegisteredName(phone) || '';
+          }
+          
+          logger.info(`🗑️ حذف رسالة`, { phone, name, msgId: msgId?.substring(0, 12), text: text.substring(0, 50) });
+          
+          // تسجيل في ورقة المحذوف
+          const s = getSheets();
+          if (s && s.saveDeletedMessage) {
+            s.saveDeletedMessage({ phone, name, text, messageId: msgId }).catch(() => {});
+          }
+        }
+      } catch (err) {
+        logger.debug('خطأ في معالجة حذف الرسالة', { error: err.message });
+      }
+    });
+
     return sock;
   } catch (error) {
     isConnecting = false;

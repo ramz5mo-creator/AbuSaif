@@ -1425,6 +1425,76 @@ async function recordOrder() { /* لم نعد نسجل الطلبات */ }
 async function getOrderOwnerByMessageId() { return null; }
 async function updateOrderStatus() { /* deprecated */ }
 
+// ====================================================
+// ورقة المحذوف — تسجيل الرسائل المحذوفة
+// ====================================================
+
+async function ensureDeletedSheet() {
+  const sheetName = 'المحذوف';
+  if (existingSheets.has(sheetName)) return;
+  try {
+    await sheetsApi.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: sheetName, rightToLeft: true } } }],
+      },
+    });
+    await sheetsApi.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'المحذوف'!A1:F1`,
+      valueInputOption: 'RAW',
+      requestBody: {
+        values: [['التاريخ', 'الساعة', 'الرقم', 'الاسم', 'نص الرسالة', 'معرف الرسالة']],
+      },
+    });
+    existingSheets.add(sheetName);
+    logger.info('🗑️ تم إنشاء ورقة المحذوف');
+  } catch (e) {
+    if (e.message?.includes('already exists')) existingSheets.add('المحذوف');
+    else logger.debug('فشل إنشاء ورقة المحذوف', { error: e.message });
+  }
+}
+
+/**
+ * تسجيل رسالة محذوفة في ورقة المحذوف
+ * @param {object} data
+ * @param {string} data.phone - رقم من حذف الرسالة
+ * @param {string} data.name - اسم من حذف
+ * @param {string} data.text - نص الرسالة
+ * @param {string} data.messageId - معرف الرسالة
+ */
+async function saveDeletedMessage(data) {
+  if (!isInitialized) return;
+  await ensureDeletedSheet();
+  
+  const now = new Date();
+  const jordanTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
+  const dateStr = `${jordanTime.getUTCFullYear()}-${String(jordanTime.getUTCMonth()+1).padStart(2,'0')}-${String(jordanTime.getUTCDate()).padStart(2,'0')}`;
+  const timeStr = `${String(jordanTime.getUTCHours()).padStart(2,'0')}:${String(jordanTime.getUTCMinutes()).padStart(2,'0')}:${String(jordanTime.getUTCSeconds()).padStart(2,'0')}`;
+  
+  try {
+    await sheetsApi.spreadsheets.values.append({
+      spreadsheetId,
+      range: `'المحذوف'!A:F`,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: {
+        values: [[
+          dateStr,
+          timeStr,
+          data.phone || '',
+          data.name || '',
+          data.text || '[رسالة غير نصية]',
+          data.messageId || '',
+        ]],
+      },
+    });
+    logger.info(`🗑️ تسجيل رسالة محذوفة: ${data.phone} — ${(data.text||'').substring(0,30)}`);
+  } catch (error) {
+    logger.debug('فشل تسجيل المحذوف', { error: error.message });
+  }
+}
+
 module.exports = {
   initialize,
   loadSettings,
@@ -1452,6 +1522,8 @@ module.exports = {
   logEdit,
   // الكشف التفصيلي
   getDetailedReport,
+  // المحذوف
+  saveDeletedMessage,
   // deprecated (للتوافق)
   updateBalance,
   updateTotals,
