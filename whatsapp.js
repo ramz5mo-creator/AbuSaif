@@ -1027,6 +1027,14 @@ function getDiscoveredGroups() {
   return discoveredGroups;
 }
 
+function getLidToPhoneMap() {
+  return lidToPhoneMap;
+}
+
+function getMessageCache() {
+  return messageCache;
+}
+
 module.exports = {
   connect,
   setMessageHandler,
@@ -1056,4 +1064,6 @@ module.exports = {
   getUnresolvedLids,
   getRegisteredLidStatus,
   getGroupMembersWithLidStatus,
+  getLidToPhoneMap,
+  getMessageCache,
 };

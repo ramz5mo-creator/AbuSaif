@@ -551,6 +551,89 @@ const httpServer = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     }
+  } else if (req.url === '/unresolved-lids') {
+    // عرض جميع الأعضاء الذين لم يُحل LID الخاص بهم
+    try {
+      const lidMap = whatsapp.getLidToPhoneMap ? whatsapp.getLidToPhoneMap() : new Map();
+      const msgCache = whatsapp.getMessageCache ? whatsapp.getMessageCache() : new Map();
+      
+      // جمع جميع LIDs غير المحلولة من messageCache
+      const unresolvedMap = new Map(); // lid → { name, lid }
+      for (const [msgId, msg] of msgCache) {
+        const senderJid = msg.key?.participant || msg.key?.remoteJid || '';
+        if (senderJid.includes('@lid') && !lidMap.has(senderJid)) {
+          const name = msg.pushName || 'غير معروف';
+          if (!unresolvedMap.has(senderJid)) {
+            unresolvedMap.set(senderJid, { name, lid: senderJid });
+          }
+        }
+      }
+      
+      const list = Array.from(unresolvedMap.values());
+      
+      // عرض HTML جميل
+      let html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="utf-8"><title>LIDs غير محلولة</title>
+      <style>body{background:#111;color:#0f0;font-family:monospace;padding:20px;}
+      table{border-collapse:collapse;width:100%;} th,td{border:1px solid #0f0;padding:8px;text-align:right;}
+      th{background:#003300;} tr:hover{background:#001100;}
+      .btn{background:#003300;color:#0f0;border:1px solid #0f0;padding:5px 10px;cursor:pointer;border-radius:4px;}
+      input{background:#001100;color:#0f0;border:1px solid #0f0;padding:5px;width:150px;border-radius:4px;}
+      </style></head><body>
+      <h2>🔍 LIDs غير محلولة (${list.length})</h2>
+      <p>لربط LID برقم هاتف، أدخل الرقم واضغط ربط</p>
+      <table><tr><th>الاسم</th><th>LID (مختصر)</th><th>ربط برقم هاتف</th></tr>`;
+      
+      for (const item of list) {
+        const shortLid = item.lid.substring(0, 20);
+        html += `<tr>
+          <td>${item.name}</td>
+          <td style="direction:ltr">${shortLid}</td>
+          <td>
+            <input type="text" id="phone_${shortLid}" placeholder="مثال: 962778793241">
+            <button class="btn" onclick="mapLid('${item.lid}', document.getElementById('phone_${shortLid}').value)">ربط</button>
+          </td>
+        </tr>`;
+      }
+      
+      html += `</table>
+      <script>
+      async function mapLid(lid, phone) {
+        if (!phone) { alert('أدخل رقم الهاتف'); return; }
+        const r = await fetch('/map-lid?lid=' + encodeURIComponent(lid) + '&phone=' + encodeURIComponent(phone));
+        const d = await r.json();
+        if (d.success) { alert('✅ تم الربط: ' + phone); location.reload(); }
+        else { alert('❌ فشل: ' + d.error); }
+      }
+      </script></body></html>`;
+      
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+    } catch(e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+  } else if (req.url?.startsWith('/map-lid')) {
+    // ربط LID برقم هاتف يدوياً
+    try {
+      const urlObj = new URL(req.url, 'http://localhost');
+      const lid = urlObj.searchParams.get('lid');
+      const phone = urlObj.searchParams.get('phone');
+      if (!lid || !phone) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'lid و phone مطلوبان' }));
+        return;
+      }
+      // تنظيف الرقم
+      const cleanedPhone = phone.replace(/[^0-9]/g, '');
+      const phoneJid = cleanedPhone.includes('@') ? cleanedPhone : `${cleanedPhone}@s.whatsapp.net`;
+      whatsapp.addLidMapping(lid, phoneJid);
+      logger.info(`✅ ربط LID يدوي: ${lid.substring(0,15)} → ${cleanedPhone}`);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ success: true, lid: lid.substring(0,20), phone: cleanedPhone }));
+    } catch(e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
   } else {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('AbuSaif Bot v4');
