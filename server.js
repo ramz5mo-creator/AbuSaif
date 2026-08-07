@@ -848,18 +848,12 @@ async function start() {
       } else if (result.type === 'cancel') {
         // === إلغاء ❌ ===
         // القواعد:
-        // 1. المشرف فقط يمكنه وضع ❌
+        // 1. أي شخص يمكنه وضع ❌
         // 2. خلال 24 ساعة فقط من تسجيل العملية
         // 3. لا يُحذف السجل — يُحدَّث نفس الصف (الإنتاج=0، الاستلام=0، الحالة=ملغاة)
         // 4. لا يُنشأ سجل جديد
 
-        // التحقق من صلاحية المشرف
         const cancellerPhone = producerPhone; // واضع ❌
-        const isSupervisor = await sheets.isSupervisor(cancellerPhone);
-        if (!isSupervisor) {
-          logger.info('⛔ رفض إلغاء: ليس مشرفاً', { phone: cancellerPhone });
-          return;
-        }
 
         // البحث عن العملية الأصلية
         if (!quotedMsgId) {
@@ -949,11 +943,6 @@ async function start() {
         if (existingTx.status === 'ملغى') {
           // === حالة ب: استرجاع عملية ملغاة (إزالة ❌) ===
           const restorerPhone = producerPhone;
-          const isSupervisor = await sheets.isSupervisor(restorerPhone);
-          if (!isSupervisor) {
-            logger.info('⛔ رفض استرجاع: ليس مشرفاً', { phone: restorerPhone });
-            return;
-          }
 
           // التحقق من الوقت (24 ساعة من وقت العملية الأصلية)
           const txTime = new Date(existingTx.timestamp);
