@@ -307,14 +307,16 @@ async function processMessage(msg, sock) {
   }
 
   // ====================================================
-  // حالة 2: رسالة نصية أو صوتية أو مرئية
+    // حالة 2: رسالة نصية أو صوتية أو مرئية
   // ====================================================
-
   // استخراج رقم هاتف المرسل
   const senderJid = whatsapp.getSenderJid(msg);
   const senderPhone = cleanPhone(senderJid);
-
-  if (!senderPhone) {
+  // إذا كان المرسل LID غير محلول، نستخدم LID نفسه كمعرف مؤقت
+  // حتى نتمكن من تخزين رسالة “تم” في tamCache
+  const effectiveSenderPhone = senderPhone || 
+    (senderJid && senderJid.includes('@lid') ? senderJid : null);
+  if (!effectiveSenderPhone) {
     logger.debug('تم تجاهل رسالة بدون رقم هاتف صالح', {
       participant: msg.key.participant,
       remoteJid: msg.key.remoteJid,
@@ -347,7 +349,7 @@ async function processMessage(msg, sock) {
   if (!isReply) {
     // إذا كانت الرسالة مجرد إيموجي رقمي أو 👍 بدون رد → نتجاهلها كطلب لأنها غالباً خطأ
     if (text && isQuantityEmoji(text)) {
-      logger.debug('تجاهل إيموجي كمي بدون رد', { phone: senderPhone, text });
+      logger.debug('تجاهل إيموجي كمي بدون رد', { phone: effectiveSenderPhone, text });
       return null;
     }
 
@@ -355,7 +357,7 @@ async function processMessage(msg, sock) {
     return {
       type: 'order',
       messageId,
-      phone: senderPhone,
+      phone: effectiveSenderPhone,
       text: text ? text.substring(0, 500) : `[رسالة ${msgType}]`,
       timestamp: new Date().toISOString(),
       groupId: msg.key.remoteJid,
@@ -477,7 +479,7 @@ async function processMessage(msg, sock) {
 
   logger.info('🎯 رد استلام (محاولة)', {
     id: transactionId.substring(0, 8),
-    acceptor: senderPhone,
+    acceptor: effectiveSenderPhone,
     owner: orderOwnerPhone || 'غير معروف',
     qty: quantity,
     text: text.substring(0, 30)
@@ -487,8 +489,8 @@ async function processMessage(msg, sock) {
     transactionId,
     messageId,
     type: 'accept',
-    phone: senderPhone,             // المستلم
-    acceptorPhone: senderPhone,
+    phone: effectiveSenderPhone,    // المستلم (LID أو رقم حقيقي)
+    acceptorPhone: effectiveSenderPhone,
     quotedPhone: orderOwnerPhone || '',
     orderOwnerPhone: orderOwnerPhone || '',
     quantity,                       // قد يكون 0 إذا لم يكن إيموجي رقمي

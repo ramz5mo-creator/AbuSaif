@@ -582,6 +582,32 @@ function loadLidMap() {
 let lidMapDirty = false;
 let lidMapSaveTimer = null;
 
+/**
+ * حل LID إلى رقم هاتف من lidToPhoneMap
+ * يجرب المفتاح الكامل أولاً، ثم البادئة
+ */
+function resolveLid(lid) {
+  if (!lid) return null;
+  // مطابقة تامة
+  const direct = lidToPhoneMap.get(lid);
+  if (direct) return direct;
+  // مطابقة بالبادئة (بدون رقم الجلسة)
+  const lidPrefix = lid.split(':')[0];
+  const baseKey = lidPrefix + '@lid';
+  const baseMatch = lidToPhoneMap.get(baseKey);
+  if (baseMatch) {
+    addLidMapping(lid, baseMatch);
+    return baseMatch;
+  }
+  // بحث خطي
+  for (const [k, v] of lidToPhoneMap.entries()) {
+    if (k.split(':')[0] === lidPrefix) {
+      addLidMapping(lid, v);
+      return v;
+    }
+  }
+  return null;
+}
 function addLidMapping(lid, phone) {
   if (!lid || !phone) return;
   if (lidToPhoneMap.get(lid) === phone) return; // لا تغيير
@@ -951,6 +977,7 @@ module.exports = {
   getDiscoveredGroups,
   lookupPhone,
   resolveLidByPushName,
+  resolveLid,
   addLidMapping,
   setOrderForReply,
   getOrderByReplyId,

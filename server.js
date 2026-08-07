@@ -676,7 +676,18 @@ async function start() {
         // الحالة 1: الإيموجي على رسالة "تم"
         // الكابتن = من tamCache
         // صاحب الطلب = من orderCache أو orderOwnerPhone
-        captainPhone = captainFromTam;
+        let resolvedCaptain = captainFromTam;
+        // إذا كان الكابتن LID غير محلول، نحاول حله الآن
+        if (resolvedCaptain && resolvedCaptain.includes('@lid')) {
+          const lidResolved = whatsapp.resolveLid(resolvedCaptain);
+          if (lidResolved && !lidResolved.includes('@lid')) {
+            logger.info(`✅ حل LID الكابتن عند الإيموجي: ${resolvedCaptain.substring(0,15)} → ${lidResolved}`);
+            resolvedCaptain = lidResolved;
+            // حدّث tamCache بالرقم الحقيقي
+            if (quotedMsgId) whatsapp.setCaptainForMessage(quotedMsgId, resolvedCaptain);
+          }
+        }
+        captainPhone = resolvedCaptain;
         realProducerPhone = producerFromOrder || orderOwnerPhone;
         logger.info('📌 حالة 1: إيموجي على رسالة تم', {
           captain: captainPhone, producer: realProducerPhone, qty: quantity
@@ -1001,8 +1012,18 @@ async function start() {
     if (!result) return;
 
     if (result.type === 'accept') {
-      const captainPhone = result.phone;
+      let captainPhone = result.phone;
       const tamMessageId = result.messageId;
+      // إذا كان captainPhone هو LID غير محلول، نحاول حله الآن
+      if (captainPhone && captainPhone.includes('@lid')) {
+        const resolvedCaptain = whatsapp.resolveLid(captainPhone);
+        if (resolvedCaptain && !resolvedCaptain.includes('@lid')) {
+          logger.info(`✅ حل LID الكابتن عند تم: ${captainPhone.substring(0,15)} → ${resolvedCaptain}`);
+          captainPhone = resolvedCaptain;
+        } else {
+          logger.warn(`⚠️ كابتن LID غير محلول — سيُحفظ بالـ LID مؤقتاً`, { lid: captainPhone.substring(0,15) });
+        }
+      }
 
       if (captainPhone && tamMessageId) {
         whatsapp.setCaptainForMessage(tamMessageId, captainPhone);
