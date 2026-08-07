@@ -364,17 +364,53 @@ async function processMessage(msg, sock) {
     contextInfo?.participantPn ||
     (contextInfo?.participant?.includes('@s.whatsapp.net') ? contextInfo.participant : null);
   
-  // إذا كان participant هو LID، نحاول حله من الكاش أو عبر pushName
+  // إذا كان participant هو LID، نحاول حله بأربع طرق متدرجة
   if (!quotedOwnerJid && contextInfo?.participant) {
     if (contextInfo.participant.includes('@lid')) {
-      // محاولة حل LID من الرسالة المقتبسة المخزنة
-      const cachedQuotedMsg = whatsapp.getCachedMessage(contextInfo?.stanzaId);
+      const lid = contextInfo.participant;
+      const quotedMsgId = contextInfo?.stanzaId;
+      
+      // طريقة 1: الرسالة المقتبسة مخزنة في messageCache
+      const cachedQuotedMsg = quotedMsgId ? whatsapp.getCachedMessage(quotedMsgId) : null;
       if (cachedQuotedMsg) {
-        quotedOwnerJid = whatsapp.getSenderJid(cachedQuotedMsg);
+        const resolved = whatsapp.getSenderJid(cachedQuotedMsg);
+        if (resolved && !resolved.includes('@lid')) {
+          quotedOwnerJid = resolved;
+          logger.debug('✅ حل LID من messageCache', { lid: lid.substring(0, 12), resolved });
+        }
       }
-      // إذا لم يُحل، نستخدم participant كما هو
+      
+      // طريقة 2: pushName من الرسالة المخزنة + بحث في المسجلين
       if (!quotedOwnerJid || quotedOwnerJid.includes('@lid')) {
-        quotedOwnerJid = contextInfo.participant;
+        const cachedPushName = quotedMsgId ? whatsapp.getPushNameFromCachedMessage(quotedMsgId) : null;
+        if (cachedPushName) {
+          const resolved = whatsapp.resolvePhoneByPushName(cachedPushName);
+          if (resolved) {
+            quotedOwnerJid = resolved;
+            // ربط LID بالرقم للمستقبل
+            whatsapp.addLidMapping(lid, resolved);
+            logger.info(`✅ حل LID من pushName الكاش: ${cachedPushName} → ${resolved}`, { lid: lid.substring(0, 12) });
+          }
+        }
+      }
+      
+      // طريقة 3: pushName من الرسالة الحالية (contextInfo.pushName)
+      if (!quotedOwnerJid || quotedOwnerJid.includes('@lid')) {
+        const ctxPushName = contextInfo?.pushName || contextInfo?.quotedMessage?.extendedTextMessage?.contextInfo?.pushName;
+        if (ctxPushName) {
+          const resolved = whatsapp.resolvePhoneByPushName(ctxPushName);
+          if (resolved) {
+            quotedOwnerJid = resolved;
+            whatsapp.addLidMapping(lid, resolved);
+            logger.info(`✅ حل LID من contextInfo.pushName: ${ctxPushName} → ${resolved}`, { lid: lid.substring(0, 12) });
+          }
+        }
+      }
+      
+      // طريقة 4: استخدام LID كما هو (آخر خيار)
+      if (!quotedOwnerJid || quotedOwnerJid.includes('@lid')) {
+        quotedOwnerJid = lid;
+        logger.warn('⚠️ LID غير محلول بعد كل المحاولات', { lid: lid.substring(0, 12) });
       }
     } else {
       quotedOwnerJid = contextInfo.participant;

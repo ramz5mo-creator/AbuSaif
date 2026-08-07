@@ -575,6 +575,30 @@ function getCachedMessage(messageId) {
   return messageCache.get(messageId) || null;
 }
 
+/**
+ * استخراج pushName من رسالة مخزنة في الكاش
+ * مفيد لحل LID عبر اسم صاحب الرسالة الأصلية
+ */
+function getPushNameFromCachedMessage(messageId) {
+  const msg = messageCache.get(messageId);
+  return msg?.pushName || null;
+}
+
+/**
+ * محاولة حل رقم الهاتف من pushName عبر ورقة المسجلين
+ * يُستخدم عندما يكون LID غير محلول في contextInfo
+ * @param {string} pushName - اسم واتساب
+ * @returns {string|null} رقم الهاتف كـ JID أو null
+ */
+function resolvePhoneByPushName(pushName) {
+  if (!pushName || pushName === 'غير معروف') return null;
+  const sheets = getSheets();
+  if (!sheets || !sheets.findPhoneByName) return null;
+  const phone = sheets.findPhoneByName(pushName);
+  if (phone) return `${phone}@s.whatsapp.net`;
+  return null;
+}
+
 function getCacheStats() {
   return { messageCache: messageCache.size, tamCache: tamCache.size, lidMap: lidToPhoneMap.size };
 }
@@ -635,4 +659,6 @@ module.exports = {
   addLidMapping,
   setOrderForReply,
   getOrderByReplyId,
+  getPushNameFromCachedMessage,
+  resolvePhoneByPushName,
 };
