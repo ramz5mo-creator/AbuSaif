@@ -295,14 +295,15 @@ async function connect() {
               } else {
                 // سجل الاسم غير المحلول للمراجعة اليدوية
                 logger.warn(`⚠️ LID غير محلول: ${msg.pushName}`, { lid: senderJid?.substring(0, 15) });
-                // محاولة أخيرة: جلب بيانات العضو من groupMetadata مباشرة
+                // محاولة أخيرة 1: جلب بيانات العضو من groupMetadata مباشرة
                 if (sock && remoteJid && senderJid && senderJid.includes('@lid')) {
                   (async () => {
                     try {
+                      // محاولة groupMetadata أولاً
+                      let resolved = false;
                       const meta = await sock.groupMetadata(remoteJid);
                       if (meta?.participants) {
                         for (const p of meta.participants) {
-                          // مطابقة LID
                           const pLid = p.lid || '';
                           const pId = p.id || '';
                           const sLid = senderJid.split(':')[0];
@@ -310,6 +311,7 @@ async function connect() {
                           if (pLid === senderJid || pLidBase === sLid) {
                             if (pId && pId.includes('@s.whatsapp.net')) {
                               addLidMapping(senderJid, pId);
+                              resolved = true;
                               logger.info(`✅ ربط LID من groupMetadata: ${msg.pushName} → ${pId.split('@')[0]}`, { lid: senderJid.substring(0, 15) });
                               const s = getSheets();
                               if (s && s.updateWhatsappName && msg.pushName) {
@@ -317,6 +319,17 @@ async function connect() {
                               }
                             }
                             break;
+                          }
+                        }
+                      }
+                      // محاولة أخيرة 2: USyncQuery.withLid() مباشرة من واتساب
+                      if (!resolved) {
+                        const directPhone = await resolveLidDirect(senderJid);
+                        if (directPhone && !directPhone.includes('@lid')) {
+                          logger.info(`✅ ربط LID من USyncQuery عند وصول الرسالة: ${msg.pushName} → ${directPhone.split('@')[0]}`);
+                          const s = getSheets();
+                          if (s && s.updateWhatsappName && msg.pushName) {
+                            s.updateWhatsappName(directPhone.replace('@s.whatsapp.net', ''), msg.pushName).catch(() => {});
                           }
                         }
                       }
@@ -509,23 +522,42 @@ async function syncGroupLids(groupId) {
       const metadata = await sock.groupMetadata(group.id);
       if (!metadata?.participants) continue;
       
+      const unresolvedLids = [];
       for (const p of metadata.participants) {
         total++;
         // p.id = الرقم الحقيقي (JID)
         // p.lid = المعرف المشفر
-        if (p.lid && p.id) {
+        if (p.lid && p.id && p.id.includes('@s.whatsapp.net')) {
+          // عضو عادي: ربط LID بالرقم الحقيقي
           const existed = lidToPhoneMap.has(p.lid);
           lidToPhoneMap.set(p.lid, p.id);
+          const lidBase = p.lid.split(':')[0];
+          if (lidBase && lidBase !== p.lid) lidToPhoneMap.set(lidBase + '@lid', p.id);
           if (!existed) newLinks++;
-        }
-        // أيضاً العكس: إذا كان id هو LID وليس رقماً
-        if (p.id?.includes('@lid') && p.lid) {
-          const existed = lidToPhoneMap.has(p.id);
-          lidToPhoneMap.set(p.id, p.lid);
-          if (!existed) newLinks++;
+        } else if (p.id?.includes('@lid') || (p.lid && !p.id?.includes('@s.whatsapp.net'))) {
+          // عضو يظهر كـ LID فقط — يحتاج USyncQuery
+          const lidToResolve = p.id?.includes('@lid') ? p.id : p.lid;
+          if (lidToResolve) unresolvedLids.push(lidToResolve);
         }
       }
-      logger.info(`🔄 syncGroupLids: ${group.name} → ${metadata.participants.length} عضو`);
+      
+      // حل الأعضاء غير المحلولين عبر USyncQuery
+      if (unresolvedLids.length > 0) {
+        logger.info(`🔍 محاولة حل ${unresolvedLids.length} LID غير محلول عبر USyncQuery في ${group.name}`);
+        for (const lid of unresolvedLids) {
+          try {
+            const resolved = await resolveLidDirect(lid);
+            if (resolved && resolved.includes('@s.whatsapp.net')) {
+              newLinks++;
+              logger.info(`✅ حل LID عبر USyncQuery (مزامنة): ${lid.substring(0,15)} → ${resolved.split('@')[0]}`);
+            }
+          } catch (e) {
+            logger.debug(`فشل حل LID ${lid.substring(0,15)}`, { error: e.message });
+          }
+        }
+      }
+      
+      logger.info(`🔄 syncGroupLids: ${group.name} → ${metadata.participants.length} عضو | غير محلول: ${unresolvedLids.length}`);
     } catch (e) {
       logger.warn(`فشل مزامنة جروب ${group.name}`, { error: e.message });
     }
