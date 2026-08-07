@@ -2134,6 +2134,79 @@ async function findTransactionByMessageIdIncludingCancelled(messageId, reactorPh
   }
 }
 
+/**
+ * الطبقة 4: تحديث السجلات القديمة في سجل الحركات عند حل LID
+ * يبحث عن سجلات مخزنة بـ LID مؤقت ويستبدلها بالرقم الحقيقي
+ * @param {Map<string, string>} newlyResolvedMap - خريطة LID → رقم هاتف (محلولة حديثاً)
+ */
+async function backfillLidRecords(newlyResolvedMap) {
+  if (!isInitialized || !newlyResolvedMap || newlyResolvedMap.size === 0) return;
+  const transSheet = config.sheets.sheetNames.transactions || 'سجل الحركات';
+  try {
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${transSheet}'!A:J`,
+    });
+    const rows = response.data.values || [];
+    if (rows.length <= 1) return;
+    
+    const updates = [];
+    
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      const producer = (row[2] || '').trim();
+      const captain = (row[3] || '').trim();
+      let newProducer = producer;
+      let newCaptain = captain;
+      let changed = false;
+      
+      for (const [lid, phone] of newlyResolvedMap.entries()) {
+        // الجزء الرقمي من LID (بدون @lid)
+        const lidBase = lid.split(':')[0].replace('@lid', '');
+        const cleanPhone = phone.replace(/\D/g, '');
+        const shortPhone = cleanPhone.length > 9 ? cleanPhone.slice(-9) : cleanPhone;
+        
+        if (lidBase.length < 8) continue; // تجنب المطابقة الخاطئة
+        
+        // مطابقة المنتج: هل الرقم المخزن هو LID مؤقت?
+        if (producer && producer.length >= 10 && producer === lidBase) {
+          newProducer = shortPhone;
+          changed = true;
+        }
+        // مطابقة الكابتن
+        if (captain && captain.length >= 10 && captain === lidBase) {
+          newCaptain = shortPhone;
+          changed = true;
+        }
+      }
+      
+      if (changed) {
+        updates.push({
+          range: `'${transSheet}'!C${i+1}:D${i+1}`,
+          values: [[newProducer, newCaptain]],
+        });
+      }
+    }
+    
+    if (updates.length === 0) {
+      logger.debug('backfill: لا توجد سجلات تحتاج تحديث');
+      return;
+    }
+    
+    // تحديث دفعي
+    await sheetsApi.spreadsheets.values.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        valueInputOption: 'RAW',
+        data: updates,
+      },
+    });
+    logger.info(`✅ backfill: تحديث ${updates.length} سجل قديم بعد حل LID`);
+  } catch (e) {
+    logger.debug('فشل backfillLidRecords', { error: e.message });
+  }
+}
+
 module.exports = {
   initialize,
   loadSettings,
@@ -2170,6 +2243,8 @@ module.exports = {
   createDashboardSheet,
   // المحذوف
   saveDeletedMessage,
+  // الطبقة 4: تحديث السجلات القديمة عند حل LID
+  backfillLidRecords,
   // deprecated (للتوافق)
   updateBalance,
   updateTotals,
@@ -2177,4 +2252,6 @@ module.exports = {
   recordOrder,
   getOrderOwnerByMessageId,
   updateOrderStatus,
+  // الطبقة 4: تحديث السجلات القديمة عند حل LID
+  backfillLidRecords,
 };

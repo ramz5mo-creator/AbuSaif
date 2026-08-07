@@ -363,6 +363,48 @@ async function connect() {
       }
     });
 
+    // === الطبقة 5: أحداث دخول/خروج/تغيير الأعضاء ===
+    sock.ev.on('group-participants.update', async ({ id: groupId, participants, action }) => {
+      const targetGroups = config.whatsapp.targetGroups || [];
+      const isTarget = targetGroups.some(g => g.id === groupId);
+      if (!isTarget) return;
+      
+      logger.info(`👥 حدث جروب: ${action} | عدد: ${participants.length}`);
+      
+      if (action === 'add' || action === 'promote' || action === 'demote') {
+        // عضو جديد — تحديث القائمة وحل LID
+        setTimeout(async () => {
+          try {
+            const meta = await sock.groupMetadata(groupId);
+            if (!meta?.participants) return;
+            for (const p of meta.participants) {
+              if (!participants.includes(p.id) && !participants.includes(p.lid)) continue;
+              const pId = p.id || '';
+              const pLid = p.lid || '';
+              if (pLid && pId.includes('@s.whatsapp.net')) {
+                lidToPhoneMap.set(pLid, pId);
+                const base = pLid.split(':')[0];
+                if (base !== pLid) lidToPhoneMap.set(base + '@lid', pId);
+                logger.info(`✅ عضو جديد محلول: ${pLid.substring(0,15)} → ${pId.split('@')[0]}`);
+              } else if (pId.includes('@lid')) {
+                queueLidForResolve(pId);
+                // حل فوري
+                resolveLidDirect(pId).then(r => {
+                  if (r) logger.info(`✅ عضو جديد حل فوري: ${pId.substring(0,15)} → ${r.split('@')[0]}`);
+                }).catch(() => {});
+              }
+            }
+            saveLidMapDebounced();
+          } catch(e) {
+            logger.debug('فشل تحديث بيانات العضو الجديد', { error: e.message });
+          }
+        }, 3000); // انتظر 3 ثوانٍ لاستقرار البيانات
+      } else if (action === 'remove') {
+        // عضو غادر — لا نحذف الربط (قد يعود)
+        logger.info(`🚶 عضو غادر الجروب: ${participants[0]?.substring(0,15)}`);
+      }
+    });
+
     // === اكتشاف حذف الرسائل ===
     sock.ev.on('messages.delete', async (item) => {
       try {
@@ -1057,7 +1099,10 @@ async function autoResolveLidsBatch() {
       if (result) {
         resolved++;
         _lidResolveQueue.delete(lid);
-        logger.info(`✅ autoResolve: ${lid.substring(0,15)} → ${result.split('@')[0]}`);
+        // تتبع النجاحات لتحديث السجلات القديمة (الطبقة 4)
+        const phone = result.split('@')[0].replace(/\D/g, '');
+        if (phone.length >= 9) _newlyResolvedLids.set(lid, phone);
+        logger.info(`✅ autoResolve: ${lid.substring(0,15)} → ${phone}`);
       } else {
         // فشل — احتفظ به في القائمة لمحاولة لاحقة
       }
@@ -1068,16 +1113,32 @@ async function autoResolveLidsBatch() {
     await new Promise(r => setTimeout(r, 500));
   }
   
-  if (resolved > 0) saveLidMapDebounced();
+  if (resolved > 0) {
+    saveLidMapDebounced();
+    // الطبقة 4: تحديث السجلات القديمة في الشيت
+    if (_newlyResolvedLids.size > 0) {
+      const sheets = getSheets();
+      if (sheets && sheets.backfillLidRecords) {
+        const toUpdate = new Map(_newlyResolvedLids);
+        _newlyResolvedLids.clear();
+        sheets.backfillLidRecords(toUpdate).catch(e => 
+          logger.debug('فشل backfill سجلات LID', { error: e.message })
+        );
+      }
+    }
+  }
   logger.info(`🤖 autoResolve: ${resolved}/${batch.length} تم حلها | متبقي: ${_lidResolveQueue.size}`);
   _autoResolveRunning = false;
 }
 
+// تتبع النجاحات الجديدة: { lid → phone } لتحديث السجلات القديمة
+const _newlyResolvedLids = new Map();
+
 /**
- * تهيئة الحل التلقائي: تشغيل كل 30 ثانية + تحميل LIDs من الجروبات عند البدء
+ * جمع جميع LIDs غير المحلولة من جميع الجروبات وإضافتها للقائمة
  */
-async function startAutoResolveLids() {
-  // تحميل LIDs غير المحلولة من جميع الجروبات
+async function collectAllUnresolvedLids() {
+  if (!sock) return 0;
   const targetGroups = config.whatsapp.targetGroups || [];
   let queued = 0;
   for (const group of targetGroups) {
@@ -1085,27 +1146,68 @@ async function startAutoResolveLids() {
       const metadata = await sock.groupMetadata(group.id);
       if (!metadata?.participants) continue;
       for (const p of metadata.participants) {
-        // عضو يظهر كـ LID فقط
-        if (p.id?.includes('@lid') && !lidToPhoneMap.has(p.id)) {
-          _lidResolveQueue.add(p.id);
+        const pId = p.id || '';
+        const pLid = p.lid || '';
+        // طبقة 1: عضو لديه LID ورقم حقيقي — احفظ الربط مباشرة
+        if (pLid && pId.includes('@s.whatsapp.net')) {
+          if (!lidToPhoneMap.has(pLid)) {
+            lidToPhoneMap.set(pLid, pId);
+            const base = pLid.split(':')[0];
+            if (base !== pLid) lidToPhoneMap.set(base + '@lid', pId);
+          }
+        }
+        // طبقة 2: عضو يظهر كـ LID فقط — أضفه للقائمة
+        if (pId.includes('@lid') && !lidToPhoneMap.has(pId)) {
+          _lidResolveQueue.add(pId);
           queued++;
         }
-        // عضو له lid لكن لم يُربط بعد
-        if (p.lid && !p.id?.includes('@s.whatsapp.net') && !lidToPhoneMap.has(p.lid)) {
-          _lidResolveQueue.add(p.lid);
+        if (pLid && !pId.includes('@s.whatsapp.net') && !lidToPhoneMap.has(pLid)) {
+          _lidResolveQueue.add(pLid);
           queued++;
         }
       }
     } catch(e) {
-      logger.debug(`startAutoResolveLids: فشل جلب ${group.name}`, { error: e.message });
+      logger.debug(`collectAllUnresolvedLids: فشل ${group.name}`, { error: e.message });
     }
   }
-  logger.info(`🤖 autoResolve: ${queued} LID في قائمة الانتظار`);
+  if (queued > 0) logger.info(`📝 جمع LIDs: ${queued} جديد في القائمة | إجمالي: ${_lidResolveQueue.size}`);
+  return queued;
+}
+
+/**
+ * نظام LID الشامل من 5 طبقات
+ * الطبقة 1: حل عند البدء لجميع الأعضاء
+ * الطبقة 2: Job كل 5 دقائق لإعادة المحاولة
+ * الطبقة 3: حل فوري عند وصول رسالة من LID غير محلول
+ * الطبقة 4: تحديث السجلات القديمة عند حل LID
+ * الطبقة 5: تحديث قائمة الأعضاء عند الأحداث
+ */
+async function startAutoResolveLids() {
+  logger.info('🚀 بدء نظام LID الشامل (5 طبقات)');
   
-  // تشغيل دفعة كل 30 ثانية
+  // الطبقة 1: جمع وحل جميع LIDs عند البدء
+  await collectAllUnresolvedLids();
+  
+  // تشغيل أول دفعة بعد 5 ثوانٍ
+  setTimeout(autoResolveLidsBatch, 5 * 1000);
+  
+  // الطبقة 2: Job كل 5 دقائق — إعادة جمع + حل
+  setInterval(async () => {
+    await collectAllUnresolvedLids();
+    await autoResolveLidsBatch();
+  }, 5 * 60 * 1000);
+  
+  // الطبقة 2b: دفعة اعتيادية كل 30 ثانية للقائمة الحالية
   setInterval(autoResolveLidsBatch, 30 * 1000);
-  // تشغيل أول دفعة بعد 10 ثوانٍ من البدء
-  setTimeout(autoResolveLidsBatch, 10 * 1000);
+  
+  // الطبقة 5: تحديث قائمة الأعضاء كل ساعة
+  setInterval(async () => {
+    logger.info('🔄 تحديث دوري لقائمة الأعضاء (كل ساعة)');
+    await loadGroupParticipants();
+    await collectAllUnresolvedLids();
+  }, 60 * 60 * 1000);
+  
+  logger.info(`✅ نظام LID نشط: ${_lidResolveQueue.size} في القائمة`);
 }
 
 /**
