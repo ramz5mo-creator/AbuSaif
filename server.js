@@ -785,6 +785,21 @@ async function start() {
   logger.info('   🚀 نظام AbuSaif v4 — ورقة يومية');
   logger.info('═══════════════════════════════════════');
 
+  // 0. إنشاء مجلدات VOLUME إذا لم تكن موجودة
+  const fs = require('fs');
+  const path = require('path');
+  const volumePath = path.resolve(config.volumePath);
+  const authSessionPath = path.resolve(config.whatsapp.authPath);
+  const logsPath = path.resolve(config.logging.logsPath);
+  [volumePath, authSessionPath, logsPath].forEach(dir => {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+      logger.info(`📁 تم إنشاء المجلد: ${dir}`);
+    }
+  });
+  logger.info(`💾 VOLUME_PATH: ${volumePath} (${process.env.VOLUME_PATH ? 'Railway Volume' : 'محلي'})`);
+  logger.info(`🔑 AUTH_PATH: ${authSessionPath}`);
+
   // 1. تهيئة Google Sheets
   try {
     await sheets.initialize();

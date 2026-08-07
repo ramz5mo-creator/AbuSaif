@@ -32,8 +32,14 @@ let sheetsApi = null;
 let isInitialized = false;
 let spreadsheetId = '';
 
-const TOKEN_PATH = path.resolve('./token.json');
-const CREDENTIALS_PATH = path.resolve('./oauth-credentials.json');
+// مسارا التوكن والمصادقة — يبحث أولاً في VOLUME_PATH ثم في المجلد الحالي
+const VOLUME_PATH = process.env.VOLUME_PATH || './data';
+const TOKEN_PATH = fs.existsSync(path.resolve(VOLUME_PATH, 'token.json'))
+  ? path.resolve(VOLUME_PATH, 'token.json')
+  : path.resolve('./token.json');
+const CREDENTIALS_PATH = fs.existsSync(path.resolve(VOLUME_PATH, 'oauth-credentials.json'))
+  ? path.resolve(VOLUME_PATH, 'oauth-credentials.json')
+  : path.resolve('./oauth-credentials.json');
 
 // كاش لأسماء الأوراق الموجودة (لتجنب إنشاء مكرر)
 const existingSheets = new Set();

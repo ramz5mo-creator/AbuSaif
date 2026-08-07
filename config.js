@@ -6,7 +6,18 @@
  * لكن هنا القيم الافتراضية في حال عدم توفر الاتصال.
  */
 
+// ====================================================
+// مسار التخزين الدائم (Railway Volume أو المجلد المحلي)
+// عند إضافة Volume في Railway، اضبط:
+//   VOLUME_PATH=/data   (أو أي مسار تختاره للـ Volume)
+// إذا لم يكن VOLUME_PATH موجوداً، يُستخدم المجلد المحلي ./data
+// ====================================================
+const VOLUME_PATH = process.env.VOLUME_PATH || './data';
+
 module.exports = {
+  // مسار التخزين الدائم (يُستخدم في جميع أنحاء النظام)
+  volumePath: VOLUME_PATH,
+
   // === إعدادات واتساب ===
   whatsapp: {
     // الجروبات المستهدفة
@@ -15,8 +26,8 @@ module.exports = {
       { id: '120363408380060992@g.us', name: 'Nashama', prefix: 'نشامى' },
       { id: '120363407744839853@g.us', name: 'AlSaif', prefix: 'السيف' }
     ],
-    // مسار حفظ جلسة واتساب (داخل مجلد فرعي لتجنب مشاكل Volume)
-    authPath: './auth/session',
+    // مسار حفظ جلسة واتساب — يستخدم VOLUME_PATH إذا كان متاحاً
+    authPath: `${VOLUME_PATH}/auth/session`,
   },
 
   // === إعدادات Google Sheets ===
@@ -56,7 +67,7 @@ module.exports = {
   // === إعدادات السجل ===
   logging: {
     level: process.env.LOG_LEVEL || 'info',
-    logsPath: './logs',
+    logsPath: `${VOLUME_PATH}/logs`,
   },
 
   // === إعدادات عامة ===

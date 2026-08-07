@@ -38,8 +38,8 @@ const orderCache = new Map();
 // { lid@lid: phone@s.whatsapp.net }
 const lidToPhoneMap = new Map();
 
-// مسار حفظ lidMap على القرص
-const LID_MAP_PATH = path.resolve(config.whatsapp.authPath, '..', 'lid-map.json');
+// مسار حفظ lidMap على القرص — يستخدم VOLUME_PATH للحفظ الدائم
+const LID_MAP_PATH = path.resolve(config.volumePath, 'lid-map.json');
 
 // مرجع لدالة sheets.loadRegisteredUsers (lazy لتجنب circular dependency)
 let sheetsModule = null;
