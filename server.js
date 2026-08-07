@@ -846,44 +846,63 @@ async function start() {
         }).catch(() => {});
 
       } else if (result.type === 'cancel') {
-        // === إلغاء ===
-        // البحث عن العملية الأصلية لمعرفة الكمية الفعلية
-        let cancelQuantity = quantity;
-        let cancelCaptain = captainPhone;
-        let cancelProducer = producerPhone;
+        // === إلغاء ❌ ===
+        // القواعد:
+        // 1. المشرف فقط يمكنه وضع ❌
+        // 2. خلال 24 ساعة فقط من تسجيل العملية
+        // 3. لا يُحذف السجل — يُحدَّث نفس الصف (الإنتاج=0، الاستلام=0، الحالة=ملغاة)
+        // 4. لا يُنشأ سجل جديد
 
-        if (quotedMsgId) {
-          try {
-            const existingTx = await sheets.findTransactionByMessageId(quotedMsgId, producerPhone);
-            if (existingTx) {
-              cancelQuantity = existingTx.quantity || quantity;
-              cancelCaptain = existingTx.captainPhone || captainPhone;
-              cancelProducer = existingTx.producerPhone || producerPhone;
-              logger.info('❌ إلغاء بناءً على عملية سابقة', { 
-                originalQty: cancelQuantity, 
-                producer: cancelProducer, 
-                captain: cancelCaptain 
-              });
-            }
-          } catch (e) {
-            logger.debug('لم يتم العثور على عملية سابقة للإلغاء', { error: e.message });
-          }
+        // التحقق من صلاحية المشرف
+        const cancellerPhone = producerPhone; // واضع ❌
+        const isSupervisor = await sheets.isSupervisor(cancellerPhone);
+        if (!isSupervisor) {
+          logger.info('⛔ رفض إلغاء: ليس مشرفاً', { phone: cancellerPhone });
+          return;
         }
 
-        logger.info('❌ إلغاء', { 
-          producer: cancelProducer, 
+        // البحث عن العملية الأصلية
+        if (!quotedMsgId) {
+          logger.warn('⛔ إلغاء بدون معرف رسالة');
+          return;
+        }
+
+        const existingTx = await sheets.findTransactionByMessageId(quotedMsgId, null);
+        if (!existingTx) {
+          logger.warn('⛔ لم يتم العثور على عملية للإلغاء', { msgId: quotedMsgId?.substring(0, 8) });
+          return;
+        }
+
+        // التحقق من الوقت (24 ساعة)
+        const txTime = new Date(existingTx.timestamp);
+        const now = new Date();
+        const diffHours = (now - txTime) / (1000 * 60 * 60);
+        if (diffHours > 24) {
+          logger.info('⛔ رفض إلغاء: انتهت المهلة (24 ساعة)', { hours: diffHours.toFixed(1) });
+          return;
+        }
+
+        const cancelQuantity = existingTx.quantity;
+        const cancelProducer = existingTx.producerPhone;
+        const cancelCaptain = existingTx.captainPhone;
+
+        logger.info('❌ إلغاء عملية (مشرف)', {
+          supervisor: cancellerPhone,
+          producer: cancelProducer,
           captain: cancelCaptain || '❓',
           qty: cancelQuantity,
           group: groupInfo ? groupInfo.name : 'Unknown'
         });
 
+        // خصم الإنتاج (تصفير)
         try {
-          const producerName = whatsapp.getPushName(msg);
+          const producerName = sheets.getRegisteredName(cancelProducer) || '';
           await sheets.updateTotalsProduction(cancelProducer, -cancelQuantity, groupPrefix, producerName);
         } catch (error) {
           logger.error('فشل خصم انتاج', { error: error.message });
         }
 
+        // خصم الاستلام (تصفير)
         if (cancelCaptain) {
           try {
             const cancelCaptainName = sheets.getRegisteredName(cancelCaptain) || 'كابتن';
@@ -893,96 +912,149 @@ async function start() {
           }
         }
 
-        sheets.recordTransaction({
-          transactionId: result.transactionId,
-          timestamp: result.timestamp,
-          producerPhone: cancelProducer,
-          captainPhone: cancelCaptain || '',
-          quantity: cancelQuantity,
-          type: 'إلغاء',
-          emoji: '❌',
-          groupPrefix,
+        // تحديث نفس الصف في سجل الحركات (لا إنشاء سجل جديد)
+        await sheets.updateTransactionStatus(existingTx.rowIndex, {
           status: 'ملغى',
-          notes: `msgId:${quotedMsgId || ''}`
-        }).catch(() => {});
+          notes: `إلغاء بواسطة ${cancellerPhone} في ${now.toISOString()} | الكمية الأصلية: ${cancelQuantity} | msgId:${quotedMsgId}`
+        });
+
+        // تسجيل في Audit Log
+        await sheets.logEdit({
+          editorPhone: cancellerPhone,
+          editorName: 'مشرف',
+          producerPhone: cancelProducer,
+          captainPhone: cancelCaptain,
+          oldQuantity: cancelQuantity,
+          newQuantity: 0,
+        });
 
       } else if (result.type === 'remove') {
-        // === حذف الإيموجي: عكس العملية تماماً ===
-        // البحث عن العملية المسجلة لهذه الرسالة
-        let removeQuantity = 0;
-        let removeProducer = realProducerPhone || producerPhone;
-        let removeCaptain = captainPhone;
+        // === إزالة إيموجي ===
+        // حالتان:
+        // أ) إزالة إيموجي كمي (👍/2️⃣/3️⃣) = عكس العملية (حذف)
+        // ب) إزالة ❌ = استرجاع العملية الملغاة (مشرف فقط + 24 ساعة)
 
-        if (quotedMsgId) {
-          try {
-            const existingTx = await sheets.findTransactionByMessageId(quotedMsgId, removeProducer);
-            if (existingTx && existingTx.status !== 'ملغى') {
-              removeQuantity = existingTx.quantity || 0;
-              removeCaptain = existingTx.captainPhone || captainPhone;
-              removeProducer = existingTx.producerPhone || removeProducer;
-              logger.info('🗑️ حذف إيموجي → عكس عملية', {
-                originalQty: removeQuantity,
-                producer: removeProducer,
-                captain: removeCaptain,
-                msgId: quotedMsgId?.substring(0, 8)
-              });
-            } else {
-              logger.info('🗑️ حذف إيموجي — لا توجد عملية مسجلة أو ملغاة بالفعل', { msgId: quotedMsgId?.substring(0, 8) });
-              return;
-            }
-          } catch (e) {
-            logger.debug('فشل البحث عن عملية للحذف', { error: e.message });
-            return;
-          }
-        } else {
-          return; // لا يمكن عكس بدون معرف الرسالة
-        }
-
-        if (removeQuantity <= 0) {
-          logger.info('🗑️ حذف إيموجي — كمية صفر، تجاهل');
+        if (!quotedMsgId) {
+          logger.info('🗑️ حذف إيموجي بدون معرف رسالة — تجاهل');
           return;
         }
 
-        logger.info('🗑️ تنفيذ حذف إيموجي', {
-          producer: removeProducer,
-          captain: removeCaptain || '❓',
-          qty: removeQuantity,
-          group: groupInfo ? groupInfo.name : 'Unknown'
-        });
-
-        // خصم الانتاج
-        try {
-          const producerName = sheets.getRegisteredName(removeProducer) || '';
-          await sheets.updateTotalsProduction(removeProducer, -removeQuantity, groupPrefix, producerName);
-          logger.info(`✅ خصم انتاج بعد حذف إيموجي: ${removeProducer} -${removeQuantity}`);
-        } catch (error) {
-          logger.error('❌ فشل خصم انتاج', { error: error.message });
+        // البحث عن العملية (بما فيها الملغاة)
+        const existingTx = await sheets.findTransactionByMessageIdIncludingCancelled(quotedMsgId, null);
+        if (!existingTx) {
+          logger.info('🗑️ حذف إيموجي — لا توجد عملية مسجلة', { msgId: quotedMsgId?.substring(0, 8) });
+          return;
         }
 
-        // خصم الاستلام
-        if (removeCaptain) {
-          try {
-            const captainName = sheets.getRegisteredName(removeCaptain) || 'كابتن';
-            await sheets.updateTotalsReception(removeCaptain, -removeQuantity, groupPrefix, captainName);
-            logger.info(`✅ خصم استلام بعد حذف إيموجي: ${removeCaptain} -${removeQuantity}`);
-          } catch (error) {
-            logger.error('❌ فشل خصم استلام', { error: error.message });
+        if (existingTx.status === 'ملغى') {
+          // === حالة ب: استرجاع عملية ملغاة (إزالة ❌) ===
+          const restorerPhone = producerPhone;
+          const isSupervisor = await sheets.isSupervisor(restorerPhone);
+          if (!isSupervisor) {
+            logger.info('⛔ رفض استرجاع: ليس مشرفاً', { phone: restorerPhone });
+            return;
           }
-        }
 
-        // تحديث حالة العملية في سجل الحركات إلى محذوف
-        sheets.recordTransaction({
-          transactionId: result.transactionId,
-          timestamp: result.timestamp,
-          producerPhone: removeProducer,
-          captainPhone: removeCaptain || '',
-          quantity: removeQuantity,
-          type: 'حذف إيموجي',
-          emoji: '',
-          groupPrefix,
-          status: 'محذوف',
-          notes: `msgId:${quotedMsgId || ''}`
-        }).catch(() => {});
+          // التحقق من الوقت (24 ساعة من وقت العملية الأصلية)
+          const txTime = new Date(existingTx.timestamp);
+          const now = new Date();
+          const diffHours = (now - txTime) / (1000 * 60 * 60);
+          if (diffHours > 24) {
+            logger.info('⛔ رفض استرجاع: انتهت المهلة (24 ساعة)', { hours: diffHours.toFixed(1) });
+            return;
+          }
+
+          // استخراج الكمية الأصلية من الملاحظات
+          const notesMatch = existingTx.notes?.match(/الكمية الأصلية:\s*(\d+)/);
+          const originalQuantity = notesMatch ? parseInt(notesMatch[1]) : existingTx.quantity;
+
+          const restoreProducer = existingTx.producerPhone;
+          const restoreCaptain = existingTx.captainPhone;
+
+          logger.info('🔄 استرجاع عملية ملغاة (مشرف)', {
+            supervisor: restorerPhone,
+            producer: restoreProducer,
+            captain: restoreCaptain || '❓',
+            qty: originalQuantity
+          });
+
+          // إعادة الإنتاج
+          try {
+            const producerName = sheets.getRegisteredName(restoreProducer) || '';
+            await sheets.updateTotalsProduction(restoreProducer, originalQuantity, groupPrefix, producerName);
+          } catch (error) {
+            logger.error('فشل استرجاع انتاج', { error: error.message });
+          }
+
+          // إعادة الاستلام
+          if (restoreCaptain) {
+            try {
+              const captainName = sheets.getRegisteredName(restoreCaptain) || 'كابتن';
+              await sheets.updateTotalsReception(restoreCaptain, originalQuantity, groupPrefix, captainName);
+            } catch (error) {
+              logger.error('فشل استرجاع استلام', { error: error.message });
+            }
+          }
+
+          // تحديث نفس الصف (إعادة الحالة إلى نشط)
+          await sheets.updateTransactionStatus(existingTx.rowIndex, {
+            quantity: originalQuantity,
+            status: 'نشط',
+            notes: `استرجاع بواسطة ${restorerPhone} في ${new Date().toISOString()} | msgId:${quotedMsgId}`
+          });
+
+          // تسجيل في Audit Log
+          await sheets.logEdit({
+            editorPhone: restorerPhone,
+            editorName: 'مشرف',
+            producerPhone: restoreProducer,
+            captainPhone: restoreCaptain,
+            oldQuantity: 0,
+            newQuantity: originalQuantity,
+          });
+
+        } else {
+          // === حالة أ: حذف إيموجي كمي عادي (عكس العملية) ===
+          const removeQuantity = existingTx.quantity || 0;
+          const removeProducer = existingTx.producerPhone || realProducerPhone || producerPhone;
+          const removeCaptain = existingTx.captainPhone || captainPhone;
+
+          if (removeQuantity <= 0) {
+            logger.info('🗑️ حذف إيموجي — كمية صفر، تجاهل');
+            return;
+          }
+
+          logger.info('🗑️ تنفيذ حذف إيموجي (عكس عملية)', {
+            producer: removeProducer,
+            captain: removeCaptain || '❓',
+            qty: removeQuantity,
+            group: groupInfo ? groupInfo.name : 'Unknown'
+          });
+
+          // خصم الانتاج
+          try {
+            const producerName = sheets.getRegisteredName(removeProducer) || '';
+            await sheets.updateTotalsProduction(removeProducer, -removeQuantity, groupPrefix, producerName);
+          } catch (error) {
+            logger.error('❌ فشل خصم انتاج', { error: error.message });
+          }
+
+          // خصم الاستلام
+          if (removeCaptain) {
+            try {
+              const captainName = sheets.getRegisteredName(removeCaptain) || 'كابتن';
+              await sheets.updateTotalsReception(removeCaptain, -removeQuantity, groupPrefix, captainName);
+            } catch (error) {
+              logger.error('❌ فشل خصم استلام', { error: error.message });
+            }
+          }
+
+          // تحديث حالة العملية في نفس الصف
+          await sheets.updateTransactionStatus(existingTx.rowIndex, {
+            status: 'محذوف',
+            notes: `حذف إيموجي بواسطة ${producerPhone} في ${new Date().toISOString()} | msgId:${quotedMsgId}`
+          });
+        }
       }
 
       return;

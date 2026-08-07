@@ -2031,6 +2031,109 @@ function getAllRegistered() {
   return result.sort((a, b) => a.name.localeCompare(b.name, 'ar'));
 }
 
+// ====================================================
+// تحديث حالة عملية في نفس الصف (بدون إنشاء سجل جديد)
+// ====================================================
+
+/**
+ * تحديث حالة عملية موجودة في سجل الحركات (in-place)
+ * @param {number} rowIndex - رقم الصف (1-based)
+ * @param {object} updates - الحقول المراد تحديثها {status, notes, quantity}
+ */
+async function updateTransactionStatus(rowIndex, updates) {
+  if (!isInitialized || !rowIndex) return;
+  const transSheet = config.sheets.sheetNames.transactions || 'سجل الحركات';
+  try {
+    // قراءة الصف الحالي
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${transSheet}'!A${rowIndex}:J${rowIndex}`,
+    });
+    const currentRow = response.data.values?.[0] || [];
+
+    // تحديث الحقول المطلوبة
+    const updatedRow = [
+      currentRow[0] || '',  // A: transactionId
+      currentRow[1] || '',  // B: timestamp
+      currentRow[2] || '',  // C: producerPhone
+      currentRow[3] || '',  // D: captainPhone
+      updates.quantity !== undefined ? updates.quantity : (currentRow[4] || ''),  // E: quantity
+      currentRow[5] || '',  // F: type
+      currentRow[6] || '',  // G: emoji
+      currentRow[7] || '',  // H: groupPrefix
+      updates.status || currentRow[8] || '',  // I: status
+      updates.notes || currentRow[9] || '',   // J: notes
+    ];
+
+    await sheetsApi.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${transSheet}'!A${rowIndex}:J${rowIndex}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [updatedRow] },
+    });
+
+    logger.info(`✅ تحديث حالة العملية في الصف ${rowIndex}: ${updates.status || 'بدون تغيير'}`);
+  } catch (error) {
+    logger.error('❌ فشل تحديث حالة العملية', { error: error.message, rowIndex });
+  }
+}
+
+/**
+ * البحث عن عملية بمعرف الرسالة (بما فيها الملغاة)
+ * مثل findTransactionByMessageId لكن لا يتخطى الملغاة
+ * @param {string} messageId - معرف الرسالة المستهدفة
+ * @param {string|null} reactorPhone - رقم من وضع التفاعل (null = بدون فلترة)
+ * @returns {object|null}
+ */
+async function findTransactionByMessageIdIncludingCancelled(messageId, reactorPhone) {
+  if (!isInitialized || !messageId) return null;
+  const transSheet = config.sheets.sheetNames.transactions || 'سجل الحركات';
+  try {
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${transSheet}'!A:J`,
+    });
+    const rows = response.data.values || [];
+    const cleanReactor = reactorPhone ? reactorPhone.replace(/\D/g, '') : '';
+
+    // البحث من الأحدث إلى الأقدم
+    for (let i = rows.length - 1; i >= 1; i--) {
+      const row = rows[i];
+      const rowId = row[0] || '';
+      const rowProducer = (row[2] || '').replace(/\D/g, '');
+      const rowNotes = row[9] || '';
+
+      // مطابقة: معرف العملية يحتوي على messageId أو الملاحظات تحتوي عليه
+      const idMatch = rowId.includes(messageId) || rowNotes.includes(messageId);
+      // مطابقة المنتج (اختياري)
+      const producerMatch = !reactorPhone ||
+        cleanReactor.endsWith(rowProducer) || rowProducer.endsWith(cleanReactor) ||
+        (cleanReactor.length >= 8 && rowProducer.length >= 8 &&
+         (cleanReactor.slice(-9) === rowProducer.slice(-9)));
+
+      if (idMatch && producerMatch) {
+        return {
+          rowIndex: i + 1, // 1-based for Sheets API
+          transactionId: row[0],
+          timestamp: row[1],
+          producerPhone: row[2],
+          captainPhone: row[3],
+          quantity: parseFloat(row[4]) || 0,
+          type: row[5],
+          emoji: row[6],
+          groupPrefix: row[7],
+          status: row[8],
+          notes: row[9],
+        };
+      }
+    }
+    return null;
+  } catch (error) {
+    logger.error('خطأ في البحث عن العملية (شامل الملغاة)', { error: error.message });
+    return null;
+  }
+}
+
 module.exports = {
   initialize,
   loadSettings,
@@ -2055,6 +2158,8 @@ module.exports = {
   // التعديل
   processEdit,
   findTransactionByMessageId,
+  findTransactionByMessageIdIncludingCancelled,
+  updateTransactionStatus,
   canEdit,
   logEdit,
   // الكشف التفصيلي
