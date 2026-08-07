@@ -396,6 +396,40 @@ const httpServer = http.createServer(async (req, res) => {
       res.writeHead(500);
       res.end(JSON.stringify({ error: e.message }));
     }
+  } else if (req.url.startsWith('/api/link-lid') && req.method === 'POST') {
+    // ربط LID برقم يدوياً: POST /api/link-lid?lid=XXX@lid&phone=9627XXXXXXXX
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const urlObj = new URL(req.url, 'http://localhost');
+        const lid = urlObj.searchParams.get('lid') || '';
+        const phone = urlObj.searchParams.get('phone') || '';
+        if (!lid || !phone) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'lid and phone are required' }));
+          return;
+        }
+        const jid = phone.includes('@') ? phone : phone + '@s.whatsapp.net';
+        whatsapp.addLidMapping(lid, jid);
+        logger.info('ربط LID يدوي: ' + lid + ' -> ' + jid);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true, lid, phone: jid }));
+      } catch(e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      }
+    });
+  } else if (req.url === '/api/unresolved-lids') {
+    try {
+      const unresolvedMap = whatsapp.getUnresolvedLids ? whatsapp.getUnresolvedLids() : [];
+      const cacheStats = whatsapp.getCacheStats();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ unresolved: unresolvedMap, stats: cacheStats }));
+    } catch(e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
   } else {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('AbuSaif Bot v4');

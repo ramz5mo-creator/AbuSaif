@@ -244,11 +244,26 @@ async function connect() {
         });
         
         // حفظ pushName مربوطاً بالرقم لحل LID وتحديث اسم واتساب في الشيت
-        if (msg.pushName && senderJid && senderJid.includes('@s.whatsapp.net')) {
-          const phoneNum = senderJid.replace('@s.whatsapp.net', '');
+        if (msg.pushName) {
           const s = getSheets();
-          if (s && s.updateWhatsappName) {
-            s.updateWhatsappName(phoneNum, msg.pushName).catch(() => {});
+          if (senderJid && senderJid.includes('@s.whatsapp.net')) {
+            // رقم حقيقي — تحديث اسم واتساب في الشيت
+            const phoneNum = senderJid.replace('@s.whatsapp.net', '');
+            if (s && s.updateWhatsappName) {
+              s.updateWhatsappName(phoneNum, msg.pushName).catch(() => {});
+            }
+          } else if (senderJid && senderJid.includes('@lid')) {
+            // LID — نحاول ربطه بالرقم عبر pushName
+            const resolved = resolvePhoneByPushName(msg.pushName);
+            if (resolved) {
+              addLidMapping(senderJid, resolved);
+              logger.info(`✅ ربط LID من pushName عند وصول الرسالة: ${msg.pushName} → ${resolved}`);
+              // تحديث اسم واتساب في الشيت
+              const phoneNum = resolved.replace('@s.whatsapp.net', '');
+              if (s && s.updateWhatsappName) {
+                s.updateWhatsappName(phoneNum, msg.pushName).catch(() => {});
+              }
+            }
           }
         }
 
@@ -714,6 +729,28 @@ function getCacheStats() {
   return { messageCache: messageCache.size, tamCache: tamCache.size, lidMap: lidToPhoneMap.size };
 }
 
+/**
+ * إرجاع قائمة الليد غير المحلولة مع pushName من messageCache
+ */
+function getUnresolvedLids() {
+  const result = [];
+  const seen = new Set();
+  for (const [msgId, msg] of messageCache.entries()) {
+    const key = msg.key || {};
+    const participant = key.participant || '';
+    if (!participant.includes('@lid')) continue;
+    if (lidToPhoneMap.has(participant)) continue; // محلول بالفعل
+    if (seen.has(participant)) continue;
+    seen.add(participant);
+    result.push({
+      lid: participant,
+      pushName: msg.pushName || '',
+      msgId: msgId.substring(0, 12),
+    });
+  }
+  return result;
+}
+
 function lookupPhone(phone) {
   // البحث عن رقم في lidMap (هل موجود كقيمة)
   const results = [];
@@ -773,4 +810,5 @@ module.exports = {
   getPushNameFromCachedMessage,
   resolvePhoneByPushName,
   syncGroupLids,
+  getUnresolvedLids,
 };

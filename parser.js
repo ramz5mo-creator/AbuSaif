@@ -326,8 +326,18 @@ async function processMessage(msg, sock) {
   const text = whatsapp.extractText(msg);
   const msgType = whatsapp.getMessageType(msg); // 'text' | 'audio' | 'image' | 'video' | 'other'
 
-  // التحقق من الرد (contextInfo موجود في الرسائل النصية فقط)
-  const contextInfo = msg.message?.extendedTextMessage?.contextInfo;
+  // التحقق من الرد — نبحث عن contextInfo في جميع أنواع الرسائل
+  const msgObj = msg.message || {};
+  const contextInfo =
+    msgObj.extendedTextMessage?.contextInfo ||
+    msgObj.imageMessage?.contextInfo ||
+    msgObj.videoMessage?.contextInfo ||
+    msgObj.audioMessage?.contextInfo ||
+    msgObj.documentMessage?.contextInfo ||
+    msgObj.stickerMessage?.contextInfo ||
+    msgObj.buttonsResponseMessage?.contextInfo ||
+    msgObj.listResponseMessage?.contextInfo ||
+    msgObj.conversation && null; // conversation لا يحمل contextInfo
   const isReply = !!contextInfo?.quotedMessage;
 
   // ====================================================
