@@ -15,7 +15,11 @@ const { v4: uuidv4 } = require('uuid');
 const config = require('./config');
 const logger = require('./logger');
 const whatsapp = require('./whatsapp');
-
+let _sheets = null;
+function getSheets() {
+  if (!_sheets) _sheets = require('./sheets');
+  return _sheets;
+}
 // مجموعة المعرفات المعالجة لمنع التكرار
 const processedIds = new Set();
 
@@ -249,22 +253,33 @@ async function processMessage(msg, sock) {
     const senderJid = whatsapp.getSenderJid(msg);
     let acceptorPhone = cleanPhone(senderJid);
     
-    // إذا كان المرسل LID غير محلول — نحاول حله أولاً
+    // إذا كان المرسل LID غير محلول — نحاول حله بثلاث طرق
     if (!acceptorPhone && senderJid && senderJid.includes('@lid')) {
-      // محاولة حل LID من الخريطة (مع base-prefix matching)
+      // محاولة 1: الكاش المحلي (base-prefix matching)
       const resolved = whatsapp.resolveLid(senderJid);
-      if (resolved) {
+      if (resolved && !resolved.includes('@lid')) {
         acceptorPhone = cleanPhone(resolved);
         if (!acceptorPhone) acceptorPhone = resolved.split('@')[0].replace(/\D/g, '') || senderJid;
-        logger.info(`✅ حل LID في التفاعل: ${senderJid.substring(0,15)} → ${acceptorPhone}`);
+        logger.info(`✅ حل LID في التفاعل (كاش): ${senderJid.substring(0,15)} → ${acceptorPhone}`);
       } else {
-        // استخدام LID كمعرف مؤقت (مثلما يفعل معالج الرسائل)
-        acceptorPhone = senderJid.split(':')[0]; // استخدم البادئة الرقمية فقط
-        logger.warn(`⚠️ تفاعل من LID غير محلول — استخدام LID كمعرف مؤقت`, {
-          lid: senderJid.substring(0, 15),
-        });
-        // إضافة LID لقائمة الحل التلقائي
-        whatsapp.queueLidForResolve(senderJid);
+        // محاولة 2: ورقة المسجلين (عمود D)
+        try {
+          const sheetsInst = getSheets();
+          if (sheetsInst?.resolvePhoneFromRegistered) {
+            const fromReg = sheetsInst.resolvePhoneFromRegistered(senderJid);
+            if (fromReg) {
+              acceptorPhone = fromReg;
+              whatsapp.addLidMapping(senderJid, fromReg + '@s.whatsapp.net');
+              logger.info(`✅ حل LID في التفاعل (ورقة المسجلين): ${senderJid.substring(0,15)} → ${fromReg}`);
+            }
+          }
+        } catch(e) {}
+        // محاولة 3: استخدام LID كمعرف مؤقت
+        if (!acceptorPhone) {
+          acceptorPhone = senderJid.split(':')[0];
+          logger.warn(`⚠️ تفاعل من LID غير محلول — معرف مؤقت`, { lid: senderJid.substring(0, 15) });
+          whatsapp.queueLidForResolve(senderJid);
+        }
       }
     }
     
@@ -287,16 +302,31 @@ async function processMessage(msg, sock) {
     if (originalMsg) {
       const ownerJid = whatsapp.getSenderJid(originalMsg);
       orderOwnerPhone = cleanPhone(ownerJid);
-      // إذا كان صاحب الرسالة LID غير محلول — نحاول حله (مع base-prefix matching)
+      // إذا كان صاحب الرسالة LID غير محلول — ثلاث طرق
       if (!orderOwnerPhone && ownerJid && ownerJid.includes('@lid')) {
+        // محاولة 1: كاش محلي
         const resolvedOwner = whatsapp.resolveLid(ownerJid);
-        if (resolvedOwner) {
+        if (resolvedOwner && !resolvedOwner.includes('@lid')) {
           orderOwnerPhone = cleanPhone(resolvedOwner);
           if (!orderOwnerPhone) orderOwnerPhone = resolvedOwner.split('@')[0].replace(/\D/g, '') || ownerJid;
         } else {
-          // استخدام LID كمعرف مؤقت
-          orderOwnerPhone = ownerJid.split(':')[0];
-          whatsapp.queueLidForResolve(ownerJid);
+          // محاولة 2: ورقة المسجلين
+          try {
+            const sheetsInst = getSheets();
+            if (sheetsInst?.resolvePhoneFromRegistered) {
+              const fromReg2 = sheetsInst.resolvePhoneFromRegistered(ownerJid);
+              if (fromReg2) {
+                orderOwnerPhone = fromReg2;
+                whatsapp.addLidMapping(ownerJid, fromReg2 + '@s.whatsapp.net');
+                logger.info(`✅ حل LID صاحب رسالة تم (ورقة المسجلين): → ${fromReg2}`);
+              }
+            }
+          } catch(e) {}
+          // محاولة 3: معرف مؤقت
+          if (!orderOwnerPhone) {
+            orderOwnerPhone = ownerJid.split(':')[0];
+            whatsapp.queueLidForResolve(ownerJid);
+          }
         }
       }
       quotedText = whatsapp.extractText(originalMsg) || '';
@@ -468,14 +498,30 @@ async function processMessage(msg, sock) {
       quotedOwnerJid = contextInfo.participant;
     }
   }
-  // إذا كان quotedOwnerJid لا يزال LID — جرب base-prefix matching
+  // إذا كان quotedOwnerJid لا يزال LID — جرب base-prefix matching ثم ورقة المسجلين
   if (quotedOwnerJid && quotedOwnerJid.includes('@lid')) {
+    // محاولة 1: base-prefix matching في الكاش المحلي
     const resolvedFromMap = whatsapp.resolveLid(quotedOwnerJid);
     if (resolvedFromMap && !resolvedFromMap.includes('@lid')) {
       quotedOwnerJid = resolvedFromMap;
       logger.info(`✅ حل LID صاحب الطلب (base-prefix): ${quotedOwnerJid.substring(0,15)} → ${resolvedFromMap}`);
     } else {
-      whatsapp.queueLidForResolve(quotedOwnerJid);
+      // محاولة 2: ورقة المسجلين (عمود D)
+      try {
+        const sheetsInst = getSheets();
+        if (sheetsInst?.resolvePhoneFromRegistered) {
+          const fromRegistered = sheetsInst.resolvePhoneFromRegistered(quotedOwnerJid);
+          if (fromRegistered) {
+            quotedOwnerJid = fromRegistered + '@s.whatsapp.net';
+            whatsapp.addLidMapping(quotedOwnerJid.includes('@lid') ? quotedOwnerJid : (contextInfo?.participant || quotedOwnerJid), quotedOwnerJid);
+            logger.info(`✅ حل LID صاحب الطلب (ورقة المسجلين): → ${fromRegistered}`);
+          }
+        }
+      } catch(e) {}
+      // إذا لم يُحل — أضف للقائمة التلقائية
+      if (quotedOwnerJid && quotedOwnerJid.includes('@lid')) {
+        whatsapp.queueLidForResolve(quotedOwnerJid);
+      }
     }
   }
   let resolvedOrderOwnerPhone = cleanPhone(quotedOwnerJid);
