@@ -1,387 +1,186 @@
+'use strict';
 /**
  * members-db.js - قاعدة بيانات الأعضاء الدائمة
- * ================================================
- * ورقة "Members" في Google Sheets كمرجع أساسي
+ * يستخدم sheetsApi من sheets.js مباشرة (لا اتصال جديد)
  * 
- * هيكل الورقة:
- *   A: LID          (مثال: 182957553799363@lid)
- *   B: رقم الهاتف   (مثال: 778793241)
- *   C: اسم واتساب   (مثال: محمد الحوراني)
- *   D: الجروب       (مثال: دريمكس)
- *   E: الدور        (مثال: عضو / مشرف)
- *   F: آخر تحديث    (ISO timestamp)
- * 
- * الخريطة في الذاكرة:
- *   lidToPhone: Map<lid → phone>
- *   phoneToMember: Map<phone → {lid, name, group, role}>
+ * هيكل ورقة Members:
+ *   A: LID | B: رقم الهاتف | C: اسم واتساب | D: الجروب | E: الدور | F: آخر تحديث
  */
-
-const { google } = require('googleapis');
-const fs = require('fs');
-const path = require('path');
-const config = require('./config');
-const logger = require('./logger');
 
 const MEMBERS_SHEET = 'Members';
-const TOKEN_PATH = path.resolve('./token.json');
-const CREDENTIALS_PATH = path.resolve('./oauth-credentials.json');
 
-let sheetsApi = null;
-let spreadsheetId = '';
-let isReady = false;
-
-// الخرائط في الذاكرة (تُبنى من ورقة Members عند البدء)
-const lidToPhone = new Map();     // lid@lid → phone (9 أرقام)
+// الخرائط في الذاكرة
+const lidToPhone = new Map();     // lid → phone (9 أرقام)
 const phoneToMember = new Map();  // phone → { lid, name, group, role, rowIndex }
+const lidToRowIndex = new Map();  // lid → rowIndex
 
-// تتبع الصفوف لتحديث in-place
-const lidToRowIndex = new Map();  // lid → rowIndex (1-based)
-
-// قائمة التحديثات المعلقة (batch write)
 let pendingUpdates = [];
 let batchWriteTimer = null;
+let _loaded = false;
 
-/**
- * تهيئة الاتصال بـ Google Sheets
- */
-async function initialize() {
-  if (isReady) return;
-  try {
-    const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));
-    const { client_secret, client_id, redirect_uris } = credentials.installed || credentials.web;
-    const oAuth2Client = new google.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
-    const token = JSON.parse(fs.readFileSync(TOKEN_PATH, 'utf8'));
-    oAuth2Client.setCredentials(token);
-    sheetsApi = google.sheets({ version: 'v4', auth: oAuth2Client });
-    spreadsheetId = config.sheets.spreadsheetId;
-    isReady = true;
-    logger.info('✅ members-db: تم الاتصال بـ Google Sheets');
-  } catch (e) {
-    logger.error('❌ members-db: فشل التهيئة', { error: e.message });
-  }
+/** جلب sheetsApi و spreadsheetId من sheets.js */
+function getApi() {
+  const sheets = require('./sheets');
+  return {
+    api: sheets.getSheetsApi(),
+    id: sheets.getSpreadsheetId(),
+    ready: sheets.isInitializedFn(),
+  };
 }
 
-/**
- * ضمان وجود ورقة Members
- */
-async function ensureMembersSheet() {
+/** ضمان وجود ورقة Members */
+async function ensureMembersSheet(api, id) {
   try {
-    const meta = await sheetsApi.spreadsheets.get({ spreadsheetId });
+    const meta = await api.spreadsheets.get({ spreadsheetId: id });
     const exists = meta.data.sheets?.some(s => s.properties?.title === MEMBERS_SHEET);
     if (exists) return;
-    // إنشاء الورقة
-    await sheetsApi.spreadsheets.batchUpdate({
-      spreadsheetId,
-      requestBody: {
-        requests: [{ addSheet: { properties: { title: MEMBERS_SHEET } } }],
-      },
+    await api.spreadsheets.batchUpdate({
+      spreadsheetId: id,
+      requestBody: { requests: [{ addSheet: { properties: { title: MEMBERS_SHEET } } }] },
     });
-    // رأس الأعمدة
-    await sheetsApi.spreadsheets.values.update({
-      spreadsheetId,
+    await api.spreadsheets.values.update({
+      spreadsheetId: id,
       range: `'${MEMBERS_SHEET}'!A1:F1`,
       valueInputOption: 'RAW',
-      requestBody: {
-        values: [['LID', 'رقم الهاتف', 'اسم واتساب', 'الجروب', 'الدور', 'آخر تحديث']],
-      },
+      requestBody: { values: [['LID', 'رقم الهاتف', 'اسم واتساب', 'الجروب', 'الدور', 'آخر تحديث']] },
     });
-    logger.info('✅ members-db: تم إنشاء ورقة Members');
-  } catch (e) {
-    if (!e.message?.includes('already exists')) {
-      logger.debug('فشل ensureMembersSheet', { error: e.message });
-    }
+    console.log('[members-db] ✅ تم إنشاء ورقة Members');
+  } catch(e) {
+    if (!e.message?.includes('already exists')) console.error('[members-db] ensureSheet:', e.message);
   }
 }
 
-/**
- * تحميل قاعدة البيانات من Google Sheets إلى الذاكرة
- * يُستدعى مرة واحدة عند بدء التشغيل
- */
+/** تحميل البيانات من Sheets إلى الذاكرة */
 async function loadFromSheets() {
-  if (!isReady) await initialize();
+  const { api, id, ready } = getApi();
+  if (!api || !id || !ready) {
+    console.log('[members-db] sheets غير جاهز — سيُعاد المحاولة بعد 30 ثانية');
+    setTimeout(loadFromSheets, 30000);
+    return 0;
+  }
   try {
-    await ensureMembersSheet();
-    const response = await sheetsApi.spreadsheets.values.get({
-      spreadsheetId,
+    await ensureMembersSheet(api, id);
+    const resp = await api.spreadsheets.values.get({
+      spreadsheetId: id,
       range: `'${MEMBERS_SHEET}'!A:F`,
     });
-    const rows = response.data.values || [];
+    const rows = resp.data.values || [];
+    lidToPhone.clear(); phoneToMember.clear(); lidToRowIndex.clear();
     let loaded = 0;
-
     for (let i = 1; i < rows.length; i++) {
-      const row = rows[i];
-      const lid   = (row[0] || '').trim();
-      const phone = (row[1] || '').trim();
-      const name  = (row[2] || '').trim();
-      const group = (row[3] || '').trim();
-      const role  = (row[4] || '').trim();
-
+      const [lid, phone, name, group, role] = rows[i].map(v => (v||'').trim());
       if (!lid && !phone) continue;
-
-      const member = { lid, name, group, role, rowIndex: i + 1 };
-
       if (lid) {
         lidToPhone.set(lid, phone);
         lidToRowIndex.set(lid, i + 1);
-        // أيضاً base-prefix (بدون :0)
         const base = lid.split(':')[0];
-        if (base !== lid) {
-          lidToPhone.set(base + '@lid', phone);
-          lidToRowIndex.set(base + '@lid', i + 1);
-        }
+        if (base !== lid) { lidToPhone.set(base + '@lid', phone); lidToRowIndex.set(base + '@lid', i + 1); }
       }
-      if (phone) {
-        phoneToMember.set(phone, member);
-      }
+      if (phone) phoneToMember.set(phone, { lid: lid||'', name: name||'', group: group||'', role: role||'عضو', rowIndex: i+1 });
       loaded++;
     }
-
-    logger.info(`🗃️ members-db: تم تحميل ${loaded} عضو من Sheets`);
-    return { lidToPhone, phoneToMember };
-  } catch (e) {
-    logger.error('❌ members-db: فشل التحميل', { error: e.message });
-    return { lidToPhone: new Map(), phoneToMember: new Map() };
+    _loaded = true;
+    console.log(`[members-db] ✅ تم تحميل ${loaded} عضو من ورقة Members`);
+    return loaded;
+  } catch(e) {
+    console.error('[members-db] فشل التحميل:', e.message);
+    setTimeout(loadFromSheets, 60000);
+    return 0;
   }
 }
 
-/**
- * البحث عن رقم هاتف من LID
- * @param {string} lid
- * @returns {string|null} رقم الهاتف أو null
- */
+/** حل LID إلى رقم هاتف */
 function resolvePhone(lid) {
   if (!lid) return null;
-  // مطابقة تامة
   const direct = lidToPhone.get(lid);
-  if (direct) return direct;
-  // مطابقة base-prefix
+  if (direct) return direct.length >= 9 ? `${direct}@s.whatsapp.net` : null;
   const base = lid.split(':')[0];
-  const baseKey = base + '@lid';
-  const baseMatch = lidToPhone.get(baseKey);
-  if (baseMatch) {
-    lidToPhone.set(lid, baseMatch); // cache للمرة القادمة
-    return baseMatch;
-  }
-  // بحث خطي (آخر حل)
+  const baseMatch = lidToPhone.get(base + '@lid');
+  if (baseMatch) { lidToPhone.set(lid, baseMatch); return baseMatch.length >= 9 ? `${baseMatch}@s.whatsapp.net` : null; }
   for (const [k, v] of lidToPhone.entries()) {
-    if (k.split(':')[0] === base) {
-      lidToPhone.set(lid, v);
-      return v;
-    }
+    if (k.split(':')[0] === base && v && v.length >= 9) { lidToPhone.set(lid, v); return `${v}@s.whatsapp.net`; }
   }
   return null;
 }
 
-/**
- * البحث عن بيانات عضو من رقم الهاتف
- */
-function getMember(phone) {
-  if (!phone) return null;
-  return phoneToMember.get(phone) || null;
-}
-
-/**
- * إضافة أو تحديث عضو في الذاكرة وجدولة الحفظ في Sheets
- * @param {object} member - { lid, phone, name, group, role }
- */
+/** إضافة/تحديث عضو */
 function upsertMember({ lid, phone, name = '', group = '', role = 'عضو' }) {
   if (!lid && !phone) return;
-
   const now = new Date().toISOString();
-  const normalizedPhone = phone ? String(phone).replace(/\D/g, '').slice(-9) : '';
-
-  // تحديث الذاكرة
+  const p = phone ? String(phone).replace(/\D/g,'').slice(-9) : '';
   if (lid) {
-    lidToPhone.set(lid, normalizedPhone);
+    lidToPhone.set(lid, p);
     const base = lid.split(':')[0];
-    if (base !== lid) lidToPhone.set(base + '@lid', normalizedPhone);
+    if (base !== lid) lidToPhone.set(base + '@lid', p);
   }
-  if (normalizedPhone) {
-    const existing = phoneToMember.get(normalizedPhone) || {};
-    phoneToMember.set(normalizedPhone, {
-      lid: lid || existing.lid || '',
-      name: name || existing.name || '',
-      group: group || existing.group || '',
-      role: role || existing.role || 'عضو',
-      rowIndex: existing.rowIndex,
-    });
+  if (p) {
+    const ex = phoneToMember.get(p) || {};
+    phoneToMember.set(p, { lid: lid||ex.lid||'', name: name||ex.name||'', group: group||ex.group||'', role: role||ex.role||'عضو', rowIndex: ex.rowIndex });
   }
-
-  // جدولة الكتابة في Sheets (batch)
-  pendingUpdates.push({ lid, phone: normalizedPhone, name, group, role, timestamp: now });
+  pendingUpdates.push({ lid: lid||'', phone: p, name, group, role, timestamp: now });
   scheduleBatchWrite();
 }
 
-/**
- * تحديث اسم واتساب لعضو موجود
- */
-function updateMemberName(phone, name) {
-  if (!phone || !name) return;
-  const normalized = String(phone).replace(/\D/g, '').slice(-9);
-  const existing = phoneToMember.get(normalized);
-  if (existing && existing.name !== name) {
-    existing.name = name;
-    phoneToMember.set(normalized, existing);
-    pendingUpdates.push({ phone: normalized, name, _nameOnly: true });
-    scheduleBatchWrite();
-  }
-}
-
-/**
- * جدولة الكتابة الدفعية (كل 10 ثوانٍ)
- */
 function scheduleBatchWrite() {
   if (batchWriteTimer) return;
-  batchWriteTimer = setTimeout(async () => {
-    batchWriteTimer = null;
-    await flushPendingUpdates();
-  }, 10000);
+  batchWriteTimer = setTimeout(async () => { batchWriteTimer = null; await flushPendingUpdates(); }, 10000);
 }
 
-/**
- * كتابة التحديثات المعلقة في Sheets
- */
 async function flushPendingUpdates() {
-  if (!isReady || pendingUpdates.length === 0) return;
-  const updates = [...pendingUpdates];
-  pendingUpdates = [];
-
+  if (pendingUpdates.length === 0) return;
+  const { api, id, ready } = getApi();
+  if (!api || !id || !ready) { batchWriteTimer = setTimeout(flushPendingUpdates, 30000); return; }
+  const updates = [...pendingUpdates]; pendingUpdates = [];
   try {
-    // جلب الورقة الحالية لمعرفة الصفوف الموجودة
-    const response = await sheetsApi.spreadsheets.values.get({
-      spreadsheetId,
-      range: `'${MEMBERS_SHEET}'!A:B`,
-    });
-    const rows = response.data.values || [];
-
-    // بناء خريطة lid → rowIndex من الورقة الحالية
+    const resp = await api.spreadsheets.values.get({ spreadsheetId: id, range: `'${MEMBERS_SHEET}'!A:B` });
+    const rows = resp.data.values || [];
     const existingLids = new Map();
-    for (let i = 1; i < rows.length; i++) {
-      const lid = (rows[i][0] || '').trim();
-      if (lid) existingLids.set(lid, i + 1);
-    }
-
-    const batchData = [];
-    const newRows = [];
-
+    for (let i = 1; i < rows.length; i++) { const l = (rows[i][0]||'').trim(); if (l) existingLids.set(l, i+1); }
+    const batchData = [], newRows = [];
     for (const u of updates) {
-      if (u._nameOnly) continue; // تحديث الاسم يتم في الدفعة الكاملة
-
       const rowIndex = existingLids.get(u.lid) || lidToRowIndex.get(u.lid);
-      if (rowIndex) {
-        // تحديث صف موجود
-        batchData.push({
-          range: `'${MEMBERS_SHEET}'!A${rowIndex}:F${rowIndex}`,
-          values: [[u.lid, u.phone, u.name, u.group, u.role, u.timestamp]],
-        });
-      } else {
-        // صف جديد
-        newRows.push([u.lid, u.phone, u.name, u.group, u.role, u.timestamp]);
-      }
+      if (rowIndex) batchData.push({ range: `'${MEMBERS_SHEET}'!A${rowIndex}:F${rowIndex}`, values: [[u.lid, u.phone, u.name, u.group, u.role, u.timestamp]] });
+      else newRows.push([u.lid, u.phone, u.name, u.group, u.role, u.timestamp]);
     }
-
-    // تحديث الصفوف الموجودة
-    if (batchData.length > 0) {
-      await sheetsApi.spreadsheets.values.batchUpdate({
-        spreadsheetId,
-        requestBody: { valueInputOption: 'RAW', data: batchData },
-      });
-    }
-
-    // إضافة الصفوف الجديدة
-    if (newRows.length > 0) {
-      await sheetsApi.spreadsheets.values.append({
-        spreadsheetId,
-        range: `'${MEMBERS_SHEET}'!A:F`,
-        valueInputOption: 'RAW',
-        insertDataOption: 'INSERT_ROWS',
-        requestBody: { values: newRows },
-      });
-    }
-
-    if (batchData.length + newRows.length > 0) {
-      logger.info(`💾 members-db: حفظ ${batchData.length} تحديث + ${newRows.length} جديد`);
-    }
-  } catch (e) {
-    logger.debug('فشل flushPendingUpdates', { error: e.message });
-    // أعد التحديثات للمحاولة لاحقاً
+    if (batchData.length > 0) await api.spreadsheets.values.batchUpdate({ spreadsheetId: id, requestBody: { valueInputOption: 'RAW', data: batchData } });
+    if (newRows.length > 0) await api.spreadsheets.values.append({ spreadsheetId: id, range: `'${MEMBERS_SHEET}'!A:F`, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: newRows } });
+    if (batchData.length + newRows.length > 0) console.log(`[members-db] 💾 حفظ ${batchData.length} تحديث + ${newRows.length} جديد`);
+  } catch(e) {
+    console.error('[members-db] فشل الحفظ:', e.message);
     pendingUpdates = [...updates, ...pendingUpdates];
-    scheduleBatchWrite();
+    batchWriteTimer = setTimeout(flushPendingUpdates, 60000);
   }
 }
 
-/**
- * حفظ كامل للخريطة في Sheets (يُستخدم بعد بناء الخريطة الأولي)
- * @param {Array} members - مصفوفة من { lid, phone, name, group, role }
- */
-async function saveAllMembers(members) {
-  if (!isReady || !members || members.length === 0) return;
-  try {
-    await ensureMembersSheet();
-    const now = new Date().toISOString();
-    const rows = [['LID', 'رقم الهاتف', 'اسم واتساب', 'الجروب', 'الدور', 'آخر تحديث']];
-    for (const m of members) {
-      rows.push([m.lid || '', m.phone || '', m.name || '', m.group || '', m.role || 'عضو', now]);
-    }
-    // مسح وإعادة كتابة
-    await sheetsApi.spreadsheets.values.clear({
-      spreadsheetId,
-      range: `'${MEMBERS_SHEET}'!A:F`,
-    });
-    await sheetsApi.spreadsheets.values.update({
-      spreadsheetId,
-      range: `'${MEMBERS_SHEET}'!A1`,
-      valueInputOption: 'RAW',
-      requestBody: { values: rows },
-    });
-    logger.info(`💾 members-db: حفظ كامل ${members.length} عضو في Sheets`);
-  } catch (e) {
-    logger.error('❌ members-db: فشل الحفظ الكامل', { error: e.message });
-  }
-}
-
-/**
- * إحصائيات قاعدة البيانات
- */
 function getStats() {
   return {
     totalLids: lidToPhone.size,
     totalPhones: phoneToMember.size,
     resolvedLids: [...lidToPhone.values()].filter(v => v && v.length >= 9).length,
     unresolvedLids: [...lidToPhone.values()].filter(v => !v || v.length < 9).length,
+    pendingUpdates: pendingUpdates.length,
+    loaded: _loaded,
   };
 }
 
-/**
- * الحصول على جميع LIDs غير المحلولة
- */
 function getUnresolvedLids() {
-  const unresolved = [];
-  for (const [lid, phone] of lidToPhone.entries()) {
-    if (!phone || phone.length < 9) {
-      unresolved.push(lid);
-    }
-  }
-  return unresolved;
+  return [...lidToPhone.entries()].filter(([,v]) => !v || v.length < 9).map(([k]) => k);
 }
 
-/**
- * تصدير الخرائط للاستخدام في whatsapp.js
- */
-function getLidToPhoneMap() { return lidToPhone; }
-function getPhoneToMemberMap() { return phoneToMember; }
+/** تهيئة — تُستدعى بعد sheets.initialize() */
+async function initialize() {
+  return await loadFromSheets();
+}
 
 module.exports = {
   initialize,
   loadFromSheets,
-  saveAllMembers,
   resolvePhone,
-  getMember,
   upsertMember,
-  updateMemberName,
   flushPendingUpdates,
   getStats,
   getUnresolvedLids,
-  getLidToPhoneMap,
-  getPhoneToMemberMap,
+  isLoaded: () => _loaded,
+  getLidToPhoneMap: () => lidToPhone,
+  getPhoneToMemberMap: () => phoneToMember,
 };

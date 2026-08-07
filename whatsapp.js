@@ -812,7 +812,17 @@ let lidMapSaveTimer = null;
  */
 function resolveLid(lid) {
   if (!lid) return null;
-  // مطابقة تامة
+  // الأولوية 1: ورقة المسجلين (مصدر الحقيقة)
+  try {
+    const sheets = require('./sheets');
+    const fromRegistered = sheets.resolvePhoneFromRegistered(lid);
+    if (fromRegistered) {
+      const jid = `${fromRegistered}@s.whatsapp.net`;
+      addLidMapping(lid, jid); // حفظ في الكاش المحلي
+      return jid;
+    }
+  } catch(e) { /* sheets قد يكون غير جاهز */ }
+  // الأولوية 2: الكاش المحلي (lid-map.json)
   const direct = lidToPhoneMap.get(lid);
   if (direct) return direct;
   // مطابقة بالبادئة (بدون رقم الجلسة)
@@ -867,16 +877,22 @@ async function resolveLidDirect(lid) {
       // محاولة 1: item.id مباشرة
       if (item.id && item.id.includes('@s.whatsapp.net')) {
         addLidMapping(lid, item.id);
+        const phone9 = item.id.split('@')[0].replace(/\D/g,'').slice(-9);
         const db = getMembersDb();
-        if (db) db.upsertMember({ lid, phone: item.id.split('@')[0].replace(/\D/g,'').slice(-9) });
+        if (db) db.upsertMember({ lid, phone: phone9 });
+        // تحديث ورقة المسجلين (عمود D)
+        try { const sh = require('./sheets'); sh.updateLidInRegistered(phone9, lid).catch(()=>{}); } catch(e){}
         logger.info(`✅ resolveLidDirect: ${lid.substring(0, 15)} → ${item.id.split('@')[0]}`);
         return item.id;
       }
       // محاولة 2: item.contact.id
       if (item.contact && item.contact.id && item.contact.id.includes('@s.whatsapp.net')) {
         addLidMapping(lid, item.contact.id);
+        const phone9b = item.contact.id.split('@')[0].replace(/\D/g,'').slice(-9);
         const db2 = getMembersDb();
-        if (db2) db2.upsertMember({ lid, phone: item.contact.id.split('@')[0].replace(/\D/g,'').slice(-9) });
+        if (db2) db2.upsertMember({ lid, phone: phone9b });
+        // تحديث ورقة المسجلين (عمود D)
+        try { const sh = require('./sheets'); sh.updateLidInRegistered(phone9b, lid).catch(()=>{}); } catch(e){}
         logger.info(`✅ resolveLidDirect(contact): ${lid.substring(0, 15)} → ${item.contact.id.split('@')[0]}`);
         return item.contact.id;
       }

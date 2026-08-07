@@ -38,12 +38,16 @@ const CREDENTIALS_PATH = path.resolve('./oauth-credentials.json');
 // كاش لأسماء الأوراق الموجودة (لتجنب إنشاء مكرر)
 const existingSheets = new Set();
 
-// كاش أسماء المسجلين { normalizedPhone → { name, whatsappName } }
+// كاش أسماء المسجلين { normalizedPhone → { name, whatsappName, lid, rowIndex } }
 // name: الاسم الرسمي (عمود B)
 // whatsappName: اسم واتساب (عمود C) - اختياري
+// lid: معرف LID (عمود D) - يُضاف تلقائياً عند حل LID
 let registeredUsersCache = new Map();
 let lastRegisteredUsersLoad = 0;
 const REGISTERED_USERS_CACHE_TTL = 5 * 60 * 1000; // 5 دقائق
+
+// خريطة LID → phone مبنية من ورقة المسجلين
+const registeredLidToPhone = new Map();
 
 /**
  * توحيد صيغة رقم الهاتف: دائماً 9 أرقام (بدون مفتاح الدولة 962)
@@ -163,30 +167,41 @@ async function loadRegisteredUsers(forceRefresh = false) {
 
   const sheetName = config.sheets.sheetNames.registeredUsers || 'المسجلين';
   try {
-    // نقرأ A:C للحصول على: A=الهاتف، B=الاسم الرسمي، C=اسم واتساب (اختياري)
+    // نقرأ A:D للحصول على: A=الهاتف، B=الاسم الرسمي، C=اسم واتساب، D=LID
     const response = await sheetsApi.spreadsheets.values.get({
       spreadsheetId,
-      range: `'${sheetName}'!A:C`,
+      range: `'${sheetName}'!A:D`,
     });
     const rows = response.data.values || [];
     const newCache = new Map();
+    registeredLidToPhone.clear();
     
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
       if (row[0]) {
         const np = normalizePhone(row[0]);
         if (np) {
+          const lid = (row[3] || '').trim(); // عمود D: LID
           newCache.set(np, {
             name: (row[1] || '').trim(),
             whatsappName: (row[2] || '').trim(),  // عمود C: اسم واتساب
+            lid,
+            rowIndex: i + 1,
           });
+          // بناء خريطة LID → phone
+          if (lid && lid.includes('@lid')) {
+            registeredLidToPhone.set(lid, np);
+            // base-prefix matching
+            const base = lid.split(':')[0];
+            if (base !== lid) registeredLidToPhone.set(base + '@lid', np);
+          }
         }
       }
     }
     
     registeredUsersCache = newCache;
     lastRegisteredUsersLoad = now;
-    logger.info(`📚 تم تحميل ${newCache.size} مسجل من ورقة المسجلين`);
+    logger.info(`📚 تم تحميل ${newCache.size} مسجل من ورقة المسجلين (${registeredLidToPhone.size} LID مرتبط)`);
     return registeredUsersCache;
   } catch (error) {
     logger.warn('فشل تحميل المسجلين', { error: error.message });
@@ -356,6 +371,70 @@ async function updateWhatsappName(phone, pushName) {
     logger.debug('فشل تحديث اسم واتساب', { error: error.message });
   }
 }
+
+/**
+ * حل LID إلى رقم هاتف من ورقة المسجلين
+ * يبحث في خريطة registeredLidToPhone أولاً (O(1))
+ * @param {string} lid - معرف LID
+ * @returns {string|null} رقم الهاتف (9 أرقام) أو null
+ */
+function resolvePhoneFromRegistered(lid) {
+  if (!lid) return null;
+  // مطابقة تامة
+  const direct = registeredLidToPhone.get(lid);
+  if (direct) return direct;
+  // base-prefix matching
+  const base = lid.split(':')[0];
+  const baseMatch = registeredLidToPhone.get(base + '@lid');
+  if (baseMatch) { registeredLidToPhone.set(lid, baseMatch); return baseMatch; }
+  // بحث خطي (آخر حل)
+  for (const [k, v] of registeredLidToPhone.entries()) {
+    if (k.split(':')[0] === base) { registeredLidToPhone.set(lid, v); return v; }
+  }
+  return null;
+}
+
+/**
+ * تحديث عمود D (الLID) في ورقة المسجلين
+ * يُستدعى عند حل LID جديد لربطه برقم الهاتف
+ * @param {string} phone - رقم الهاتف (9 أرقام)
+ * @param {string} lid - معرف LID
+ */
+async function updateLidInRegistered(phone, lid) {
+  if (!isInitialized || !phone || !lid) return;
+  const np = normalizePhone(phone);
+  if (!np) return;
+  const entry = registeredUsersCache.get(np);
+  if (!entry) return; // ليس مسجلاً
+  if (entry.lid === lid) return; // لا تغيير
+  
+  // تحديث الكاش محلياً
+  registeredUsersCache.set(np, { ...entry, lid });
+  registeredLidToPhone.set(lid, np);
+  const base = lid.split(':')[0];
+  if (base !== lid) registeredLidToPhone.set(base + '@lid', np);
+  
+  // تحديث ورقة المسجلين في Sheets (عمود D)
+  const sheetName = config.sheets.sheetNames.registeredUsers || 'المسجلين';
+  try {
+    const rowIndex = entry.rowIndex;
+    if (!rowIndex) return;
+    await sheetsApi.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${sheetName}'!D${rowIndex}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [[lid]] },
+    });
+    logger.info(`🔗 ربط LID: ${np} → ${lid.substring(0,15)}...`);
+  } catch (error) {
+    logger.debug('فشل تحديث LID في المسجلين', { error: error.message });
+  }
+}
+
+/**
+ * الحصول على خريطة LID → phone من ورقة المسجلين
+ */
+function getRegisteredLidMap() { return registeredLidToPhone; }
 
 // ====================================================
 // الورقة اليومية — كل يوم ورقة منفصلة
@@ -2388,4 +2467,12 @@ module.exports = {
   updateOrderStatus,
   // الطبقة 4: تحديث السجلات القديمة عند حل LID
   backfillLidRecords,
+  // وصول لـ sheetsApi من موديولات أخرى
+  getSheetsApi: () => sheetsApi,
+  getSpreadsheetId: () => spreadsheetId,
+  isInitializedFn: () => isInitialized,
+  // ورقة المسجلين — LID
+  resolvePhoneFromRegistered,
+  updateLidInRegistered,
+  getRegisteredLidMap,
 };
