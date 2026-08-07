@@ -88,37 +88,40 @@ function cleanPhone(jid) {
  */
 function emojiToNumber(text) {
   if (!text) return null;
+  const t = text.trim();
 
   // 👍 = 1 (قاعدة خاصة)
-  if (text.trim() === '👍') return 1;
-
-  // خريطة الإيموجيات الأساسية (بما فيها الأشكال المختلفة)
-  const emojiMap = {
-    '0️⃣': '0', '1️⃣': '1', '2️⃣': '2', '3️⃣': '3', '4️⃣': '4',
-    '5️⃣': '5', '6️⃣': '6', '7️⃣': '7', '8️⃣': '8', '9️⃣': '9',
-    '🔟': '10', '0⃣': '0', '1⃣': '1', '2⃣': '2', '3⃣': '3', 
-    '4⃣': '4', '5⃣': '5', '6⃣': '6', '7⃣': '7', '8⃣': '8', '9⃣': '9',
-    '0': '0', '1': '1', '2': '2', '3': '3', '4': '4',
-    '5': '5', '6': '6', '7': '7', '8': '8', '9': '9'
-  };
-
-  // تنظيف النص من variation selectors لتسهيل المطابقة
-  let result = text.replace(/\uFE0F|\u20E3/g, '');
+  if (t === '👍') return 1;
   
-  // استبدال الإيموجيات بأرقام نصية
+  // 🔟 = 10 (إيموجي واحد)
+  if (t === '🔟') return 10;
+
+  // نستخدم regex لاستخراج كل إيموجي رقمي بشكل منفصل
+  // نمط الإيموجي الرقمي: رقم (0-9) + variation selector (️ اختياري) + ⃣
+  const keycapRegex = /([0-9])️?⃣/g;
   let combinedNumberStr = '';
-  // نقوم بالمرور على النص حرفاً حرفاً (أو إيموجي إيموجي)
-  const characters = [...result];
-  for (const char of characters) {
-    if (emojiMap[char] !== undefined) {
-      combinedNumberStr += emojiMap[char];
-    } else if (/\d/.test(char)) {
-      combinedNumberStr += char;
-    }
+  let lastIndex = 0;
+  let match;
+  
+  // معالجة 🔟 أولاً إذا كان ضمن نص
+  const textWithoutTen = t.replace(/🔟/g, '10');
+  
+  // استخراج كل إيموجي رقمي
+  const keycapRegex2 = /([0-9])️?⃣/g;
+  let result2 = '';
+  let m;
+  while ((m = keycapRegex2.exec(textWithoutTen)) !== null) {
+    result2 += m[1];
+  }
+  
+  // إضافة أرقام النص العادي (10، 20...) إذا كان النص أرقام فقط
+  if (!result2) {
+    const numMatch = textWithoutTen.match(/^(\d+)$/);
+    if (numMatch) result2 = numMatch[1];
   }
 
-  if (combinedNumberStr) {
-    const n = parseInt(combinedNumberStr, 10);
+  if (result2) {
+    const n = parseInt(result2, 10);
     if (!isNaN(n) && n > 0) return n;
   }
 
@@ -127,6 +130,7 @@ function emojiToNumber(text) {
 
 /**
  * التحقق مما إذا كان النص تفاعل كمي (👍 أو إيموجي رقم)
+ * يدعم: 👍، 1️⃣، 5️⃣، 🔟، 1️⃣٠️⃣ (10)، 2️⃣٠️⃣ (20)، أي تركيبة إيموجية رقمية
  */
 function isQuantityEmoji(text) {
   if (!text) return false;
@@ -134,16 +138,17 @@ function isQuantityEmoji(text) {
 
   // 👍 مباشرة
   if (t === '👍') return true;
-
-  // تنظيف الـ variation selectors للتحقق
-  const cleaned = t.replace(/\uFE0F|\u20E3/g, '');
   
-  // إذا كان النص بعد التنظيف يحتوي فقط على أرقام، فهو إيموجي رقمي (لأن الأرقام العادية ستظهر كأرقام)
-  // ولكن المستخدم طلب إيموجيات الأرقام فقط، لذا نتحقق أن النص الأصلي يحتوي على إيموجيات
-  const hasEmojiDigits = /[\u0030-\u0039]\u20E3/.test(t) || t.includes('🔟');
-  const isPureNumber = /^\d+$/.test(cleaned);
+  // 🔟 (رقم 10 كإيموجي واحد)
+  if (t === '🔟') return true;
 
-  return (hasEmojiDigits || t === '👍') && isPureNumber;
+  // تحقق: هل يحتوي على إيموجي رقمي واحد على الأقل
+  const hasKeycapEmoji = /[\u0030-\u0039]\uFE0F?\u20E3/.test(t);
+  if (!hasKeycapEmoji) return false;
+  
+  // تأكد أن النتيجة بعد تحويل الإيموجيات هي رقم صحيح
+  const converted = emojiToNumber(t);
+  return converted !== null && converted > 0;
 }
 
 /**

@@ -294,14 +294,19 @@ async function start() {
       const groupInfo = targetGroups.find(g => g.id === remoteJid);
       const groupPrefix = groupInfo ? groupInfo.prefix : '';
 
+      // الكابتن: من tamCache أو من بيانات الرسالة
       const captainPhone = await findCaptainPhone(
         quotedMsgId,
         orderOwnerPhone
       );
+      
+      // صاحب الطلب الحقيقي: من orderCache أولاً (الأدق)، ثم من بيانات الرسالة
+      // عندما يضع شخص إيموجي على رسالة الكابتن التي رد فيها بـ"تم"
+      const realProducerPhone = whatsapp.getOrderByReplyId(quotedMsgId) || orderOwnerPhone;
 
       if (result.type === 'accept') {
         // === فحص هل هذا تعديل (إيموجي جديد على نفس الرسالة المسجلة سابقاً) ===
-        const existingTransaction = await sheets.findTransactionByMessageId(quotedMsgId, producerPhone);
+        const existingTransaction = await sheets.findTransactionByMessageId(quotedMsgId, realProducerPhone || producerPhone);
         
         if (existingTransaction && existingTransaction.quantity !== quantity) {
           // هذا تعديل - تغيير الإيموجي
@@ -331,17 +336,22 @@ async function start() {
         }
 
         // === انتاج + استلام (عملية جديدة) ===
+        // صاحب الطلب = realProducerPhone (عابدين)
+        // واضع الإيموجي = producerPhone (قد يكون عابدين أو شخص آخر)
+        const finalProducerPhone = realProducerPhone || producerPhone;
+        
         logger.info('🎯 تسجيل انتاج+استلام', {
-          producer: producerPhone,
+          producer: finalProducerPhone,
+          emojiBy: producerPhone,
           captain: captainPhone || '❓',
           qty: quantity,
           group: groupInfo ? groupInfo.name : 'Unknown'
         });
 
         try {
-          const producerName = whatsapp.getPushName(msg);
-          await sheets.updateTotalsProduction(producerPhone, quantity, groupPrefix, producerName);
-          logger.info(`✅ انتاج: ${producerPhone} +${quantity} [${groupPrefix}]`);
+          const producerName = sheets.getRegisteredName(finalProducerPhone) || whatsapp.getPushName(msg);
+          await sheets.updateTotalsProduction(finalProducerPhone, quantity, groupPrefix, producerName);
+          logger.info(`✅ انتاج: ${finalProducerPhone} +${quantity} [${groupPrefix}]`);
         } catch (error) {
           logger.error('❌ فشل انتاج', { error: error.message });
         }
@@ -363,7 +373,7 @@ async function start() {
         sheets.recordTransaction({
           transactionId: result.transactionId,
           timestamp: result.timestamp,
-          producerPhone,
+          producerPhone: finalProducerPhone,
           captainPhone: captainPhone || '',
           quantity,
           type: 'انتاج',
@@ -499,7 +509,18 @@ async function start() {
       if (captainPhone && tamMessageId) {
         whatsapp.setCaptainForMessage(tamMessageId, captainPhone);
         sheets.saveTamToSheet(tamMessageId, captainPhone).catch(() => {});
-        logger.info('💾 حفظ "تم"', { captain: captainPhone, msgId: tamMessageId.substring(0, 8) });
+        
+        // حفظ رقم صاحب الطلب مربوطاً بـ id رسالة الرد
+        // حتى يعرف النظام من هو صاحب الطلب عند وضع إيموجي على رسالة الكابتن
+        if (result.orderOwnerPhone) {
+          whatsapp.setOrderForReply(tamMessageId, result.orderOwnerPhone);
+        }
+        
+        logger.info('💾 حفظ "تم"', { 
+          captain: captainPhone, 
+          producer: result.orderOwnerPhone || '?',
+          msgId: tamMessageId.substring(0, 8) 
+        });
 
         // إذا كان الرد يحتوي على إيموجي كمي مباشرة (مثل رد بـ 👍)
         if (result.quantity > 0 && result.orderOwnerPhone) {

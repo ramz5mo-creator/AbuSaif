@@ -28,6 +28,9 @@ const logger = require('./logger');
 
 const messageCache = new Map();
 const tamCache = new Map();
+// كاش لربط id رسالة الرد (تم) برقم صاحب الطلب الأصلي
+// { replyMsgId: producerPhone }
+const orderCache = new Map();
 
 // كاش لربط LID بالأرقام الحقيقية
 // { lid@lid: phone@s.whatsapp.net }
@@ -544,6 +547,21 @@ function getCaptainByMessageId(messageId) {
   return tamCache.get(messageId) || null;
 }
 
+/**
+ * تخزين رقم صاحب الطلب مربوطاً بـ id رسالة الرد (تم)
+ * replyMsgId = id رسالة الكابتن التي رد فيها بـ"تم"
+ * producerPhone = رقم صاحب الطلب الأصلي (عابدين)
+ */
+function setOrderForReply(replyMsgId, producerPhone) {
+  if (!replyMsgId || !producerPhone) return;
+  orderCache.set(replyMsgId, producerPhone);
+  logger.debug('💾 orderCache', { replyId: replyMsgId.substring(0, 8), producer: producerPhone, size: orderCache.size });
+}
+
+function getOrderByReplyId(replyMsgId) {
+  return orderCache.get(replyMsgId) || null;
+}
+
 function getCachedMessage(messageId) {
   return messageCache.get(messageId) || null;
 }
@@ -606,4 +624,6 @@ module.exports = {
   lookupPhone,
   resolveLidByPushName,
   addLidMapping,
+  setOrderForReply,
+  getOrderByReplyId,
 };
