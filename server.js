@@ -635,7 +635,21 @@ async function start() {
       // لكن هذه القاعدة لا تنطبق إذا كان الإيموجي على رسالة "تم" لكابتن آخر
       // لأن صاحب الطلب (أمجد) يضع إيموجي على رد الكابتن (يعقوب) لتحديد الكمية
       const _captainFromTamEarly = quotedMsgId ? whatsapp.getCaptainByMessageId(quotedMsgId) : null;
-      if (!_captainFromTamEarly) {
+      // فحص إضافي: هل الرسالة المستهدفة هي reply (تم) من messageCache
+      let _isTargetAReply = !!_captainFromTamEarly;
+      if (!_isTargetAReply && quotedMsgId) {
+        const _targetMsgEarly = whatsapp.getCachedMessage(quotedMsgId);
+        const _targetMsgObjEarly = _targetMsgEarly?.message || {};
+        const _targetCtxEarly = 
+          _targetMsgObjEarly.extendedTextMessage?.contextInfo ||
+          _targetMsgObjEarly.imageMessage?.contextInfo ||
+          _targetMsgObjEarly.videoMessage?.contextInfo ||
+          _targetMsgObjEarly.audioMessage?.contextInfo ||
+          _targetMsgObjEarly.documentMessage?.contextInfo || null;
+        _isTargetAReply = !!_targetCtxEarly?.quotedMessage;
+      }
+
+      if (!_isTargetAReply) {
         // فقط إذا لم يكن الإيموجي على رسالة "تم" — نطبق قاعدة التجاهل الذاتي
         const _producerFromOrderEarly = quotedMsgId ? whatsapp.getOrderByReplyId(quotedMsgId) : null;
         const _realOwner = _producerFromOrderEarly || orderOwnerPhone;
@@ -654,16 +668,20 @@ async function start() {
         }
       } else {
         // الإيموجي على رسالة "تم" — تحقق فقط أن واضع الإيموجي ليس الكابتن نفسه
-        const cleanProducer = producerPhone.replace(/\D/g, '');
-        const cleanCaptain = _captainFromTamEarly.replace(/\D/g, '');
-        if (cleanProducer === cleanCaptain ||
-            (cleanProducer.length >= 9 && cleanCaptain.length >= 9 &&
-             cleanProducer.slice(-9) === cleanCaptain.slice(-9))) {
-          logger.info('⚠️ تجاهل: الكابتن وضع إيموجي على رسالته هو نفسه', {
-            phone: producerPhone,
-            msgId: quotedMsgId?.substring(0, 8)
-          });
-          return;
+        // الكابتن = من tamCache أو من orderOwnerPhone (صاحب الرسالة المستهدفة)
+        const _captainForGuard = _captainFromTamEarly || orderOwnerPhone;
+        if (_captainForGuard) {
+          const cleanProducer = producerPhone.replace(/\D/g, '');
+          const cleanCaptain = _captainForGuard.replace(/\D/g, '');
+          if (cleanProducer === cleanCaptain ||
+              (cleanProducer.length >= 9 && cleanCaptain.length >= 9 &&
+               cleanProducer.slice(-9) === cleanCaptain.slice(-9))) {
+            logger.info('⚠️ تجاهل: الكابتن وضع إيموجي على رسالته هو نفسه', {
+              phone: producerPhone,
+              msgId: quotedMsgId?.substring(0, 8)
+            });
+            return;
+          }
         }
       }
 
@@ -746,12 +764,9 @@ async function start() {
           captain: captainPhone, producer: realProducerPhone, qty: quantity
         });
       } else {
-        // الحالة 2: الإيموجي على رسالة الطلب مباشرة
-        // واضع الإيموجي = الكابتن (producerPhone)
-        // صاحب الرسالة = المنتج (orderOwnerPhone)
-        captainPhone = producerPhone; // واضع الإيموجي هو الكابتن
-        realProducerPhone = orderOwnerPhone; // صاحب الرسالة هو المنتج
-        // فحص tamCache بطريقة بديلة (Sheet)
+        // tamCache فارغ — نحاول طرق بديلة لتحديد إذا كانت رسالة "تم"
+        
+        // محاولة 1: فحص Sheet (سجل_تم)
         const captainFromSheet = quotedMsgId ? await sheets.getCaptainFromTamSheet(quotedMsgId) : null;
         if (captainFromSheet) {
           captainPhone = captainFromSheet;
@@ -760,9 +775,50 @@ async function start() {
             captain: captainPhone, producer: realProducerPhone, qty: quantity
           });
         } else {
-          logger.info('📌 حالة 2: إيموجي على رسالة طلب مباشرة', {
-            captain: captainPhone, producer: realProducerPhone, qty: quantity
-          });
+          // محاولة 2: فحص messageCache — إذا الرسالة المستهدفة هي reply (رد على رسالة أخرى)
+          // فهي رسالة "تم" وصاحبها هو الكابتن
+          const targetMsg = quotedMsgId ? whatsapp.getCachedMessage(quotedMsgId) : null;
+          const targetMsgObj = targetMsg?.message || {};
+          const targetContextInfo = 
+            targetMsgObj.extendedTextMessage?.contextInfo ||
+            targetMsgObj.imageMessage?.contextInfo ||
+            targetMsgObj.videoMessage?.contextInfo ||
+            targetMsgObj.audioMessage?.contextInfo ||
+            targetMsgObj.documentMessage?.contextInfo || null;
+          const isTargetReply = !!targetContextInfo?.quotedMessage;
+
+          if (isTargetReply && orderOwnerPhone) {
+            // الرسالة المستهدفة هي رد (تم) → صاحبها هو الكابتن
+            captainPhone = orderOwnerPhone; // صاحب رسالة "تم" = الكابتن
+            // صاحب الطلب = صاحب الرسالة التي رد عليها الكابتن
+            const originalOrderMsgId = targetContextInfo.stanzaId;
+            const originalOrderMsg = originalOrderMsgId ? whatsapp.getCachedMessage(originalOrderMsgId) : null;
+            if (originalOrderMsg) {
+              const originalOwnerJid = whatsapp.getSenderJid(originalOrderMsg);
+              const originalOwnerPhone = originalOwnerJid ? originalOwnerJid.split('@')[0].replace(/\D/g, '') : null;
+              realProducerPhone = originalOwnerPhone || producerPhone;
+            } else {
+              // لا يمكن تحديد صاحب الطلب من الكاش — نستخدم واضع الإيموجي
+              realProducerPhone = producerPhone;
+            }
+            // حفظ في tamCache للمرات القادمة
+            whatsapp.setCaptainForMessage(quotedMsgId, captainPhone);
+            if (realProducerPhone) {
+              whatsapp.setOrderForReply(quotedMsgId, realProducerPhone);
+            }
+            logger.info('📌 حالة 1c: إيموجي على رسالة تم (من messageCache/contextInfo)', {
+              captain: captainPhone, producer: realProducerPhone, qty: quantity
+            });
+          } else {
+            // الحالة 2: الإيموجي على رسالة الطلب مباشرة (ليست رد)
+            // واضع الإيموجي = الكابتن
+            // صاحب الرسالة = المنتج
+            captainPhone = producerPhone;
+            realProducerPhone = orderOwnerPhone;
+            logger.info('📌 حالة 2: إيموجي على رسالة طلب مباشرة', {
+              captain: captainPhone, producer: realProducerPhone, qty: quantity
+            });
+          }
         }
       }
 
