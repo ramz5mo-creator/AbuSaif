@@ -731,13 +731,12 @@ async function resolveLidPhone(phone) {
   // إذا لم يكن LID → أرجعه كما هو
   if (!phone.includes('@lid')) return phone;
   
-  // محاولة 1: من lidToPhoneMap
-  const lidMap = whatsapp.getLidToPhoneMap();
-  const fromMap = lidMap.get(phone);
+  // محاولة 1: resolveLid() مع base-prefix matching
+  const fromMap = whatsapp.resolveLid(phone);
   if (fromMap && !fromMap.includes('@lid')) {
     const clean = fromMap.split('@')[0].replace(/\D/g, '');
     if (clean.length >= 9) {
-      logger.info(`✅ حل LID للتسجيل (lidMap): ${phone.substring(0,15)} → ${clean}`);
+      logger.info(`✅ حل LID للتسجيل (resolveLid): ${phone.substring(0,15)} → ${clean}`);
       return clean;
     }
   }
@@ -756,10 +755,10 @@ async function resolveLidPhone(phone) {
     logger.debug('فشل حل LID عبر USyncQuery', { error: e.message });
   }
   
-  // إذا لم يُحل → أرجع LID كما هو (سيُسجل كرقم مؤقت)
+  // إذا لم يُحل → أرجع الجزء الرقمي فقط (سيُسجل كمعرف مؤقت)
   logger.warn(`⚠️ LID لم يُحل للتسجيل: ${phone.substring(0,15)} — سيُسجل كـ LID مؤقت`);
   whatsapp.queueLidForResolve(phone);
-  return phone.split('@')[0]; // أرجع الجزء الرقمي فقط
+  return phone.split(':')[0]; // أرجع الجزء الرقمي فقط (بدون @lid)
 }
 
 // ====================================================
