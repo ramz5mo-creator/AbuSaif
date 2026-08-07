@@ -679,12 +679,32 @@ async function start() {
         let resolvedCaptain = captainFromTam;
         // إذا كان الكابتن LID غير محلول، نحاول حله الآن
         if (resolvedCaptain && resolvedCaptain.includes('@lid')) {
+          // محاولة 1: من lidToPhoneMap
           const lidResolved = whatsapp.resolveLid(resolvedCaptain);
           if (lidResolved && !lidResolved.includes('@lid')) {
-            logger.info(`✅ حل LID الكابتن عند الإيموجي: ${resolvedCaptain.substring(0,15)} → ${lidResolved}`);
+            logger.info(`✅ حل LID الكابتن عند الإيموجي (lidMap): ${resolvedCaptain.substring(0,15)} → ${lidResolved}`);
             resolvedCaptain = lidResolved;
-            // حدّث tamCache بالرقم الحقيقي
             if (quotedMsgId) whatsapp.setCaptainForMessage(quotedMsgId, resolvedCaptain);
+          } else {
+            // محاولة 2: من pushName رسالة "تم" في messageCache
+            const tamMsg = quotedMsgId ? whatsapp.getCachedMessage(quotedMsgId) : null;
+            const captainPushName = tamMsg?.pushName || whatsapp.getPushNameFromCachedMessage(quotedMsgId);
+            if (captainPushName && captainPushName !== 'غير معروف') {
+              const resolvedByName = whatsapp.resolvePhoneByPushName(captainPushName);
+              if (resolvedByName && !resolvedByName.includes('@lid')) {
+                logger.info(`✅ حل LID الكابتن عند الإيموجي (pushName): ${captainPushName} → ${resolvedByName}`);
+                resolvedCaptain = resolvedByName;
+                whatsapp.addLidMapping(captainFromTam, resolvedByName);
+                if (quotedMsgId) whatsapp.setCaptainForMessage(quotedMsgId, resolvedCaptain);
+              } else {
+                logger.warn(`⚠️ كابتن LID لا يزال غير محلول عند الإيموجي`, {
+                  lid: resolvedCaptain.substring(0,15),
+                  pushName: captainPushName
+                });
+              }
+            } else {
+              logger.warn(`⚠️ كابتن LID بدون pushName`, { lid: resolvedCaptain.substring(0,15) });
+            }
           }
         }
         captainPhone = resolvedCaptain;
@@ -1016,12 +1036,26 @@ async function start() {
       const tamMessageId = result.messageId;
       // إذا كان captainPhone هو LID غير محلول، نحاول حله الآن
       if (captainPhone && captainPhone.includes('@lid')) {
+        // محاولة 1: من lidToPhoneMap
         const resolvedCaptain = whatsapp.resolveLid(captainPhone);
         if (resolvedCaptain && !resolvedCaptain.includes('@lid')) {
-          logger.info(`✅ حل LID الكابتن عند تم: ${captainPhone.substring(0,15)} → ${resolvedCaptain}`);
+          logger.info(`✅ حل LID الكابتن عند تم (lidMap): ${captainPhone.substring(0,15)} → ${resolvedCaptain}`);
           captainPhone = resolvedCaptain;
         } else {
-          logger.warn(`⚠️ كابتن LID غير محلول — سيُحفظ بالـ LID مؤقتاً`, { lid: captainPhone.substring(0,15) });
+          // محاولة 2: من pushName الرسالة الحالية (الكابتن يكتب "تم" الآن)
+          const captainPushName = msg.pushName;
+          if (captainPushName && captainPushName !== 'غير معروف') {
+            const resolvedByName = whatsapp.resolvePhoneByPushName(captainPushName);
+            if (resolvedByName && !resolvedByName.includes('@lid')) {
+              logger.info(`✅ حل LID الكابتن عند تم (pushName): ${captainPushName} → ${resolvedByName}`);
+              whatsapp.addLidMapping(captainPhone, resolvedByName);
+              captainPhone = resolvedByName;
+            } else {
+              logger.warn(`⚠️ كابتن LID غير محلول — سيُحفظ بالـ LID مؤقتاً`, { lid: captainPhone.substring(0,15), pushName: captainPushName });
+            }
+          } else {
+            logger.warn(`⚠️ كابتن LID بدون pushName`, { lid: captainPhone.substring(0,15) });
+          }
         }
       }
 
