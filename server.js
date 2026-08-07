@@ -443,6 +443,84 @@ async function start() {
           status: 'ملغى',
           notes: `msgId:${quotedMsgId || ''}`
         }).catch(() => {});
+
+      } else if (result.type === 'remove') {
+        // === حذف الإيموجي: عكس العملية تماماً ===
+        // البحث عن العملية المسجلة لهذه الرسالة
+        let removeQuantity = 0;
+        let removeProducer = realProducerPhone || producerPhone;
+        let removeCaptain = captainPhone;
+
+        if (quotedMsgId) {
+          try {
+            const existingTx = await sheets.findTransactionByMessageId(quotedMsgId, removeProducer);
+            if (existingTx && existingTx.status !== 'ملغى') {
+              removeQuantity = existingTx.quantity || 0;
+              removeCaptain = existingTx.captainPhone || captainPhone;
+              removeProducer = existingTx.producerPhone || removeProducer;
+              logger.info('🗑️ حذف إيموجي → عكس عملية', {
+                originalQty: removeQuantity,
+                producer: removeProducer,
+                captain: removeCaptain,
+                msgId: quotedMsgId?.substring(0, 8)
+              });
+            } else {
+              logger.info('🗑️ حذف إيموجي — لا توجد عملية مسجلة أو ملغاة بالفعل', { msgId: quotedMsgId?.substring(0, 8) });
+              return;
+            }
+          } catch (e) {
+            logger.debug('فشل البحث عن عملية للحذف', { error: e.message });
+            return;
+          }
+        } else {
+          return; // لا يمكن عكس بدون معرف الرسالة
+        }
+
+        if (removeQuantity <= 0) {
+          logger.info('🗑️ حذف إيموجي — كمية صفر، تجاهل');
+          return;
+        }
+
+        logger.info('🗑️ تنفيذ حذف إيموجي', {
+          producer: removeProducer,
+          captain: removeCaptain || '❓',
+          qty: removeQuantity,
+          group: groupInfo ? groupInfo.name : 'Unknown'
+        });
+
+        // خصم الانتاج
+        try {
+          const producerName = sheets.getRegisteredName(removeProducer) || '';
+          await sheets.updateTotalsProduction(removeProducer, -removeQuantity, groupPrefix, producerName);
+          logger.info(`✅ خصم انتاج بعد حذف إيموجي: ${removeProducer} -${removeQuantity}`);
+        } catch (error) {
+          logger.error('❌ فشل خصم انتاج', { error: error.message });
+        }
+
+        // خصم الاستلام
+        if (removeCaptain) {
+          try {
+            const captainName = sheets.getRegisteredName(removeCaptain) || 'كابتن';
+            await sheets.updateTotalsReception(removeCaptain, -removeQuantity, groupPrefix, captainName);
+            logger.info(`✅ خصم استلام بعد حذف إيموجي: ${removeCaptain} -${removeQuantity}`);
+          } catch (error) {
+            logger.error('❌ فشل خصم استلام', { error: error.message });
+          }
+        }
+
+        // تحديث حالة العملية في سجل الحركات إلى محذوف
+        sheets.recordTransaction({
+          transactionId: result.transactionId,
+          timestamp: result.timestamp,
+          producerPhone: removeProducer,
+          captainPhone: removeCaptain || '',
+          quantity: removeQuantity,
+          type: 'حذف إيموجي',
+          emoji: '',
+          groupPrefix,
+          status: 'محذوف',
+          notes: `msgId:${quotedMsgId || ''}`
+        }).catch(() => {});
       }
 
       return;

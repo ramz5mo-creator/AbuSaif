@@ -231,11 +231,14 @@ async function processMessage(msg, sock) {
     });
 
     // ❌ = إلغاء (بكل الأشكال الممكنة)
-    const cancelEmojis = ['❌', '✖️', '✖', '❎', '×', 'x', 'X'];
+    const cancelEmojis = ['\u274c', '\u2716\ufe0f', '\u2716', '\u274e', '\xd7', 'x', 'X'];
     const isCancelEmoji = reactionText && cancelEmojis.includes(reactionText.trim());
+    
+    // نص فارغ = حذف الإيموجي (عكس العملية تماماً)
+    const isRemoveEmoji = reactionText === '' || reactionText === null || reactionText === undefined;
 
-    // فقط التفاعلات الكمية أو الإلغاء
-    if (!isQuantityEmoji(reactionText) && !isCancelEmoji) {
+    // فقط التفاعلات الكمية أو الإلغاء أو الحذف
+    if (!isQuantityEmoji(reactionText) && !isCancelEmoji && !isRemoveEmoji) {
       logger.debug('تفاعل غير كمي وغير إلغاء - تجاهل', { text: reactionText });
       return null;
     }
@@ -268,11 +271,14 @@ async function processMessage(msg, sock) {
     }
 
     // حساب الكمية (بعد تعريف quotedText)
-    const quantity = isCancelEmoji ? extractQuantity(quotedText) : extractQuantity(reactionText);
+    // عند حذف الإيموجي: لا نعرف الكمية من النص (فارغ)، سيبحث server.js عنها في سجل الحركات
+    const quantity = isCancelEmoji ? extractQuantity(quotedText) :
+                     isRemoveEmoji ? 0 :  // 0 = سيجلبها server.js من السجل
+                     extractQuantity(reactionText);
 
-    const resultType = isCancelEmoji ? 'cancel' : 'accept';
+    const resultType = isCancelEmoji ? 'cancel' : isRemoveEmoji ? 'remove' : 'accept';
 
-    logger.info(`🎯 تفاعل ${isCancelEmoji ? 'إلغاء' : 'انتاج'}`, {
+    logger.info(`🎯 تفاعل ${isCancelEmoji ? 'إلغاء' : isRemoveEmoji ? 'حذف إيموجي' : 'انتاج'}`, {
       id: transactionId.substring(0, 8),
       acceptor: acceptorPhone,
       owner: orderOwnerPhone || 'غير معروف',
