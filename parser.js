@@ -426,13 +426,48 @@ async function processMessage(msg, sock) {
       quotedOwnerJid = contextInfo.participant;
     }
   }
-  const orderOwnerPhone = cleanPhone(quotedOwnerJid);
+  let resolvedOrderOwnerPhone = cleanPhone(quotedOwnerJid);
   const quotedText =
     contextInfo?.quotedMessage?.conversation ||
     contextInfo?.quotedMessage?.extendedTextMessage?.text ||
     contextInfo?.quotedMessage?.imageMessage?.caption ||
     '';
   const quotedMessageId = contextInfo?.stanzaId || '';
+
+  // معالجة خاصة: إذا لم يُحل صاحب الطلب بعد، نحاول من messageCache
+  if (!resolvedOrderOwnerPhone && quotedMessageId) {
+    const cachedQuoted = whatsapp.getCachedMessage(quotedMessageId);
+    if (cachedQuoted) {
+      if (cachedQuoted.key?.fromMe) {
+        // رسالة البوت: نحاول استخراج رقم المنتج من orderCache أولاً
+        const fromOrderCache = whatsapp.getOrderByReplyId(quotedMessageId);
+        if (fromOrderCache) {
+          resolvedOrderOwnerPhone = fromOrderCache;
+          logger.info('✅ صاحب الطلب من orderCache (رد على رسالة بوت)', { phone: resolvedOrderOwnerPhone });
+        } else {
+          // استخراج رقم الهاتف من نص رسالة البوت
+          const botMsgText =
+            cachedQuoted.message?.conversation ||
+            cachedQuoted.message?.extendedTextMessage?.text || '';
+          const phoneMatch = botMsgText.match(/(?:^|\s)(\d{9,12})(?:\s|$|\n)/);
+          if (phoneMatch) {
+            resolvedOrderOwnerPhone = cleanPhone(phoneMatch[1]);
+            logger.info('✅ صاحب الطلب من نص رسالة البوت', { phone: resolvedOrderOwnerPhone });
+          } else {
+            logger.warn('⚠️ رد على رسالة بوت بدون رقم مستخرج', { text: botMsgText.substring(0, 80) });
+          }
+        }
+      } else {
+        // رسالة عادية — نستخرج صاحبها من messageCache
+        const cachedSender = whatsapp.getSenderJid(cachedQuoted);
+        if (cachedSender && !cachedSender.includes('@lid')) {
+          resolvedOrderOwnerPhone = cleanPhone(cachedSender);
+          logger.info('✅ صاحب الطلب من messageCache', { phone: resolvedOrderOwnerPhone });
+        }
+      }
+    }
+  }
+  const orderOwnerPhone = resolvedOrderOwnerPhone;
 
   // التحقق من الكمية في نص الرد (إذا كان إيموجيات أرقام فقط)
   const quantity = isQuantityEmoji(text) ? emojiToNumber(text) : 0;

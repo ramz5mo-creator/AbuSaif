@@ -205,9 +205,25 @@ async function connect() {
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
 
-      for (const msg of messages) {
+            for (const msg of messages) {
         if (!msg.message) continue;
-        if (msg.key.fromMe) continue;
+
+        // تخزين رسائل البوت نفسه (fromMe) في الكاش حتى يمكن استخدامها عند الرد عليها
+        if (msg.key.fromMe) {
+          if (msg.key.id && msg.message && !msg.message.reactionMessage) {
+            const remoteJidBot = msg.key.remoteJid || '';
+            const targetGroupsBot = config.whatsapp.targetGroups || [];
+            const isTargetBot = targetGroupsBot.some(g => g.id === remoteJidBot);
+            if (isTargetBot && remoteJidBot.endsWith('@g.us')) {
+              messageCache.set(msg.key.id, msg);
+              if (messageCache.size > 5000) {
+                const firstKey = messageCache.keys().next().value;
+                messageCache.delete(firstKey);
+              }
+            }
+          }
+          continue;
+        }
 
         // تتبع الجروبات المكتشفة
         const remoteJid = msg.key.remoteJid || '';
