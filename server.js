@@ -759,9 +759,21 @@ async function start() {
           }
         }
         captainPhone = resolvedCaptain;
-        realProducerPhone = producerFromOrder || orderOwnerPhone;
+        // صاحب الطلب: من orderCache أولاً
+        // إذا كان orderOwnerPhone = الكابتن نفسه (مقلوب)، استخدم واضع الإيموجي بدلاً
+        const _captainNorm = captainPhone ? captainPhone.replace(/\D/g, '').slice(-9) : null;
+        const _ownerNorm = orderOwnerPhone ? orderOwnerPhone.replace(/\D/g, '').slice(-9) : null;
+        const _ownerIsCaptain = _captainNorm && _ownerNorm && _captainNorm === _ownerNorm;
+        if (producerFromOrder) {
+          realProducerPhone = producerFromOrder;
+        } else if (_ownerIsCaptain) {
+          // orderOwnerPhone هو الكابتن — واضع الإيموجي هو صاحب الطلب
+          realProducerPhone = producerPhone;
+        } else {
+          realProducerPhone = orderOwnerPhone;
+        }
         logger.info('📌 حالة 1: إيموجي على رسالة تم', {
-          captain: captainPhone, producer: realProducerPhone, qty: quantity
+          captain: captainPhone, producer: realProducerPhone, ownerWasCaptain: _ownerIsCaptain, qty: quantity
         });
       } else {
         // tamCache فارغ — نحاول طرق بديلة لتحديد إذا كانت رسالة "تم"
@@ -770,7 +782,16 @@ async function start() {
         const captainFromSheet = quotedMsgId ? await sheets.getCaptainFromTamSheet(quotedMsgId) : null;
         if (captainFromSheet) {
           captainPhone = captainFromSheet;
-          realProducerPhone = producerFromOrder || orderOwnerPhone;
+          // نفس منطق حالة 1: إذا orderOwnerPhone = الكابتن → واضع الإيموجي هو صاحب الطلب
+          const _cNorm1b = captainPhone ? captainPhone.replace(/\D/g, '').slice(-9) : null;
+          const _oNorm1b = orderOwnerPhone ? orderOwnerPhone.replace(/\D/g, '').slice(-9) : null;
+          if (producerFromOrder) {
+            realProducerPhone = producerFromOrder;
+          } else if (_cNorm1b && _oNorm1b && _cNorm1b === _oNorm1b) {
+            realProducerPhone = producerPhone;
+          } else {
+            realProducerPhone = orderOwnerPhone;
+          }
           logger.info('📌 حالة 1b: إيموجي على رسالة تم (من Sheet)', {
             captain: captainPhone, producer: realProducerPhone, qty: quantity
           });
