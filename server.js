@@ -1440,7 +1440,40 @@ async function start() {
         // حفظ رقم صاحب الطلب مربوطاً بـ id رسالة الرد
         // حتى يعرف النظام من هو صاحب الطلب عند وضع إيموجي على رسالة الكابتن
         if (result.orderOwnerPhone) {
-          whatsapp.setOrderForReply(tamMessageId, result.orderOwnerPhone);
+          // حل LID صاحب الطلب قبل الحفظ في orderCache
+          let resolvedOwner = result.orderOwnerPhone;
+          if (resolvedOwner && resolvedOwner.includes('@lid')) {
+            const fromMap = whatsapp.resolveLid(resolvedOwner);
+            if (fromMap && !fromMap.includes('@lid')) {
+              resolvedOwner = fromMap.split('@')[0].replace(/\D/g, '');
+              logger.info(`✅ حل LID صاحب الطلب عند حفظ تم (lidMap): ${result.orderOwnerPhone.substring(0,15)} → ${resolvedOwner}`);
+            } else {
+              // محاولة من ورقة المسجلين
+              const fromSheet = sheets.resolvePhoneFromRegistered(resolvedOwner);
+              if (fromSheet && !fromSheet.includes('@lid')) {
+                resolvedOwner = fromSheet.split('@')[0].replace(/\D/g, '');
+                logger.info(`✅ حل LID صاحب الطلب عند حفظ تم (Registered): ${result.orderOwnerPhone.substring(0,15)} → ${resolvedOwner}`);
+              } else {
+                // محاولة USyncQuery
+                try {
+                  const directResolved = await whatsapp.resolveLidDirect(resolvedOwner);
+                  if (directResolved && !directResolved.includes('@lid')) {
+                    resolvedOwner = directResolved.split('@')[0].replace(/\D/g, '');
+                    logger.info(`✅ حل LID صاحب الطلب عند حفظ تم (USyncQuery): ${result.orderOwnerPhone.substring(0,15)} → ${resolvedOwner}`);
+                  } else {
+                    // استخدام الجزء الرقمي كمعرف مؤقت
+                    resolvedOwner = resolvedOwner.split(':')[0].replace(/\D/g, '');
+                    logger.warn(`⚠️ LID صاحب الطلب لم يُحل — سيُحفظ كمعرف مؤقت: ${resolvedOwner}`);
+                    whatsapp.queueLidForResolve(result.orderOwnerPhone);
+                  }
+                } catch (e) {
+                  resolvedOwner = resolvedOwner.split(':')[0].replace(/\D/g, '');
+                  logger.warn(`⚠️ فشل حل LID صاحب الطلب: ${e.message}`);
+                }
+              }
+            }
+          }
+          whatsapp.setOrderForReply(tamMessageId, resolvedOwner);
         }
         
         logger.info('💾 حفظ "تم"', { 
