@@ -532,6 +532,25 @@ const httpServer = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     }
+  } else if (req.url === '/force-sync-lids' || req.url === '/api/force-sync-lids') {
+    // مزامنة LID يدوياً لجميع الجروبات
+    try {
+      const syncResult = await whatsapp.syncGroupLids();
+      // إعادة تحميل أسماء المسجلين
+      await sheets.loadRegisteredUsers(true);
+      const unresolved = whatsapp.getUnresolvedLids ? whatsapp.getUnresolvedLids() : [];
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        success: true,
+        newLinks: syncResult.newLinks,
+        total: syncResult.total,
+        unresolvedCount: unresolved.length,
+        unresolved: unresolved.map(u => ({ name: u.pushName, lid: u.lid?.substring(0, 15) }))
+      }));
+    } catch(e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
   } else {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('AbuSaif Bot v4');

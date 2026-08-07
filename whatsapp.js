@@ -263,6 +263,21 @@ async function connect() {
               if (s && s.updateWhatsappName) {
                 s.updateWhatsappName(phoneNum, msg.pushName).catch(() => {});
               }
+            } else {
+              // لم يُحل عبر pushName — نحاول senderPn مباشرة من بيانات الرسالة
+              const rawSenderPn = msg.key?.senderPn || msg.key?.participantPn;
+              if (rawSenderPn) {
+                const pnJid = rawSenderPn.includes('@') ? rawSenderPn : `${rawSenderPn}@s.whatsapp.net`;
+                addLidMapping(senderJid, pnJid);
+                logger.info(`✅ ربط LID من senderPn مباشرة: ${msg.pushName} → ${pnJid}`);
+                if (s && s.updateWhatsappName) {
+                  const phoneNum = pnJid.replace('@s.whatsapp.net', '');
+                  s.updateWhatsappName(phoneNum, msg.pushName).catch(() => {});
+                }
+              } else {
+                // سجل الاسم غير المحلول للمراجعة اليدوية
+                logger.warn(`⚠️ LID غير محلول: ${msg.pushName}`, { lid: senderJid?.substring(0, 15) });
+              }
             }
           }
         }

@@ -216,19 +216,22 @@ function getRegisteredName(phone) {
 function findPhoneByName(pushName) {
   if (!pushName || pushName === 'غير معروف') return null;
 
-  // تطبيع النص العربي: حذف التشكيل وتوحيد الألف
+  // تطبيع النص العربي: حذف التشكيل وتوحيد الألف وحذف الألقاب
   function normalizeAr(s) {
     if (!s) return '';
     return s
       .trim()
       .toLowerCase()
+      // حذف الألقاب الشائعة في أسماء واتساب (ك., كابتن, أبو, أم, ابو, ام)
+      .replace(/^(ك\.|كابتن|أبو|ابو|أم|ام|د\.|دكتور|k\.|capt\.?|captain|dr\.?|mr\.?|ms\.?|mrs\.?)\s+/i, '')
       .replace(/[ً-ٰٟ]/g, '')           // حذف التشكيل
       .replace(/[آأإٱ]/g, 'ا')         // توحيد الألف
       .replace(/ة/g, 'ه')              // تاء مربوطة
       .replace(/ى/g, 'ي')              // ألف مقصورة
       .replace(/وو/g, 'و')             // واو مضاعف
       .replace(/يي/g, 'ي')             // ياء مضاعف
-      .replace(/\s+/g, ' ');          // مسافات متعددة
+      .replace(/\s+/g, ' ')          // مسافات متعددة
+      .trim();
   }
 
   const cleanName = normalizeAr(pushName);
