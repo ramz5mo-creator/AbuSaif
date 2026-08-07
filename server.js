@@ -367,9 +367,52 @@ const httpServer = http.createServer(async (req, res) => {
       }
     }
 
+    async function showMembersStatus() {
+      document.getElementById('content').innerHTML = '<div class="loading"><div class="spinner"></div> جاري جلب حالة الأعضاء...</div>';
+      let html = '<a class="back-btn" onclick="showGroups();return false;" href="#">&rarr; الرئيسية</a>';
+      html += '<h2 style="margin:20px 0 10px;color:#fff;font-size:20px;">👥 حالة أعضاء الجروبات</h2>';
+      html += '<p style="color:#888;font-size:13px;margin-bottom:20px;">🟢 رقم حقيقي &nbsp;|&nbsp; 🟡 LID محلول &nbsp;|&nbsp; 🔴 LID غير محلول</p>';
+      for(const g of GROUPS) {
+        html += '<h3 style="color:#f6ad55;margin:25px 0 10px;">' + g.prefix + '</h3>';
+        try {
+          const r = await fetch('/api/group-members?groupId=' + encodeURIComponent(g.id));
+          const members = await r.json();
+          if(!members.length) { html += '<p style="color:#888;">لا يوجد بيانات</p>'; continue; }
+          const real = members.filter(function(m){ return m.status === 'real'; });
+          const resolved = members.filter(function(m){ return m.status === 'resolved'; });
+          const unresolved = members.filter(function(m){ return m.status === 'unresolved'; });
+          html += '<div style="display:flex;gap:15px;margin-bottom:12px;flex-wrap:wrap;">';
+          html += '<span style="background:rgba(104,211,145,0.15);border:1px solid #68d391;border-radius:8px;padding:5px 12px;color:#68d391;font-size:13px;">🟢 رقم حقيقي: ' + real.length + '</span>';
+          html += '<span style="background:rgba(246,173,85,0.15);border:1px solid #f6ad55;border-radius:8px;padding:5px 12px;color:#f6ad55;font-size:13px;">🟡 LID محلول: ' + resolved.length + '</span>';
+          html += '<span style="background:rgba(245,101,101,0.15);border:1px solid #fc8181;border-radius:8px;padding:5px 12px;color:#fc8181;font-size:13px;">🔴 LID غير محلول: ' + unresolved.length + '</span>';
+          html += '<span style="background:rgba(160,174,192,0.15);border:1px solid #a0aec0;border-radius:8px;padding:5px 12px;color:#a0aec0;font-size:13px;">المجموع: ' + members.length + '</span>';
+          html += '</div>';
+          html += '<table class="data-table"><thead><tr><th>الاسم</th><th>الهاتف / LID</th><th>الحالة</th></tr></thead><tbody>';
+          const sorted = members.slice().sort(function(a,b){
+            const order = {unresolved:0, resolved:1, real:2};
+            return (order[a.status]||0) - (order[b.status]||0);
+          });
+          for(let i=0;i<sorted.length;i++) {
+            const m = sorted[i];
+            const statusIcon = m.status==='real' ? '🟢' : m.status==='resolved' ? '🟡' : '🔴';
+            const statusText = m.status==='real' ? 'رقم حقيقي' : m.status==='resolved' ? 'LID محلول' : 'LID غير محلول';
+            const phoneDisplay = m.phone || ((m.lid||'').substring(0,20)+'...');
+            html += '<tr><td class="name">' + (m.pushName||'—') + '</td><td class="phone" style="direction:ltr;font-size:12px;">' + phoneDisplay + '</td><td>' + statusIcon + ' ' + statusText + '</td></tr>';
+          }
+          html += '</tbody></table>';
+        } catch(e) {
+          html += '<p style="color:#fc8181;">خطأ في جلب البيانات: ' + e.message + '</p>';
+        }
+      }
+      document.getElementById('content').innerHTML = html;
+    }
+
     function showGroups() {
       let html = '<p class="page-title">اختر جروباً لعرض بياناته</p>';
-      html += '<div style="margin-bottom:20px;"><a class="back-btn" onclick="showLinkLid();return false;" href="#" style="background:rgba(102,126,234,0.15);border-color:rgba(102,126,234,0.4);">\uD83D\uDD17 ربط LID للأرقام</a></div>';
+      html += '<div style="margin-bottom:20px;display:flex;gap:10px;flex-wrap:wrap;">';
+      html += '<a class="back-btn" onclick="showLinkLid();return false;" href="#" style="background:rgba(102,126,234,0.15);border-color:rgba(102,126,234,0.4);">\uD83D\uDD17 ربط LID للأرقام</a>';
+      html += '<a class="back-btn" onclick="showMembersStatus();return false;" href="#" style="background:rgba(104,211,145,0.15);border-color:rgba(104,211,145,0.4);color:#68d391;">👥 حالة الأعضاء</a>';
+      html += '</div>';
       html += '<div class="groups-grid">';
       for(const g of GROUPS) {
         const cls = getCardClass(g.name);

@@ -938,26 +938,53 @@ async function getGroupMembersWithLidStatus(groupId) {
   try {
     const metadata = await sock.groupMetadata(groupId);
     const participants = metadata?.participants || [];
-    const sheets = getSheets();
+    const sheetsModule = getSheets();
     const result = [];
     for (const p of participants) {
-      const lid = p.lid || p.id || '';
-      if (!lid.includes('@lid')) continue;
-      // هل هذا LID محلول؟
-      const resolvedJid = lidToPhoneMap.get(lid);
-      const resolvedPhone = resolvedJid ? resolvedJid.replace('@s.whatsapp.net', '') : null;
-      // اسم من ورقة المسجلين
-      const name = resolvedPhone && sheets ? (sheets.getRegisteredName(resolvedPhone) || '') : '';
+      const jid = p.id || '';
+      const lid = p.lid || '';
+      const isLid = jid.includes('@lid') || lid.includes('@lid');
+      const effectiveLid = lid.includes('@lid') ? lid : (jid.includes('@lid') ? jid : null);
+      
       // pushName من messageCache
-      let pushName = '';
-      for (const [, msg] of messageCache.entries()) {
-        const k = msg.key || {};
-        if ((k.participant === lid) && msg.pushName) {
-          pushName = msg.pushName;
-          break;
+      let pushName = p.notify || '';
+      if (!pushName) {
+        for (const [, msg] of messageCache.entries()) {
+          const k = msg.key || {};
+          const sender = k.participant || k.remoteJid || '';
+          if ((sender === jid || sender === lid || sender === effectiveLid) && msg.pushName) {
+            pushName = msg.pushName;
+            break;
+          }
         }
       }
-      result.push({ lid, resolvedPhone, name, pushName, resolved: !!resolvedPhone });
+      
+      if (isLid && effectiveLid) {
+        // عضو يرسل كـ LID
+        const resolvedJid = lidToPhoneMap.get(effectiveLid);
+        const resolvedPhone = resolvedJid ? resolvedJid.replace('@s.whatsapp.net', '') : null;
+        const name = resolvedPhone && sheetsModule ? (sheetsModule.getRegisteredName(resolvedPhone) || '') : '';
+        result.push({
+          lid: effectiveLid,
+          phone: resolvedPhone || null,
+          name: name || pushName,
+          pushName,
+          resolved: !!resolvedPhone,
+          status: resolvedPhone ? 'resolved' : 'unresolved'
+        });
+      } else if (jid.includes('@s.whatsapp.net')) {
+        // عضو برقم حقيقي
+        const phone = jid.replace('@s.whatsapp.net', '');
+        const name = sheetsModule ? (sheetsModule.getRegisteredName(phone) || '') : '';
+        result.push({
+          lid: null,
+          phone,
+          name: name || pushName,
+          pushName,
+          resolved: true,
+          status: 'real'
+        });
+      }
     }
     return result;
   } catch(e) {
