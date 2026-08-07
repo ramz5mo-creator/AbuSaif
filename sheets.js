@@ -215,30 +215,76 @@ function getRegisteredName(phone) {
  */
 function findPhoneByName(pushName) {
   if (!pushName || pushName === 'غير معروف') return null;
-  const cleanName = pushName.trim().toLowerCase();
-  
+
+  // تطبيع النص العربي: حذف التشكيل وتوحيد الألف
+  function normalizeAr(s) {
+    if (!s) return '';
+    return s
+      .trim()
+      .toLowerCase()
+      .replace(/[ً-ٰٟ]/g, '')           // حذف التشكيل
+      .replace(/[آأإٱ]/g, 'ا')         // توحيد الألف
+      .replace(/ة/g, 'ه')              // تاء مربوطة
+      .replace(/ى/g, 'ي')              // ألف مقصورة
+      .replace(/وو/g, 'و')             // واو مضاعف
+      .replace(/يي/g, 'ي')             // ياء مضاعف
+      .replace(/\s+/g, ' ');          // مسافات متعددة
+  }
+
+  const cleanName = normalizeAr(pushName);
+  if (!cleanName) return null;
+  const nameWords = cleanName.split(' ').filter(w => w.length > 1);
+
   // مساعد: استخراج الأسماء من الكاش (سواء string أو object)
   function getNames(entry) {
     if (!entry) return [];
-    if (typeof entry === 'string') return [entry.trim().toLowerCase()].filter(Boolean);
+    if (typeof entry === 'string') return [normalizeAr(entry)].filter(Boolean);
     return [
-      (entry.name || '').trim().toLowerCase(),
-      (entry.whatsappName || '').trim().toLowerCase()
+      normalizeAr(entry.name || ''),
+      normalizeAr(entry.whatsappName || '')
     ].filter(Boolean);
   }
-  
-  // 1. بحث مطابق تماماً في أي من العمودين
+
+  // 1. مطابقة تامة (بعد التطبيع)
   for (const [phone, entry] of registeredUsersCache.entries()) {
     const names = getNames(entry);
     if (names.some(n => n === cleanName)) return phone;
   }
-  
+
   // 2. بحث جزئي (الاسم يحتوي على pushName أو العكس)
   for (const [phone, entry] of registeredUsersCache.entries()) {
     const names = getNames(entry);
     if (names.some(n => n.includes(cleanName) || cleanName.includes(n))) return phone;
   }
-  
+
+  // 3. مطابقة على مستوى الكلمات (أي كلمتين مشتركتين)
+  if (nameWords.length >= 2) {
+    for (const [phone, entry] of registeredUsersCache.entries()) {
+      const names = getNames(entry);
+      for (const n of names) {
+        const nWords = n.split(' ').filter(w => w.length > 1);
+        const commonWords = nameWords.filter(w => nWords.includes(w));
+        if (commonWords.length >= 2) return phone;
+      }
+    }
+  }
+
+  // 4. مطابقة أول كلمتين (الاسم الأول + الثاني)
+  if (nameWords.length >= 1) {
+    const firstWord = nameWords[0];
+    if (firstWord.length >= 3) {
+      for (const [phone, entry] of registeredUsersCache.entries()) {
+        const names = getNames(entry);
+        for (const n of names) {
+          const nWords = n.split(' ').filter(w => w.length > 1);
+          if (nWords.some(w => w === firstWord || w.startsWith(firstWord) || firstWord.startsWith(w))) {
+            return phone;
+          }
+        }
+      }
+    }
+  }
+
   return null;
 }
 

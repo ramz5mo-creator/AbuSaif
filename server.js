@@ -612,10 +612,14 @@ async function start() {
       const remoteJid = msg.key.remoteJid;
       const orderOwnerPhone = result.orderOwnerPhone || result.quotedPhone || null;
 
-      // === قاعدة: إذا وضع شخص إيموجي على رسالته هو نفسه → تجاهل ===
-      if (orderOwnerPhone && producerPhone) {
+      // === قاعدة: إذا وضع شخص إيموجي على رسالته هو نفسه → تجاهل
+      // ملاحظة: هذا ينطبق فقط عندما يضع شخص إيموجي على رسالته الأصلية
+      // وليس عندما يضع شخص إيموجي على رسالة "تم" الخاصة برده على طلب شخص آخر
+      const _producerFromOrderEarly = quotedMsgId ? whatsapp.getOrderByReplyId(quotedMsgId) : null;
+      const _realOwner = _producerFromOrderEarly || orderOwnerPhone;
+      if (_realOwner && producerPhone) {
         const cleanProducer = producerPhone.replace(/\D/g, '');
-        const cleanOwner = orderOwnerPhone.replace(/\D/g, '');
+        const cleanOwner = _realOwner.replace(/\D/g, '');
         if (cleanProducer === cleanOwner ||
             (cleanProducer.length >= 9 && cleanOwner.length >= 9 &&
              cleanProducer.slice(-9) === cleanOwner.slice(-9))) {
@@ -632,15 +636,52 @@ async function start() {
       const groupInfo = targetGroups.find(g => g.id === remoteJid);
       const groupPrefix = groupInfo ? groupInfo.prefix : '';
 
-      // الكابتن: من tamCache أو من بيانات الرسالة
-      const captainPhone = await findCaptainPhone(
-        quotedMsgId,
-        orderOwnerPhone
-      );
-      
-      // صاحب الطلب الحقيقي: من orderCache أولاً (الأدق)، ثم من بيانات الرسالة
-      // عندما يضع شخص إيموجي على رسالة الكابتن التي رد فيها بـ"تم"
-      const realProducerPhone = whatsapp.getOrderByReplyId(quotedMsgId) || orderOwnerPhone;
+            // ====================================================
+      // تحديد الكابتن وصاحب الطلب بشكل صحيح
+      // الحالة 1: الإيموجي على رسالة "تم" مباشرة
+      //   - quotedMsgId موجود في tamCache → الكابتن معروف
+      //   - orderCache[quotedMsgId] موجود → صاحب الطلب معروف
+      // الحالة 2: الإيموجي على رسالة الطلب مباشرة
+      //   - quotedMsgId ليس في tamCache → واضع الإيموجي هو الكابتن
+      //   - orderOwnerPhone = صاحب الرسالة (المنتج)
+      // ====================================================
+
+      // أولاً: هل الإيموجي على رسالة "تم"?
+      const captainFromTam = quotedMsgId ? whatsapp.getCaptainByMessageId(quotedMsgId) : null;
+      // صاحب الطلب من orderCache (مربوط بـ id رسالة "تم")
+      const producerFromOrder = quotedMsgId ? whatsapp.getOrderByReplyId(quotedMsgId) : null;
+
+      let captainPhone, realProducerPhone;
+
+      if (captainFromTam) {
+        // الحالة 1: الإيموجي على رسالة "تم"
+        // الكابتن = من tamCache
+        // صاحب الطلب = من orderCache أو orderOwnerPhone
+        captainPhone = captainFromTam;
+        realProducerPhone = producerFromOrder || orderOwnerPhone;
+        logger.info('📌 حالة 1: إيموجي على رسالة تم', {
+          captain: captainPhone, producer: realProducerPhone, qty: quantity
+        });
+      } else {
+        // الحالة 2: الإيموجي على رسالة الطلب مباشرة
+        // واضع الإيموجي = الكابتن (producerPhone)
+        // صاحب الرسالة = المنتج (orderOwnerPhone)
+        captainPhone = producerPhone; // واضع الإيموجي هو الكابتن
+        realProducerPhone = orderOwnerPhone; // صاحب الرسالة هو المنتج
+        // فحص tamCache بطريقة بديلة (Sheet)
+        const captainFromSheet = quotedMsgId ? await sheets.getCaptainFromTamSheet(quotedMsgId) : null;
+        if (captainFromSheet) {
+          captainPhone = captainFromSheet;
+          realProducerPhone = producerFromOrder || orderOwnerPhone;
+          logger.info('📌 حالة 1b: إيموجي على رسالة تم (من Sheet)', {
+            captain: captainPhone, producer: realProducerPhone, qty: quantity
+          });
+        } else {
+          logger.info('📌 حالة 2: إيموجي على رسالة طلب مباشرة', {
+            captain: captainPhone, producer: realProducerPhone, qty: quantity
+          });
+        }
+      }
 
       if (result.type === 'accept') {
         // === فحص هل هذا تعديل (إيموجي جديد على نفس الرسالة المسجلة سابقاً) ===
