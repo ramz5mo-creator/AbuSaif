@@ -198,6 +198,11 @@ async function connect() {
     const s = getSheets();
     if (s && s.loadRegisteredUsers) s.loadRegisteredUsers(true).catch(() => {});
   }, 10 * 60 * 1000);
+  
+  // بدء الحل التلقائي للـ LIDs بعد 60 ثانية (انتظار استقرار الاتصال)
+  setTimeout(() => {
+    startAutoResolveLids().catch(e => logger.debug('startAutoResolveLids error', { error: e.message }));
+  }, 60 * 1000);
 }
     });
 
@@ -295,6 +300,8 @@ async function connect() {
               } else {
                 // سجل الاسم غير المحلول للمراجعة اليدوية
                 logger.warn(`⚠️ LID غير محلول: ${msg.pushName}`, { lid: senderJid?.substring(0, 15) });
+                // إضافة LID لقائمة الحل التلقائي
+                queueLidForResolve(senderJid);
                 // محاولة أخيرة 1: جلب بيانات العضو من groupMetadata مباشرة
                 if (sock && remoteJid && senderJid && senderJid.includes('@lid')) {
                   (async () => {
@@ -997,6 +1004,110 @@ function getCacheStats() {
   return { messageCache: messageCache.size, tamCache: tamCache.size, lidMap: lidToPhoneMap.size };
 }
 
+// ====================================================
+// الحل التلقائي للـ LIDs (دفعات آمنة)
+// ====================================================
+
+// قائمة انتظار LIDs غير المحلولة
+const _lidResolveQueue = new Set();
+let _autoResolveRunning = false;
+
+/**
+ * إضافة LID لقائمة الحل التلقائي
+ */
+function queueLidForResolve(lid) {
+  if (!lid || !lid.includes('@lid')) return;
+  if (lidToPhoneMap.has(lid)) return; // محلول بالفعل
+  _lidResolveQueue.add(lid);
+}
+
+/**
+ * تشغيل الحل التلقائي للـ LIDs بدفعات آمنة
+ * 10 LIDs كل 30 ثانية لتجنب الحظر
+ */
+async function autoResolveLidsBatch() {
+  if (_autoResolveRunning) return;
+  if (!sock) return;
+  if (_lidResolveQueue.size === 0) return;
+  
+  _autoResolveRunning = true;
+  const BATCH_SIZE = 10;
+  const batch = [];
+  
+  for (const lid of _lidResolveQueue) {
+    if (batch.length >= BATCH_SIZE) break;
+    if (!lidToPhoneMap.has(lid)) { // تأكد أنه لا يزال غير محلول
+      batch.push(lid);
+    } else {
+      _lidResolveQueue.delete(lid); // حُل بطريقة أخرى
+    }
+  }
+  
+  if (batch.length === 0) {
+    _autoResolveRunning = false;
+    return;
+  }
+  
+  logger.info(`🤖 autoResolve: محاولة حل ${batch.length} LID من ${_lidResolveQueue.size} في الانتظار`);
+  let resolved = 0;
+  
+  for (const lid of batch) {
+    try {
+      const result = await resolveLidDirect(lid);
+      if (result) {
+        resolved++;
+        _lidResolveQueue.delete(lid);
+        logger.info(`✅ autoResolve: ${lid.substring(0,15)} → ${result.split('@')[0]}`);
+      } else {
+        // فشل — احتفظ به في القائمة لمحاولة لاحقة
+      }
+    } catch(e) {
+      logger.debug(`autoResolve فشل: ${lid.substring(0,15)}`, { error: e.message });
+    }
+    // تأخير 500ms بين كل LID لتجنب الضغط
+    await new Promise(r => setTimeout(r, 500));
+  }
+  
+  if (resolved > 0) saveLidMapDebounced();
+  logger.info(`🤖 autoResolve: ${resolved}/${batch.length} تم حلها | متبقي: ${_lidResolveQueue.size}`);
+  _autoResolveRunning = false;
+}
+
+/**
+ * تهيئة الحل التلقائي: تشغيل كل 30 ثانية + تحميل LIDs من الجروبات عند البدء
+ */
+async function startAutoResolveLids() {
+  // تحميل LIDs غير المحلولة من جميع الجروبات
+  const targetGroups = config.whatsapp.targetGroups || [];
+  let queued = 0;
+  for (const group of targetGroups) {
+    try {
+      const metadata = await sock.groupMetadata(group.id);
+      if (!metadata?.participants) continue;
+      for (const p of metadata.participants) {
+        // عضو يظهر كـ LID فقط
+        if (p.id?.includes('@lid') && !lidToPhoneMap.has(p.id)) {
+          _lidResolveQueue.add(p.id);
+          queued++;
+        }
+        // عضو له lid لكن لم يُربط بعد
+        if (p.lid && !p.id?.includes('@s.whatsapp.net') && !lidToPhoneMap.has(p.lid)) {
+          _lidResolveQueue.add(p.lid);
+          queued++;
+        }
+      }
+    } catch(e) {
+      logger.debug(`startAutoResolveLids: فشل جلب ${group.name}`, { error: e.message });
+    }
+  }
+  logger.info(`🤖 autoResolve: ${queued} LID في قائمة الانتظار`);
+  
+  // تشغيل دفعة كل 30 ثانية
+  setInterval(autoResolveLidsBatch, 30 * 1000);
+  // تشغيل أول دفعة بعد 10 ثوانٍ من البدء
+  setTimeout(autoResolveLidsBatch, 10 * 1000);
+}
+
 /**
  * إرجاع قائمة الليد غير المحلولة مع pushName من messageCache
  */
@@ -1093,4 +1204,6 @@ module.exports = {
   getGroupMembersWithLidStatus,
   getLidToPhoneMap,
   getMessageCache,
+  queueLidForResolve,
+  startAutoResolveLids,
 };
