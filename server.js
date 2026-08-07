@@ -297,8 +297,80 @@ const httpServer = http.createServer(async (req, res) => {
       return '📊';
     }
 
+    async function showLinkLid() {
+      document.getElementById('content').innerHTML = '<div class="loading"><div class="spinner"></div> جاري جلب بيانات الربط...</div>';
+      const res = await fetch('/api/registered-lid-status');
+      const registered = await res.json();
+      const unresolved = registered.filter(r => !r.resolved);
+      const resolved = registered.filter(r => r.resolved);
+      let html = '<a class="back-btn" onclick="showGroups();return false;" href="#">&rarr; الرئيسية</a>';
+      html += '<h2 style="margin:20px 0 10px;color:#fff;font-size:20px;">🔗 ربط LID يدوياً</h2>';
+      html += '<p style="color:#888;font-size:13px;margin-bottom:20px;">الأشخاص الذين لم يُربط رقمهم بعد — عند وضع إيموجي على ردودهم لن يُسجَّل الانتاج لهم</p>';
+      if(!unresolved.length) {
+        html += '<div style="background:rgba(104,211,145,0.1);border:1px solid rgba(104,211,145,0.3);border-radius:12px;padding:20px;text-align:center;color:#68d391;">✅ جميع المسجلين مربوطون بـ LID</div>';
+      } else {
+        html += '<div style="background:rgba(245,101,101,0.1);border:1px solid rgba(245,101,101,0.3);border-radius:12px;padding:16px;margin-bottom:20px;">';
+        html += '<span style="color:#fc8181;font-weight:700;">' + unresolved.length + ' شخص غير مربوط</span>';
+        html += '<span style="color:#888;font-size:13px;margin-right:10px;">— أدخل رقم الهاتف لكل شخص لربطه</span></div>';
+        html += '<table class="data-table"><thead><tr><th>الاسم</th><th>الهاتف</th><th>رقم الهاتف (للربط)</th><th></th></tr></thead><tbody>';
+        for(const r of unresolved) {
+          html += '<tr id="row-' + r.phone + '">';
+          html += '<td class="name">' + r.name + '</td>';
+          html += '<td class="phone">' + r.phone + '</td>';
+          html += '<td><input id="inp-' + r.phone + '" type="text" placeholder="مثال: 962778793241" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);border-radius:6px;padding:6px 10px;color:#fff;width:200px;font-size:13px;direction:ltr;"></td>';
+          html += '<td><button onclick="linkLid(\'' + r.phone + '\')" style="background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;border:none;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px;">ربط</button></td>';
+          html += '</tr>';
+        }
+        html += '</tbody></table>';
+      }
+      if(resolved.length) {
+        html += '<h3 style="margin:30px 0 15px;color:#68d391;font-size:16px;">✅ مربوطون (' + resolved.length + ')</h3>';
+        html += '<table class="data-table"><thead><tr><th>الاسم</th><th>الهاتف</th><th>LID</th></tr></thead><tbody>';
+        for(const r of resolved) {
+          html += '<tr><td class="name">' + r.name + '</td><td class="phone">' + r.phone + '</td><td style="color:#888;font-size:11px;direction:ltr;">' + (r.lid||'').substring(0,20) + '...</td></tr>';
+        }
+        html += '</tbody></table>';
+      }
+      document.getElementById('content').innerHTML = html;
+    }
+
+    async function linkLid(phone) {
+      const inp = document.getElementById('inp-' + phone);
+      const fullPhone = (inp.value || '').trim().replace(/[^0-9]/g, '');
+      if(!fullPhone || fullPhone.length < 9) { alert('أدخل رقم هاتف صحيح'); return; }
+      // البحث عن LID في أعضاء الجروب
+      let lid = null;
+      for(const g of GROUPS) {
+        const res2 = await fetch('/api/group-members?groupId=' + encodeURIComponent(g.id));
+        const members = await res2.json();
+        for(const m of members) {
+          if(!m.resolved && m.pushName) {
+            // نحاول مطابقة pushName مع اسم الشخص
+            const row = document.getElementById('row-' + phone);
+            const nameCell = row ? row.cells[0].textContent : '';
+            if(m.pushName.includes(nameCell.trim()) || nameCell.includes(m.pushName.trim())) {
+              lid = m.lid;
+              break;
+            }
+          }
+        }
+        if(lid) break;
+      }
+      // ربط مباشر برقم الهاتف
+      const res3 = await fetch('/api/link-lid?lid=' + encodeURIComponent(lid || 'manual-' + phone) + '&phone=' + encodeURIComponent(fullPhone), { method: 'POST' });
+      const data = await res3.json();
+      if(data.ok || data.lid) {
+        const row = document.getElementById('row-' + phone);
+        if(row) { row.style.opacity='0.4'; row.cells[3].innerHTML = '<span style="color:#68d391;">✅ تم الربط</span>'; }
+      } else {
+        alert('فشل الربط: ' + (data.error || 'خطأ غير معروف'));
+      }
+    }
+
     function showGroups() {
-      let html = '<p class="page-title">اختر جروباً لعرض بياناته</p><div class="groups-grid">';
+      let html = '<p class="page-title">اختر جروباً لعرض بياناته</p>';
+      html += '<div style="margin-bottom:20px;"><a class="back-btn" onclick="showLinkLid();return false;" href="#" style="background:rgba(102,126,234,0.15);border-color:rgba(102,126,234,0.4);">\uD83D\uDD17 ربط LID للأرقام</a></div>';
+      html += '<div class="groups-grid">';
       for(const g of GROUPS) {
         const cls = getCardClass(g.name);
         html += \`<a class="group-card \${cls}" onclick="showDays('\${g.prefix}','\${g.name}');return false;" href="#">
@@ -420,6 +492,26 @@ const httpServer = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: e.message }));
       }
     });
+  } else if (req.url.startsWith('/api/group-members')) {
+    const urlObj = new URL(req.url, 'http://localhost');
+    const groupId = urlObj.searchParams.get('groupId') || '';
+    try {
+      const members = await whatsapp.getGroupMembersWithLidStatus(groupId);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(members));
+    } catch(e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
+  } else if (req.url === '/api/registered-lid-status') {
+    try {
+      const status = whatsapp.getRegisteredLidStatus ? whatsapp.getRegisteredLidStatus() : [];
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(status));
+    } catch(e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
   } else if (req.url === '/api/unresolved-lids') {
     try {
       const unresolvedMap = whatsapp.getUnresolvedLids ? whatsapp.getUnresolvedLids() : [];

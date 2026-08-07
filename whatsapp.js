@@ -725,6 +725,67 @@ function resolvePhoneByPushName(pushName) {
   return null;
 }
 
+/**
+ * جلب حالة ربط LID لجميع المسجلين
+ * يُرجع: { phone, name, lid, resolved }
+ */
+function getRegisteredLidStatus() {
+  const sheets = getSheets();
+  if (!sheets || !sheets.getAllRegistered) return [];
+  const all = sheets.getAllRegistered();
+  const result = [];
+  for (const { phone, name } of all) {
+    const jid = `${phone}@s.whatsapp.net`;
+    // البحث عن LID مرتبط بهذا الرقم
+    let lid = null;
+    for (const [l, p] of lidToPhoneMap.entries()) {
+      const pNum = p.replace('@s.whatsapp.net', '');
+      if (pNum === phone || pNum.slice(-9) === phone.slice(-9)) {
+        lid = l;
+        break;
+      }
+    }
+    result.push({ phone, name, lid, resolved: !!lid });
+  }
+  return result;
+}
+
+/**
+ * جلب جميع أعضاء الجروب مع LID وحالة الربط
+ */
+async function getGroupMembersWithLidStatus(groupId) {
+  if (!sock) return [];
+  try {
+    const metadata = await sock.groupMetadata(groupId);
+    const participants = metadata?.participants || [];
+    const sheets = getSheets();
+    const result = [];
+    for (const p of participants) {
+      const lid = p.lid || p.id || '';
+      if (!lid.includes('@lid')) continue;
+      // هل هذا LID محلول؟
+      const resolvedJid = lidToPhoneMap.get(lid);
+      const resolvedPhone = resolvedJid ? resolvedJid.replace('@s.whatsapp.net', '') : null;
+      // اسم من ورقة المسجلين
+      const name = resolvedPhone && sheets ? (sheets.getRegisteredName(resolvedPhone) || '') : '';
+      // pushName من messageCache
+      let pushName = '';
+      for (const [, msg] of messageCache.entries()) {
+        const k = msg.key || {};
+        if ((k.participant === lid) && msg.pushName) {
+          pushName = msg.pushName;
+          break;
+        }
+      }
+      result.push({ lid, resolvedPhone, name, pushName, resolved: !!resolvedPhone });
+    }
+    return result;
+  } catch(e) {
+    logger.warn('فشل جلب أعضاء الجروب', { error: e.message });
+    return [];
+  }
+}
+
 function getCacheStats() {
   return { messageCache: messageCache.size, tamCache: tamCache.size, lidMap: lidToPhoneMap.size };
 }
@@ -811,4 +872,6 @@ module.exports = {
   resolvePhoneByPushName,
   syncGroupLids,
   getUnresolvedLids,
+  getRegisteredLidStatus,
+  getGroupMembersWithLidStatus,
 };

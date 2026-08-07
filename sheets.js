@@ -1573,6 +1573,19 @@ async function saveDeletedMessage(data) {
   }
 }
 
+/**
+ * جلب جميع المسجلين كمصفوفة { phone, name, whatsappName }
+ */
+function getAllRegistered() {
+  const result = [];
+  for (const [phone, entry] of registeredUsersCache.entries()) {
+    const name = typeof entry === 'string' ? entry : (entry.name || entry.whatsappName || '');
+    const whatsappName = typeof entry === 'object' ? (entry.whatsappName || '') : '';
+    result.push({ phone, name, whatsappName });
+  }
+  return result.sort((a, b) => a.name.localeCompare(b.name, 'ar'));
+}
+
 module.exports = {
   initialize,
   loadSettings,
@@ -1580,6 +1593,7 @@ module.exports = {
   loadRegisteredUsers,
   getRegisteredName,
   findPhoneByName,
+  getAllRegistered,
   updateWhatsappName,
   // الورقة اليومية
   updateTotalsProduction,
