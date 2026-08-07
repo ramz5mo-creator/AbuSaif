@@ -436,6 +436,71 @@ async function updateLidInRegistered(phone, lid) {
  */
 function getRegisteredLidMap() { return registeredLidToPhone; }
 
+/**
+ * تسجيل عضو جديد تلقائياً في ورقة المسجلين عند انضمامه للجروب
+ * يُضيف رقم الهاتف فقط (بدون اسم) ليملأه المشرف لاحقاً
+ * @param {string} jid - JID العضو (phone@s.whatsapp.net أو LID@lid)
+ * @param {string} pushName - اسم واتساب (اختياري)
+ * @param {string} groupName - اسم الجروب
+ * @returns {boolean} صحيح إذا تم التسجيل
+ */
+async function addNewMemberToRegistered(jid, pushName = '', groupName = '') {
+  if (!isInitialized || !jid) return false;
+  
+  // استخراج رقم الهاتف
+  let phone = '';
+  let lid = '';
+  
+  if (jid.includes('@s.whatsapp.net')) {
+    phone = normalizePhone(jid.split('@')[0]);
+  } else if (jid.includes('@lid')) {
+    lid = jid;
+    // محاولة حل LID من الخريطة الحالية
+    const resolved = resolvePhoneFromRegistered(lid);
+    if (resolved) phone = resolved;
+  }
+  
+  if (!phone && !lid) return false;
+  
+  // تحقق من عدم وجوده مسبقاً
+  if (phone && registeredUsersCache.has(phone)) return false; // مسجل بالفعل
+  
+  const sheetName = config.sheets.sheetNames.registeredUsers || 'المسجلين';
+  try {
+    // إضافة صف جديد: رقم الهاتف | فارغ (للاسم) | اسم واتساب | LID
+    const row = [
+      phone ? `962${phone}` : '',  // عمود A: رقم الهاتف بمفتاح الدولة
+      '',                           // عمود B: الاسم الرسمي (يملأه المشرف)
+      pushName || '',               // عمود C: اسم واتساب
+      lid || '',                    // عمود D: LID
+    ];
+    
+    await sheetsApi.spreadsheets.values.append({
+      spreadsheetId,
+      range: `'${sheetName}'!A:D`,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: [row] },
+    });
+    
+    // تحديث الكاش محلياً
+    if (phone) {
+      registeredUsersCache.set(phone, { name: '', whatsappName: pushName || '', lid: lid || '' });
+      if (lid) {
+        registeredLidToPhone.set(lid, phone);
+        const base = lid.split(':')[0];
+        if (base !== lid) registeredLidToPhone.set(base + '@lid', phone);
+      }
+    }
+    
+    logger.info(`👤 عضو جديد: ${phone || lid.substring(0,15)} في ${groupName} — تم التسجيل تلقائياً`);
+    return true;
+  } catch (error) {
+    logger.debug('فشل تسجيل عضو جديد', { error: error.message });
+    return false;
+  }
+}
+
 // ====================================================
 // الورقة اليومية — كل يوم ورقة منفصلة
 // ====================================================
@@ -2475,4 +2540,5 @@ module.exports = {
   resolvePhoneFromRegistered,
   updateLidInRegistered,
   getRegisteredLidMap,
+  addNewMemberToRegistered,
 };

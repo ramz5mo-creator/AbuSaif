@@ -398,8 +398,58 @@ async function connect() {
       
       logger.info(`👥 حدث جروب: ${action} | عدد: ${participants.length}`);
       
-      if (action === 'add' || action === 'promote' || action === 'demote') {
-        // عضو جديد — تحديث القائمة وحل LID
+      if (action === 'add') {
+        // عضو جديد — تسجيل تلقائي + حل LID
+        const groupName = targetGroups.find(g => g.id === groupId)?.name || groupId;
+        setTimeout(async () => {
+          try {
+            const meta = await sock.groupMetadata(groupId);
+            if (!meta?.participants) return;
+            const sheets = getSheets();
+            for (const p of meta.participants) {
+              if (!participants.includes(p.id) && !participants.includes(p.lid)) continue;
+              const pId = p.id || '';
+              const pLid = p.lid || '';
+              
+              if (pLid && pId.includes('@s.whatsapp.net')) {
+                // رقم حقيقي + LID — حفظ الربط
+                lidToPhoneMap.set(pLid, pId);
+                const base = pLid.split(':')[0];
+                if (base !== pLid) lidToPhoneMap.set(base + '@lid', pId);
+                // تسجيل تلقائي في ورقة المسجلين
+                if (sheets?.addNewMemberToRegistered) {
+                  await sheets.addNewMemberToRegistered(pId, p.notify || '', groupName);
+                  // ربط LID بالرقم في عمود D
+                  const phone9 = pId.split('@')[0].replace(/\D/g,'').slice(-9);
+                  if (sheets.updateLidInRegistered) await sheets.updateLidInRegistered(phone9, pLid);
+                }
+                logger.info(`✅ عضو جديد: ${pId.split('@')[0]} في ${groupName}`);
+              } else if (pId.includes('@lid') || pLid.includes('@lid')) {
+                const theLid = pLid.includes('@lid') ? pLid : pId;
+                queueLidForResolve(theLid);
+                // حل فوري
+                resolveLidDirect(theLid).then(async r => {
+                  if (r) {
+                    logger.info(`✅ عضو جديد (LID محلول): ${theLid.substring(0,15)} → ${r.split('@')[0]}`);
+                    if (sheets?.addNewMemberToRegistered) {
+                      await sheets.addNewMemberToRegistered(r, p.notify || '', groupName);
+                    }
+                  } else {
+                    // لم يُحل — سجل LID مؤقتاً
+                    if (sheets?.addNewMemberToRegistered) {
+                      await sheets.addNewMemberToRegistered(theLid, p.notify || '', groupName);
+                    }
+                  }
+                }).catch(() => {});
+              }
+            }
+            saveLidMapDebounced();
+          } catch(e) {
+            logger.debug('فشل تحديث بيانات العضو الجديد', { error: e.message });
+          }
+        }, 3000); // انتظر 3 ثوانٍ لاستقرار البيانات
+      } else if (action === 'promote' || action === 'demote') {
+        // تغيير دور — تحديث القائمة فقط
         setTimeout(async () => {
           try {
             const meta = await sock.groupMetadata(groupId);
@@ -412,20 +462,11 @@ async function connect() {
                 lidToPhoneMap.set(pLid, pId);
                 const base = pLid.split(':')[0];
                 if (base !== pLid) lidToPhoneMap.set(base + '@lid', pId);
-                logger.info(`✅ عضو جديد محلول: ${pLid.substring(0,15)} → ${pId.split('@')[0]}`);
-              } else if (pId.includes('@lid')) {
-                queueLidForResolve(pId);
-                // حل فوري
-                resolveLidDirect(pId).then(r => {
-                  if (r) logger.info(`✅ عضو جديد حل فوري: ${pId.substring(0,15)} → ${r.split('@')[0]}`);
-                }).catch(() => {});
               }
             }
             saveLidMapDebounced();
-          } catch(e) {
-            logger.debug('فشل تحديث بيانات العضو الجديد', { error: e.message });
-          }
-        }, 3000); // انتظر 3 ثوانٍ لاستقرار البيانات
+          } catch(e) {}
+        }, 3000);
       } else if (action === 'remove') {
         // عضو غادر — لا نحذف الربط (قد يعود)
         logger.info(`🚶 عضو غادر الجروب: ${participants[0]?.substring(0,15)}`);
