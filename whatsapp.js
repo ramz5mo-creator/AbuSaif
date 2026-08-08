@@ -1382,6 +1382,115 @@ async function collectAllUnresolvedLids() {
 }
 
 /**
+ * مزامنة شاملة لكل LID في جميع الجروبات
+ * - يحفظ LID ↔ رقم الهاتف إذا كان الرقم متاحاً
+ * - يضع LID غير المحلول في قائمة الانتظار
+ * - يحاول حل غير المحلول مباشرة
+ */
+async function syncAllLidsFull() {
+  if (!sock) {
+    return {
+      success: false,
+      message: 'واتساب غير متصل',
+      totalMembers: 0,
+      totalLids: 0,
+      resolved: 0,
+      unresolved: 0,
+      newLinks: 0
+    };
+  }
+
+  const targetGroups = config.whatsapp.targetGroups || [];
+  let totalMembers = 0;
+  let totalLids = 0;
+  let newLinks = 0;
+  let alreadyKnown = 0;
+  const unresolved = new Set();
+
+  logger.info(`🔄 بدء المزامنة الشاملة لـ LID — ${targetGroups.length} جروب`);
+
+  for (const group of targetGroups) {
+    try {
+      const metadata = await sock.groupMetadata(group.id);
+      if (!metadata?.participants) continue;
+      logger.info(`📋 ${group.name || group.id}: ${metadata.participants.length} عضو`);
+
+      for (const p of metadata.participants) {
+        totalMembers++;
+        const pId = p.id || '';
+        const pLid = p.lid || '';
+
+        // الحالة الأفضل: LID + رقم هاتف حقيقي
+        if (pLid.includes('@lid') && pId.includes('@s.whatsapp.net')) {
+          totalLids++;
+          const old = lidToPhoneMap.get(pLid);
+          if (old !== pId) {
+            addLidMapping(pLid, pId);
+            newLinks++;
+            logger.info(`✅ LID → رقم: ${pLid.split('@')[0]} → ${pId.split('@')[0]}`);
+          } else {
+            alreadyKnown++;
+          }
+          // حفظ النسخة بدون device/session
+          const base = pLid.split(':')[0];
+          if (base && base !== pLid.split('@')[0]) {
+            addLidMapping(`${base}@lid`, pId);
+          }
+          continue;
+        }
+
+        // العضو يظهر كـ LID فقط
+        const lidOnly = pId.includes('@lid') ? pId : (pLid.includes('@lid') ? pLid : '');
+        if (lidOnly) {
+          totalLids++;
+          if (!lidToPhoneMap.has(lidOnly)) {
+            unresolved.add(lidOnly);
+            queueLidForResolve(lidOnly);
+          }
+        }
+      }
+    } catch (e) {
+      logger.warn(`⚠️ فشل قراءة الجروب ${group.name || group.id}`, { error: e.message });
+    }
+  }
+
+  saveLidMapDebounced();
+  logger.info(`📊 المزامنة: أعضاء=${totalMembers} | LID=${totalLids} | جديد=${newLinks} | غير محلول=${unresolved.size}`);
+
+  // محاولة حل LIDs غير المحلولة
+  let resolvedNow = 0;
+  if (unresolved.size > 0) {
+    logger.info(`🔍 محاولة حل ${unresolved.size} LID غير محلول`);
+    for (const lid of unresolved) {
+      try {
+        const result = await resolveLidDirect(lid);
+        if (result && result.includes('@s.whatsapp.net')) {
+          resolvedNow++;
+          logger.info(`✅ تم حل LID: ${lid.split('@')[0]} → ${result.split('@')[0]}`);
+        }
+      } catch (e) {
+        logger.debug(`❌ فشل حل ${lid.split('@')[0]}`, { error: e.message });
+      }
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  }
+
+  saveLidMapDebounced();
+
+  return {
+    success: true,
+    totalMembers,
+    totalLids,
+    newLinks,
+    alreadyKnown,
+    attemptedResolve: unresolved.size,
+    resolvedNow,
+    resolved: totalLids - unresolved.size + resolvedNow,
+    unresolved: Math.max(0, unresolved.size - resolvedNow)
+  };
+}
+
+/**
  * نظام LID الشامل من 5 طبقات
  * الطبقة 1: حل عند البدء لجميع الأعضاء
  * الطبقة 2: Job كل 5 دقائق لإعادة المحاولة
@@ -1508,6 +1617,7 @@ module.exports = {
   getPushNameFromCachedMessage,
   resolvePhoneByPushName,
   syncGroupLids,
+  syncAllLidsFull,
   getUnresolvedLids,
   getRegisteredLidStatus,
   getGroupMembersWithLidStatus,

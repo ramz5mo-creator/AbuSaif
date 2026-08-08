@@ -575,6 +575,18 @@ const httpServer = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: e.message }));
     }
+  } else if (req.url === '/sync-all-lids' || req.url === '/api/sync-all-lids') {
+    // مزامنة LID شاملة لجميع الجروبات مع محاولة حل غير المحلول
+    try {
+      logger.info('🔄 طلب مزامنة LID شاملة');
+      const result = await whatsapp.syncAllLidsFull();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      logger.error('❌ فشل المزامنة الشاملة', { error: e.message });
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ success: false, error: e.message }));
+    }
   } else if (req.url === '/force-sync-lids' || req.url === '/api/force-sync-lids') {
     // مزامنة LID يدوياً لجميع الجروبات
     try {
