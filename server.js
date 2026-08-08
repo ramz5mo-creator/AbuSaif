@@ -1134,8 +1134,9 @@ async function start() {
           type: 'انتاج',
           emoji: result.text,
           groupPrefix,
+          messageId: quotedMsgId || '',
           status: 'نشط',
-          notes: `msgId:${quotedMsgId || ''}`
+          notes: 'reaction'
         }).catch(() => {});
 
       } else if (result.type === 'cancel') {
@@ -1233,7 +1234,9 @@ async function start() {
           return;
         }
 
-        if (existingTx.status === 'ملغى') {
+        const isCancelled = existingTx.transactionId?.startsWith('CANCELLED_') || 
+                             existingTx.notes?.includes('ملغى');
+        if (isCancelled) {
           // === حالة ب: استرجاع عملية ملغاة (إزالة ❌) ===
           const restorerPhone = producerPhone;
 
@@ -1531,8 +1534,9 @@ async function start() {
               type: 'استلام (رد)',
               emoji: '⌨️',
               groupPrefix: groupPrefix,
+              messageId: tamMessageId || '',
               status: 'نشط',
-              notes: `msgId:${tamMessageId}`
+              notes: 'reply'
             }).catch(() => {});
           } catch (error) {
             logger.error('فشل تسجيل رد كمي', { error: error.message });

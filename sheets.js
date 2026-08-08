@@ -1112,27 +1112,30 @@ async function cancelTransaction(targetId, supervisorPhone) {
     let transactionData = null;
 
     for (let i = rows.length - 1; i >= 1; i--) {
-      // مطابقة معرف العملية (A) أو معرف الرسالة (نخزنه في الملاحظات J أحياناً أو نبحث عنه)
-      // الأفضل: سنعدل سجل الحركات ليحتوي على معرف الرسالة في عمود منفصل مستقبلاً،
-      // حالياً نبحث في العمود A (معرف العملية) أو J (الملاحظات)
-      if (rows[i][0] === targetId || (rows[i][9] && rows[i][9].includes(targetId))) {
+      // مطابقة: معرف العملية (A) أو messageId في عمود I أو الملاحظات (J)
+      const txId = rows[i][0] || '';
+      const txMsgId = rows[i][8] || ''; // عمود I = messageId
+      const txNotes = rows[i][9] || ''; // عمود J = ملاحظات
+      const cleanTxId = txId.startsWith('CANCELLED_') ? txId.replace('CANCELLED_', '') : txId;
+      if (cleanTxId === targetId || txId === targetId || txMsgId === targetId || 
+          txMsgId.includes(targetId) || txNotes.includes(targetId)) {
         rowIndex = i + 1;
         transactionData = {
-          id: rows[i][0],
+          id: txId,
           time: new Date(rows[i][1]),
           producer: rows[i][2],
           captain: rows[i][3],
           qty: parseFloat(rows[i][4]),
           type: rows[i][5],
           prefix: rows[i][7],
-          status: rows[i][8]
+          isCancelled: txId.startsWith('CANCELLED_') || txNotes.includes('ملغى')
         };
         break;
       }
     }
 
     if (!transactionData) return { success: false, message: 'العملية غير موجودة' };
-    if (transactionData.status === 'ملغى') return { success: false, message: 'العملية ملغاة بالفعل' };
+    if (transactionData.isCancelled) return { success: false, message: 'العملية ملغاة بالفعل' };
 
     // 3. التحقق من الوقت (48 ساعة)
     const now = new Date();
@@ -1148,13 +1151,10 @@ async function cancelTransaction(targetId, supervisorPhone) {
     }
 
     // 5. تحديث حالة العملية في سجل الحركات
-    await sheetsApi.spreadsheets.values.update({
-      spreadsheetId,
-      range: `'${transSheet}'!I${rowIndex}:J${rowIndex}`,
-      valueInputOption: 'RAW',
-      requestBody: {
-        values: [['ملغى', `تم الإلغاء بواسطة ${supervisorPhone} في ${new Date().toLocaleString('ar-JO')}`]]
-      }
+    await updateTransactionStatus(rowIndex, {
+      status: 'ملغى',
+      quantity: 0, // تصفير الكمية في السجل أيضاً لتجنب الحسابات الخاطئة لاحقاً
+      notes: `تم الإلغاء بواسطة ${supervisorPhone} في ${new Date().toLocaleString('ar-JO')} | ملغى`
     });
 
     return { success: true, message: 'تم إلغاء العملية وتصفير القيم بنجاح' };
@@ -1177,8 +1177,8 @@ async function recordTransaction(transaction) {
     transaction.type || '',
     transaction.emoji || '',
     transaction.groupPrefix || '',
-    transaction.status || 'نشط',
-    transaction.notes || ''
+    transaction.messageId || transaction.status || 'نشط', // العمود I كان مخصص للحالة، الآن هو لمعرف الرسالة
+    transaction.notes || transaction.status || '' // العمود J للملاحظات، يمكننا حفظ الحالة فيه
   ];
 
   try {
@@ -1303,14 +1303,15 @@ async function findTransactionByMessageId(messageId, reactorPhone) {
       const row = rows[i];
       const rowId = row[0] || '';
       const rowProducer = (row[2] || '').replace(/\D/g, '');
+      const rowMsgId = row[8] || '';
       const rowNotes = row[9] || '';
-      const rowStatus = row[8] || '';
 
-      // تخطي الملغاة
-      if (rowStatus === 'ملغى') continue;
+      // تخطي الملغاة (نعرفها إذا كان معرف العملية يبدأ بـ CANCELLED أو الملاحظات تحتوي على ملغى)
+      if (rowId.startsWith('CANCELLED') || rowNotes.includes('ملغى')) continue;
 
-      // مطابقة: معرف العملية يحتوي على messageId أو الملاحظات تحتوي عليه
-      const idMatch = rowId.includes(messageId) || rowNotes.includes(messageId);
+      // مطابقة: messageId في العمود المخصص له (I) أو ضمن الملاحظات (J)
+      const idMatch = rowMsgId === messageId || rowMsgId.includes(messageId) || 
+                      rowNotes.includes(messageId) || rowId.includes(messageId);
       // مطابقة المنتج (من وضع الإيموجي)
       const producerMatch = !reactorPhone || 
         cleanReactor.endsWith(rowProducer) || rowProducer.endsWith(cleanReactor) ||
@@ -1328,8 +1329,8 @@ async function findTransactionByMessageId(messageId, reactorPhone) {
           type: row[5],
           emoji: row[6],
           groupPrefix: row[7],
-          status: row[8],
-          notes: row[9],
+          status: row[8], // عمود I = messageId (اسم الحقل قديم لكنه يحمل messageId الآن)
+          notes: row[9],  // عمود J = المصدر (reply/reaction) أو ملاحظات
         };
       }
     }
@@ -1396,8 +1397,8 @@ async function processEdit({ messageId, editorPhone, editorName, newQuantity, gr
           transaction.type,
           transaction.emoji,
           transaction.groupPrefix,
-          'معدّل',
-          `تعديل من ${oldQuantity} إلى ${newQuantity} بواسطة ${editorPhone} في ${new Date().toISOString()}`
+          transaction.status, // عمود I = messageId (نحافظ على قيمته الأصلية من transaction.status الذي يحمل messageId)
+          `تعديل من ${oldQuantity} إلى ${newQuantity} بواسطة ${editorPhone} في ${new Date().toISOString()} | ${transaction.notes || ''}` // عمود J = Notes
         ]]
       }
     });
@@ -2202,8 +2203,16 @@ async function updateTransactionStatus(rowIndex, updates) {
     const currentRow = response.data.values?.[0] || [];
 
     // تحديث الحقول المطلوبة
+    // إذا كانت العملية ملغاة، نضيف CANCELLED_ إلى معرف العملية (عمود A)
+    let newTransactionId = currentRow[0] || '';
+    if (updates.status === 'ملغى' && !newTransactionId.startsWith('CANCELLED_')) {
+      newTransactionId = 'CANCELLED_' + newTransactionId;
+    } else if (updates.status === 'نشط' && newTransactionId.startsWith('CANCELLED_')) {
+      newTransactionId = newTransactionId.replace('CANCELLED_', '');
+    }
+
     const updatedRow = [
-      currentRow[0] || '',  // A: transactionId
+      newTransactionId,     // A: transactionId (تعديل ليعكس الحالة)
       currentRow[1] || '',  // B: timestamp
       currentRow[2] || '',  // C: producerPhone
       currentRow[3] || '',  // D: captainPhone
@@ -2211,8 +2220,8 @@ async function updateTransactionStatus(rowIndex, updates) {
       currentRow[5] || '',  // F: type
       currentRow[6] || '',  // G: emoji
       currentRow[7] || '',  // H: groupPrefix
-      updates.status || currentRow[8] || '',  // I: status
-      updates.notes || currentRow[9] || '',   // J: notes
+      currentRow[8] || '',  // I: messageId (يجب عدم استبداله بـ status)
+      updates.notes || currentRow[9] || '',   // J: notes (نحفظ فيه الحالة أيضاً إذا أردنا)
     ];
 
     await sheetsApi.spreadsheets.values.update({
@@ -2251,10 +2260,12 @@ async function findTransactionByMessageIdIncludingCancelled(messageId, reactorPh
       const row = rows[i];
       const rowId = row[0] || '';
       const rowProducer = (row[2] || '').replace(/\D/g, '');
+      const rowMsgId = row[8] || '';
       const rowNotes = row[9] || '';
 
-      // مطابقة: معرف العملية يحتوي على messageId أو الملاحظات تحتوي عليه
-      const idMatch = rowId.includes(messageId) || rowNotes.includes(messageId);
+      // مطابقة: messageId في العمود المخصص له (I) أو ضمن الملاحظات (J)
+      const idMatch = rowMsgId === messageId || rowMsgId.includes(messageId) || 
+                      rowNotes.includes(messageId) || rowId.includes(messageId);
       // مطابقة المنتج (اختياري)
       const producerMatch = !reactorPhone ||
         cleanReactor.endsWith(rowProducer) || rowProducer.endsWith(cleanReactor) ||
