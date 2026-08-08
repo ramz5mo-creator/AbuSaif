@@ -1142,9 +1142,9 @@ async function start() {
       } else if (result.type === 'cancel') {
         // === إلغاء ❌ ===
         // القواعد:
-        // 1. أي شخص يمكنه وضع ❌
-        // 2. خلال 24 ساعة فقط من تسجيل العملية
-        // 3. لا يُحذف السجل — يُحدَّث نفس الصف (الإنتاج=0، الاستلام=0، الحالة=ملغاة)
+        // 1. الجميع يمكنهم وضع ❌ خلال 24 ساعة
+        // 2. المشرف يمكنه وضع ❌ خلال أسبوع كامل (168 ساعة)
+        // 3. لا يُحذف السجل — يُحدّث نفس الصف فقط
         // 4. لا يُنشأ سجل جديد
 
         const cancellerPhone = producerPhone; // واضع ❌
@@ -1161,12 +1161,16 @@ async function start() {
           return;
         }
 
-        // التحقق من الوقت (24 ساعة)
+        // التحقق من الصلاحية والوقت
         const txTime = new Date(existingTx.timestamp);
         const now = new Date();
         const diffHours = (now - txTime) / (1000 * 60 * 60);
-        if (diffHours > 24) {
-          logger.info('⛔ رفض إلغاء: انتهت المهلة (24 ساعة)', { hours: diffHours.toFixed(1) });
+        const isSuperCancel = await sheets.isSupervisor(cancellerPhone);
+        const maxCancelHours = isSuperCancel ? 168 : 24; // مشرف = أسبوع، غيره = 24 ساعة
+
+        if (diffHours > maxCancelHours) {
+          const label = isSuperCancel ? 'أسبوع' : '24 ساعة';
+          logger.info(`⛔ رفض إلغاء: انتهت المهلة (${label})`, { hours: diffHours.toFixed(1) });
           return;
         }
 
@@ -1174,8 +1178,9 @@ async function start() {
         const cancelProducer = existingTx.producerPhone;
         const cancelCaptain = existingTx.captainPhone;
 
-        logger.info('❌ إلغاء عملية (مشرف)', {
-          supervisor: cancellerPhone,
+        logger.info('❌ إلغاء عملية', {
+          canceller: cancellerPhone,
+          isSuper: isSuperCancel,
           producer: cancelProducer,
           captain: cancelCaptain || '❓',
           qty: cancelQuantity,
@@ -1209,7 +1214,7 @@ async function start() {
         // تسجيل في Audit Log
         await sheets.logEdit({
           editorPhone: cancellerPhone,
-          editorName: 'مشرف',
+          editorName: isSuperCancel ? 'مشرف' : 'كابتن',
           producerPhone: cancelProducer,
           captainPhone: cancelCaptain,
           oldQuantity: cancelQuantity,
@@ -1238,14 +1243,18 @@ async function start() {
                              existingTx.notes?.includes('ملغى');
         if (isCancelled) {
           // === حالة ب: استرجاع عملية ملغاة (إزالة ❌) ===
+          // الجميع 24 ساعة، المشرف أسبوع كامل
           const restorerPhone = producerPhone;
 
-          // التحقق من الوقت (24 ساعة من وقت العملية الأصلية)
           const txTime = new Date(existingTx.timestamp);
           const now = new Date();
           const diffHours = (now - txTime) / (1000 * 60 * 60);
-          if (diffHours > 24) {
-            logger.info('⛔ رفض استرجاع: انتهت المهلة (24 ساعة)', { hours: diffHours.toFixed(1) });
+          const isSuperRestore = await sheets.isSupervisor(restorerPhone);
+          const maxRestoreHours = isSuperRestore ? 168 : 24;
+
+          if (diffHours > maxRestoreHours) {
+            const label = isSuperRestore ? 'أسبوع' : '24 ساعة';
+            logger.info(`⛔ رفض استرجاع: انتهت المهلة (${label})`, { hours: diffHours.toFixed(1) });
             return;
           }
 
@@ -1256,8 +1265,9 @@ async function start() {
           const restoreProducer = existingTx.producerPhone;
           const restoreCaptain = existingTx.captainPhone;
 
-          logger.info('🔄 استرجاع عملية ملغاة (مشرف)', {
-            supervisor: restorerPhone,
+          logger.info('🔄 استرجاع عملية ملغاة', {
+            restorer: restorerPhone,
+            isSuper: isSuperRestore,
             producer: restoreProducer,
             captain: restoreCaptain || '❓',
             qty: originalQuantity
@@ -1291,7 +1301,7 @@ async function start() {
           // تسجيل في Audit Log
           await sheets.logEdit({
             editorPhone: restorerPhone,
-            editorName: 'مشرف',
+            editorName: isSuperRestore ? 'مشرف' : 'كابتن',
             producerPhone: restoreProducer,
             captainPhone: restoreCaptain,
             oldQuantity: 0,
@@ -1300,12 +1310,26 @@ async function start() {
 
         } else {
           // === حالة أ: حذف إيموجي كمي عادي (عكس العملية) ===
+          // الجميع 24 ساعة، المشرف أسبوع كامل
           const removeQuantity = existingTx.quantity || 0;
           const removeProducer = existingTx.producerPhone || realProducerPhone || producerPhone;
           const removeCaptain = existingTx.captainPhone || captainPhone;
 
           if (removeQuantity <= 0) {
             logger.info('🗑️ حذف إيموجي — كمية صفر، تجاهل');
+            return;
+          }
+
+          // التحقق من الوقت
+          const removeTxTime = new Date(existingTx.timestamp);
+          const removeNow = new Date();
+          const removeDiffHours = (removeNow - removeTxTime) / (1000 * 60 * 60);
+          const isSuperRemove = await sheets.isSupervisor(producerPhone);
+          const maxRemoveHours = isSuperRemove ? 168 : 24;
+
+          if (removeDiffHours > maxRemoveHours) {
+            const label = isSuperRemove ? 'أسبوع' : '24 ساعة';
+            logger.info(`⛔ رفض حذف إيموجي: انتهت المهلة (${label})`, { hours: removeDiffHours.toFixed(1) });
             return;
           }
 
