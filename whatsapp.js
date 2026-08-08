@@ -1454,7 +1454,7 @@ async function syncAllLidsFull() {
     }
   }
 
-  saveLidMapDebounced();
+  saveLidMap();
   logger.info(`📊 المزامنة: أعضاء=${totalMembers} | LID=${totalLids} | جديد=${newLinks} | غير محلول=${unresolved.size}`);
 
   // محاولة حل LIDs غير المحلولة
@@ -1475,7 +1475,7 @@ async function syncAllLidsFull() {
     }
   }
 
-  saveLidMapDebounced();
+  saveLidMap();
 
   return {
     success: true,
