@@ -1206,8 +1206,10 @@ async function start() {
         }
 
         // تحديث نفس الصف في سجل الحركات (لا إنشاء سجل جديد)
+        // نصفّر الكمية في عمود E ونحفظ الكمية الأصلية في الملاحظات
         await sheets.updateTransactionStatus(existingTx.rowIndex, {
           status: 'ملغى',
+          quantity: 0,  // تصفير الكمية في عمود E
           notes: `إلغاء بواسطة ${cancellerPhone} في ${now.toISOString()} | الكمية الأصلية: ${cancelQuantity} | msgId:${quotedMsgId}`
         });
 
@@ -1358,10 +1360,11 @@ async function start() {
             }
           }
 
-          // تحديث حالة العملية في نفس الصف
+          // تحديث حالة العملية في نفس الصف (تصفير الكمية)
           await sheets.updateTransactionStatus(existingTx.rowIndex, {
             status: 'محذوف',
-            notes: `حذف إيموجي بواسطة ${producerPhone} في ${new Date().toISOString()} | msgId:${quotedMsgId}`
+            quantity: 0,  // تصفير الكمية في عمود E
+            notes: `حذف إيموجي بواسطة ${producerPhone} في ${new Date().toISOString()} | الكمية الأصلية: ${removeQuantity} | msgId:${quotedMsgId}`
           });
         }
       }
