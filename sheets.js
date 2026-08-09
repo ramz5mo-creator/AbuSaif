@@ -2498,6 +2498,127 @@ async function backfillLidRecords(newlyResolvedMap) {
   }
 }
 
+/**
+ * مطابقة الأوراق اليومية مع سجل الحركات وتصحيحها
+ * يُحسب المجموع الصحيح لكل شخص بأخذ آخر قيمة لكل msgId
+ * ويُحدَّث الصف في الورقة اليومية مباشرةً
+ * @param {string|null} dateStr - التاريخ بصيغة YYYY-MM-DD (null = اليوم)
+ */
+async function reconcileDailySheets(dateStr = null) {
+  if (!isInitialized) return { success: false, message: 'غير مهيأ' };
+
+  // تحديد التاريخ المستهدف
+  let targetDate = dateStr;
+  if (!targetDate) {
+    const now = new Date();
+    const jordan = new Date(now.getTime() + 3 * 60 * 60 * 1000);
+    const y = jordan.getUTCFullYear();
+    const m = String(jordan.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(jordan.getUTCDate()).padStart(2, '0');
+    targetDate = `${y}-${m}-${d}`;
+  }
+
+  const groups = config.whatsapp.targetGroups || [];
+  const prefixes = groups.map(g => g.prefix).filter(Boolean);
+  if (!prefixes.length) return { success: false, message: 'لا توجد جروبات' };
+
+  try {
+    // قراءة سجل الحركات كاملاً
+    const transSheet = config.sheets.sheetNames.transactions || 'سجل الحركات';
+    const resp = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${transSheet}'!A:J`,
+    });
+    const allRows = resp.data.values || [];
+
+    // قراءة أسماء المسجلين
+    const regSheet = config.sheets.sheetNames.registeredUsers || 'المسجلين';
+    const regResp = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${regSheet}'!A:B`,
+    });
+    const regRows = regResp.data.values || [];
+    const nameMap = {};
+    for (const r of regRows.slice(1)) {
+      if (r[0] && r[1]) {
+        nameMap[normalizePhone(r[0])] = r[1];
+      }
+    }
+
+    let totalUpdated = 0;
+    const results = [];
+
+    for (const prefix of prefixes) {
+      const sheetName = `${prefix}-${targetDate}`;
+
+      // تصفية عمليات هذا الجروب واليوم (بدون الملغاة)
+      const dayRows = allRows.slice(1).filter(r =>
+        r.length > 7 &&
+        (r[7] || '').includes(prefix) &&
+        (r[1] || '').startsWith(targetDate) &&
+        !String(r[0] || '').startsWith('CANCELLED_')
+      );
+
+      if (!dayRows.length) {
+        results.push(`${prefix}: لا توجد عمليات`);
+        continue;
+      }
+
+      // أخذ آخر قيمة لكل msgId (التعديل يُلغي السابق)
+      const byMsgId = {};
+      for (const row of dayRows) {
+        const msgId = row[8] || row[0]; // عمود I أو A كمفتاح
+        byMsgId[msgId] = row;
+      }
+
+      // حساب المجاميع
+      const production = {}; // phone → qty
+      const reception = {};  // phone → qty
+      for (const row of Object.values(byMsgId)) {
+        const prod = normalizePhone(row[2] || '');
+        const capt = normalizePhone(row[3] || '');
+        const qty = parseFloat(row[4]) || 0;
+        if (prod) production[prod] = (production[prod] || 0) + qty;
+        if (capt) reception[capt] = (reception[capt] || 0) + qty;
+      }
+
+      // بناء بيانات الورقة
+      const allPhones = new Set([...Object.keys(production), ...Object.keys(reception)]);
+      const newRows = [['الهاتف', 'الاسم', '#الانتاج', 'الاستلام']];
+      for (const phone of [...allPhones].sort()) {
+        const name = nameMap[phone] || '';
+        const prod = Math.max(0, production[phone] || 0);
+        const recv = Math.max(0, reception[phone] || 0);
+        newRows.push([phone, name, prod, recv]);
+      }
+
+      // إنشاء الورقة إذا لم تكن موجودة
+      await ensureDailySheet(sheetName);
+
+      // مسح البيانات القديمة وكتابة الجديدة
+      await sheetsApi.spreadsheets.values.clear({
+        spreadsheetId,
+        range: `'${sheetName}'!A:D`,
+      });
+      await sheetsApi.spreadsheets.values.update({
+        spreadsheetId,
+        range: `'${sheetName}'!A1`,
+        valueInputOption: 'RAW',
+        requestBody: { values: newRows },
+      });
+
+      totalUpdated++;
+      results.push(`${prefix}: ${newRows.length - 1} شخص`);
+      logger.info(`🔄 reconcile: ${sheetName} → ${newRows.length - 1} صف`);
+    }
+
+    return { success: true, date: targetDate, results, totalUpdated };
+  } catch (error) {
+    logger.error('❌ فشل reconcileDailySheets', { error: error.message });
+    return { success: false, message: error.message };
+  }
+}
+
 module.exports = {
   initialize,
   loadSettings,
@@ -2540,6 +2661,8 @@ module.exports = {
   appendLidMapToSheets,
   // الطبقة 4: تحديث السجلات القديمة عند حل LID
   backfillLidRecords,
+  // مطابقة يومية
+  reconcileDailySheets,
   // deprecated (للتوافق)
   updateBalance,
   updateTotals,

@@ -147,6 +147,28 @@ const httpServer = http.createServer(async (req, res) => {
       res.writeHead(500);
       res.end('Error: ' + e.message);
     }
+  } else if (req.url === '/reconcile' || req.url.startsWith('/reconcile?')) {
+    // مطابقة يدوية للأوراق اليومية
+    try {
+      const urlParams = new URL(req.url, 'http://localhost').searchParams;
+      const dateStr = urlParams.get('date') || null; // ?date=2026-08-09
+      const result = await sheets.reconcileDailySheets(dateStr);
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      if (result.success) {
+        const rows = result.results.map(r => `<li>${r}</li>`).join('');
+        res.end(`<html><body style="background:#111;color:#0f0;text-align:center;padding:40px;font-family:monospace;direction:rtl;">
+          <h1>🔄 تمت المطابقة بنجاح!</h1>
+          <p>التاريخ: ${result.date}</p>
+          <ul style="list-style:none;padding:0">${rows}</ul>
+          <br><a href="/" style="color:#fff;text-decoration:none;border:1px solid #fff;padding:10px;border-radius:5px;">العودة للرئيسية</a>
+        </body></html>`);
+      } else {
+        res.end('فشلت المطابقة: ' + result.message);
+      }
+    } catch (e) {
+      res.writeHead(500);
+      res.end('Error: ' + e.message);
+    }
   } else if (req.url === '/weekly-report') {
     try {
       const success = await sheets.generateWeeklyReport();
@@ -1597,6 +1619,18 @@ async function start() {
   setInterval(async () => {
     sheets.createDashboardSheet().catch(e => logger.debug('فشل تحديث الرئيسية', { error: e.message }));
   }, 30 * 60 * 1000);
+
+  // 6c. مطابقة الأوراق اليومية كل ساعة (تصحيح أي فروق بسبب إعادة التشغيل أو التعديلات)
+  setInterval(async () => {
+    try {
+      const result = await sheets.reconcileDailySheets();
+      if (result.success) {
+        logger.info('🔄 مطابقة يومية تلقائية', { results: result.results });
+      }
+    } catch (e) {
+      logger.debug('فشل المطابقة اليومية', { error: e.message });
+    }
+  }, 60 * 60 * 1000); // كل ساعة
   // 6. التحقق من الإغلاق الأسبوعي (الجمعة 11:00 مساءً)
   setInterval(async () => {
     const now = new Date();
