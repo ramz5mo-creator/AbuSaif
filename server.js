@@ -1649,7 +1649,7 @@ async function start() {
         logger.info('💾 حفظ "تم"', { 
           captain: captainPhone, 
           producer: result.orderOwnerPhone || '?',
-          msgId: tamMessageId.substring(0, 8) 
+          msgId: (tamMessageId || '').substring(0, 8) 
         });
 
         // إذا كان الرد يحتوي على إيموجي كمي مباشرة (مثل رد بـ 👍)
