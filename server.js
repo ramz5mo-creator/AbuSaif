@@ -25,6 +25,47 @@ const whatsapp = require('./whatsapp');
 const parser = require('./parser');
 const sheets = require('./sheets');
 
+// ============================================================
+// تنظيف السجلات القديمة عند بدء التشغيل (منع امتلاء Volume)
+// ============================================================
+(function cleanOldLogs() {
+  try {
+    const logsDir = path.join(process.env.VOLUME_PATH || '/app/auth', 'logs');
+    if (!fs.existsSync(logsDir)) return;
+    const MAX_AGE_DAYS = 7;
+    const now = Date.now();
+    const files = fs.readdirSync(logsDir);
+    let cleaned = 0;
+    for (const file of files) {
+      const filePath = path.join(logsDir, file);
+      try {
+        const stat = fs.statSync(filePath);
+        const ageMs = now - stat.mtimeMs;
+        const ageDays = ageMs / (1000 * 60 * 60 * 24);
+        // حذف الأرشيفات الأقدم من 7 أيام
+        if (ageDays > MAX_AGE_DAYS && (file.endsWith('.1') || file.endsWith('.2') || file.endsWith('.3'))) {
+          fs.unlinkSync(filePath);
+          cleaned++;
+          console.log(`[STARTUP] حُذف أرشيف قديم: ${file} (${ageDays.toFixed(1)} يوم)`);
+        }
+        // تفريغ الملفات الحية إذا تجاوزت 100MB
+        if (!file.includes('.') || file === 'app.log' || file === 'errors.log') {
+          if (stat.size > 100 * 1024 * 1024) {
+            fs.writeFileSync(filePath, '');
+            cleaned++;
+            console.log(`[STARTUP] تم تفريغ ملف ضخم: ${file} (${(stat.size/1024/1024).toFixed(1)} MB)`);
+          }
+        }
+      } catch (e) {}
+    }
+    if (cleaned > 0) console.log(`[STARTUP] تنظيف السجلات: حُذف/فُرِّغ ${cleaned} ملف`);
+    else console.log('[STARTUP] السجلات نظيفة، لا حاجة للتنظيف');
+  } catch (e) {
+    console.error('[STARTUP] خطأ في تنظيف السجلات:', e.message);
+  }
+})();
+
+
 
 // ====================================================
 // v5: Deduplication — منع معالجة نفس الرسالة مرتين
