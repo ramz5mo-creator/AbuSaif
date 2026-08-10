@@ -36,6 +36,28 @@ function getTimestamp() {
 /**
  * كتابة السجل في ملف
  */
+/**
+ * Log Rotation — حد أقصى 50MB لكل ملف، أرشفة تلقائية
+ */
+const MAX_LOG_SIZE = 50 * 1024 * 1024; // 50 MB
+const MAX_ARCHIVES = 3;
+
+function rotateIfNeeded(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return;
+    const stat = fs.statSync(filePath);
+    if (stat.size < MAX_LOG_SIZE) return;
+    const oldest = `${filePath}.${MAX_ARCHIVES}`;
+    if (fs.existsSync(oldest)) fs.unlinkSync(oldest);
+    for (let i = MAX_ARCHIVES - 1; i >= 1; i--) {
+      const src = `${filePath}.${i}`;
+      const dst = `${filePath}.${i + 1}`;
+      if (fs.existsSync(src)) fs.renameSync(src, dst);
+    }
+    fs.renameSync(filePath, `${filePath}.1`);
+  } catch (e) { /* لا نوقف البوت */ }
+}
+
 function writeToFile(level, message, data) {
   const logEntry = {
     timestamp: getTimestamp(),
@@ -47,6 +69,7 @@ function writeToFile(level, message, data) {
   const fileName = level === 'error' ? 'errors.log' : 'app.log';
   const filePath = path.join(logsDir, fileName);
 
+  rotateIfNeeded(filePath);
   fs.appendFileSync(filePath, JSON.stringify(logEntry) + '\n', 'utf8');
 }
 
