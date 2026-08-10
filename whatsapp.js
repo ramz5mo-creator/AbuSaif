@@ -197,17 +197,25 @@ async function _onConnected(sock, isReconnect) {
     loadGroupParticipants();
   });
 
-  // تحديث كل 30 دقيقة
-  setInterval(() => {
-    loadGroupParticipantsAndSync().catch(() => {});
-    const s = getSheets();
-    if (s && s.loadRegisteredUsers) s.loadRegisteredUsers(true).catch(() => {});
-  }, 30 * 60 * 1000);
+  // تحديث كل 30 دقيقة — مرة واحدة فقط
+  if (!_intervalsStarted) {
+    _intervalsStarted = true;
+    setInterval(() => {
+      loadGroupParticipantsAndSync().catch(() => {});
+      const s = getSheets();
+      if (s && s.loadRegisteredUsers) s.loadRegisteredUsers(true).catch(() => {});
+    }, 30 * 60 * 1000);
+    logger.info('[WA] ✅ تم تسجيل setInterval للتحديث الدوري (مرة واحدة)');
+  }
 
-  // بدء الحل التلقائي للـ LIDs بعد 90 ثانية
-  setTimeout(() => {
-    startAutoResolveLids().catch(e => logger.debug('startAutoResolveLids error', { error: e.message }));
-  }, 90 * 1000);
+  // بدء الحل التلقائي للـ LIDs بعد 90 ثانية — مرة واحدة فقط
+  if (!_autoResolveStarted) {
+    _autoResolveStarted = true;
+    setTimeout(() => {
+      startAutoResolveLids().catch(e => logger.debug('startAutoResolveLids error', { error: e.message }));
+    }, 90 * 1000);
+    logger.info('[WA] ✅ تم جدولة startAutoResolveLids (مرة واحدة)');
+  }
 }
 
 // ====================================================
@@ -997,6 +1005,8 @@ async function getGroupMembersWithLidStatus(groupId) {
 
 const _lidResolveQueue = new Set();
 let _autoResolveRunning = false;
+let _intervalsStarted = false;   // منع تكرار setInterval عند إعادة الاتصال
+let _autoResolveStarted = false; // منع تكرار startAutoResolveLids
 const _newlyResolvedLids = new Map();
 
 function queueLidForResolve(lid) {
