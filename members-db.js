@@ -18,6 +18,30 @@ let pendingUpdates = [];
 let batchWriteTimer = null;
 let _loaded = false;
 
+// ── Exponential Backoff لإعادة المحاولة ──────────────────────────────────────
+// الحد الأدنى: 2 دقيقة | الحد الأقصى: 30 دقيقة | مضاعف: 2 | jitter: ±20%
+const RETRY_MIN_MS  = 2 * 60 * 1000;   // 2 دقيقة
+const RETRY_MAX_MS  = 30 * 60 * 1000;  // 30 دقيقة
+const RETRY_FACTOR  = 2;
+let _retryAttempt   = 0;
+let _retryTimer     = null;
+
+function calcBackoff() {
+  const base = Math.min(RETRY_MIN_MS * Math.pow(RETRY_FACTOR, _retryAttempt), RETRY_MAX_MS);
+  const jitter = base * 0.2 * (Math.random() * 2 - 1); // ±20%
+  return Math.floor(base + jitter);
+}
+
+function scheduleRetry(fn, label) {
+  if (_retryTimer) return; // لا تجدول أكثر من مرة في نفس الوقت
+  const delay = calcBackoff();
+  _retryAttempt++;
+  const mins = (delay / 60000).toFixed(1);
+  console.log(`[members-db] ⏳ إعادة المحاولة ${_retryAttempt} بعد ${mins} دقيقة (${label})`);
+  _retryTimer = setTimeout(() => { _retryTimer = null; fn(); }, delay);
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 /** جلب sheetsApi و spreadsheetId من sheets.js */
 function getApi() {
   const sheets = require('./sheets');
@@ -54,8 +78,8 @@ async function ensureMembersSheet(api, id) {
 async function loadFromSheets() {
   const { api, id, ready } = getApi();
   if (!api || !id || !ready) {
-    console.log('[members-db] sheets غير جاهز — سيُعاد المحاولة بعد 30 ثانية');
-    setTimeout(loadFromSheets, 30000);
+    console.log('[members-db] sheets غير جاهز — سيُعاد المحاولة لاحقاً');
+    scheduleRetry(loadFromSheets, 'sheets غير جاهز');
     return 0;
   }
   try {
@@ -80,11 +104,21 @@ async function loadFromSheets() {
       loaded++;
     }
     _loaded = true;
+    _retryAttempt = 0; // إعادة تعيين العداد عند النجاح
+    _retryTimer = null;
     console.log(`[members-db] ✅ تم تحميل ${loaded} عضو من ورقة Members`);
     return loaded;
   } catch(e) {
-    console.error('[members-db] فشل التحميل:', e.message);
-    setTimeout(loadFromSheets, 60000);
+    const isQuota = e.message?.includes('Quota') || e.message?.includes('quota') || e.code === 429;
+    const isAuth  = e.message?.includes('invalid_grant') || e.message?.includes('unauthorized') || e.code === 401;
+    if (isQuota) {
+      console.warn('[members-db] ⚠️ تجاوز حد Quota — سيُعاد المحاولة مع Backoff');
+    } else if (isAuth) {
+      console.error('[members-db] ❌ خطأ مصادقة Google — تحقق من credentials');
+    } else {
+      console.error('[members-db] فشل التحميل:', e.message);
+    }
+    scheduleRetry(loadFromSheets, isQuota ? 'Quota exceeded' : (e.message?.slice(0, 40) || 'error'));
     return 0;
   }
 }
@@ -129,7 +163,10 @@ function scheduleBatchWrite() {
 async function flushPendingUpdates() {
   if (pendingUpdates.length === 0) return;
   const { api, id, ready } = getApi();
-  if (!api || !id || !ready) { batchWriteTimer = setTimeout(flushPendingUpdates, 30000); return; }
+  if (!api || !id || !ready) {
+    batchWriteTimer = setTimeout(flushPendingUpdates, 5 * 60 * 1000); // 5 دقائق
+    return;
+  }
   const updates = [...pendingUpdates]; pendingUpdates = [];
   try {
     const resp = await api.spreadsheets.values.get({ spreadsheetId: id, range: `'${MEMBERS_SHEET}'!A:B` });
@@ -146,9 +183,16 @@ async function flushPendingUpdates() {
     if (newRows.length > 0) await api.spreadsheets.values.append({ spreadsheetId: id, range: `'${MEMBERS_SHEET}'!A:F`, valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: newRows } });
     if (batchData.length + newRows.length > 0) console.log(`[members-db] 💾 حفظ ${batchData.length} تحديث + ${newRows.length} جديد`);
   } catch(e) {
-    console.error('[members-db] فشل الحفظ:', e.message);
-    pendingUpdates = [...updates, ...pendingUpdates];
-    batchWriteTimer = setTimeout(flushPendingUpdates, 60000);
+    const isQuota = e.message?.includes('Quota') || e.message?.includes('quota') || e.code === 429;
+    if (isQuota) {
+      console.warn('[members-db] ⚠️ Quota exceeded عند الحفظ — تأجيل 10 دقائق');
+      pendingUpdates = [...updates, ...pendingUpdates];
+      batchWriteTimer = setTimeout(flushPendingUpdates, 10 * 60 * 1000); // 10 دقائق
+    } else {
+      console.error('[members-db] فشل الحفظ:', e.message);
+      pendingUpdates = [...updates, ...pendingUpdates];
+      batchWriteTimer = setTimeout(flushPendingUpdates, 3 * 60 * 1000); // 3 دقائق
+    }
   }
 }
 
@@ -160,6 +204,7 @@ function getStats() {
     unresolvedLids: [...lidToPhone.values()].filter(v => !v || v.length < 9).length,
     pendingUpdates: pendingUpdates.length,
     loaded: _loaded,
+    retryAttempt: _retryAttempt,
   };
 }
 
