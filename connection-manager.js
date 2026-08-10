@@ -1,0 +1,366 @@
+'use strict';
+/**
+ * connection-manager.js — مدير الاتصال المستقل لـ Baileys
+ * =========================================================
+ * المسؤوليات:
+ *  - إنشاء Socket واحد فقط في أي وقت (منع التكرار)
+ *  - معالجة connection.update مع تحديد سبب الانقطاع
+ *  - إعادة الاتصال التلقائي مع Exponential Backoff
+ *  - الحفاظ على جلسة Authentication دون QR طالما الجلسة صالحة
+ *  - إصدار أحداث واضحة: CONNECTED / DISCONNECTED / RECONNECTING / RECONNECTED
+ *  - عدم السماح لخطأ في معالجة رسالة بإسقاط Socket
+ *
+ * الاستخدام:
+ *   const cm = require('./connection-manager');
+ *   cm.on('CONNECTED', ({ sock, isReconnect }) => { ... });
+ *   cm.on('DISCONNECTED', ({ reason, code }) => { ... });
+ *   cm.on('RECONNECTING', ({ attempt, delayMs }) => { ... });
+ *   cm.on('RECONNECTED', ({ sock, attempt }) => { ... });
+ *   cm.start();
+ */
+
+const EventEmitter = require('events');
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+} = require('@whiskeysockets/baileys');
+const { Boom } = require('@hapi/boom');
+const fs = require('fs');
+const path = require('path');
+const config = require('./config');
+const logger = require('./logger');
+
+// ====================================================
+// الثوابت
+// ====================================================
+
+const BACKOFF_BASE_MS   = 5_000;   // 5 ثوانٍ
+const BACKOFF_MAX_MS    = 120_000; // دقيقتان
+const BACKOFF_FACTOR    = 2;
+const BACKOFF_JITTER    = 0.2;     // ±20%
+const CONFLICT_DELAY_MS = 60_000;  // 60 ثانية عند تعارض الجلسة (440)
+const TIMEOUT_DELAY_MS  = 15_000;  // 15 ثانية عند timeout/unavailable
+
+// أسباب الانقطاع المعروفة
+const DISCONNECT_REASONS = {
+  [DisconnectReason.badSession]:          'جلسة تالفة — يجب مسح auth',
+  [DisconnectReason.connectionClosed]:    'أُغلق الاتصال',
+  [DisconnectReason.connectionLost]:      'فُقد الاتصال',
+  [DisconnectReason.connectionReplaced]:  'استُبدل الاتصال بجلسة أخرى',
+  [DisconnectReason.loggedOut]:           'تم تسجيل الخروج',
+  [DisconnectReason.restartRequired]:     'مطلوب إعادة تشغيل',
+  [DisconnectReason.timedOut]:            'انتهت مهلة الاتصال',
+  408:  'انتهت مهلة الطلب (408)',
+  440:  'تعارض جلسة (440)',
+  503:  'الخدمة غير متاحة (503)',
+};
+
+// ====================================================
+// ConnectionManager
+// ====================================================
+
+class ConnectionManager extends EventEmitter {
+  constructor() {
+    super();
+    this._sock         = null;   // Socket الحالي
+    this._isStarted    = false;  // هل بدأ المدير
+    this._isConnecting = false;  // هل جارٍ الاتصال الآن
+    this._reconnectTimer = null; // مؤقت إعادة الاتصال
+    this._attempt      = 0;      // عداد المحاولات المتتالية
+    this._isFirstConnect = true; // هل هذا أول اتصال
+    this._destroyed    = false;  // هل تم إيقاف المدير نهائياً
+    this._messageHandler = null; // معالج الرسائل الخارجي
+    this._qrCallback   = null;   // callback لعرض QR
+    this._qrClearCallback = null;
+    this._authState    = null;   // حالة المصادقة
+    this._saveCreds    = null;   // دالة حفظ بيانات الاعتماد
+  }
+
+  // ====================================================
+  // واجهة عامة
+  // ====================================================
+
+  /** بدء تشغيل المدير (يُستدعى مرة واحدة فقط) */
+  async start() {
+    if (this._isStarted) {
+      logger.warn('[CM] المدير يعمل بالفعل — تجاهل start()');
+      return;
+    }
+    this._isStarted = true;
+    logger.info('[CM] بدء تشغيل Connection Manager');
+    await this._connect();
+  }
+
+  /** إيقاف المدير نهائياً (مثلاً عند تسجيل الخروج) */
+  stop() {
+    this._destroyed = true;
+    this._clearReconnectTimer();
+    this._closeSock('إيقاف يدوي');
+    logger.info('[CM] تم إيقاف Connection Manager');
+  }
+
+  /** تسجيل معالج الرسائل الخارجي */
+  setMessageHandler(handler) {
+    this._messageHandler = handler;
+  }
+
+  /** تسجيل callback لعرض QR */
+  onQRUpdate(updateFn, clearFn) {
+    this._qrCallback      = updateFn;
+    this._qrClearCallback = clearFn;
+  }
+
+  /** الحصول على Socket الحالي */
+  getSocket() {
+    return this._sock;
+  }
+
+  /** هل الاتصال مفتوح الآن */
+  isConnected() {
+    return this._sock?.ws?.readyState === 1;
+  }
+
+  // ====================================================
+  // منطق الاتصال الداخلي
+  // ====================================================
+
+  async _connect() {
+    if (this._destroyed) return;
+    if (this._isConnecting) {
+      logger.debug('[CM] الاتصال جارٍ بالفعل — تجاهل');
+      return;
+    }
+    this._isConnecting = true;
+
+    try {
+      const authPath = path.resolve(config.whatsapp.authPath);
+      if (!fs.existsSync(authPath)) {
+        fs.mkdirSync(authPath, { recursive: true });
+      }
+
+      // تحميل بيانات المصادقة (مرة واحدة فقط أو عند الحاجة)
+      if (!this._saveCreds) {
+        const { state, saveCreds } = await useMultiFileAuthState(authPath);
+        this._authState = state;
+        this._saveCreds = saveCreds;
+      }
+
+      // جلب إصدار Baileys مع timeout
+      let version;
+      try {
+        const ctrl = new AbortController();
+        const tid  = setTimeout(() => ctrl.abort(), 10_000);
+        const res  = await fetchLatestBaileysVersion({ signal: ctrl.signal });
+        clearTimeout(tid);
+        version = res.version;
+      } catch {
+        version = [2, 3000, 1015901307];
+        logger.debug('[CM] استخدام إصدار Baileys الافتراضي');
+      }
+
+      // إغلاق Socket القديم إن وُجد
+      this._closeSock('إعادة اتصال');
+
+      // إنشاء Socket جديد
+      const sock = makeWASocket({
+        version,
+        auth:                this._authState,
+        printQRInTerminal:   true,
+        logger:              require('pino')({ level: 'silent' }),
+        browser:             ['AbuSaif-Bot', 'Safari', '17.0'],
+        syncFullHistory:     false,
+        retryRequestDelayMs: 500,
+        keepAliveIntervalMs: 25_000,
+        markOnlineOnConnect: false,
+        getMessage: async (key) => {
+          // يُستدعى من الخارج عبر حدث 'getMessage'
+          const handler = this.listenerCount('getMessage') > 0
+            ? await new Promise(resolve => this.emit('getMessage', key, resolve))
+            : undefined;
+          return handler;
+        },
+      });
+
+      this._sock = sock;
+
+      // ربط الأحداث
+      sock.ev.on('creds.update', this._saveCreds);
+      sock.ev.on('connection.update', (update) => this._onConnectionUpdate(update));
+      sock.ev.on('messages.upsert', (data) => this._onMessagesUpsert(data));
+      sock.ev.on('messages.delete', (data) => this._onMessagesDelete(data));
+
+    } catch (err) {
+      this._isConnecting = false;
+      logger.error('[CM] خطأ في إنشاء Socket', { error: err.message });
+      this._scheduleReconnect(null, err.message);
+    }
+  }
+
+  // ====================================================
+  // معالجة connection.update
+  // ====================================================
+
+  _onConnectionUpdate(update) {
+    const { connection, lastDisconnect, qr } = update;
+
+    // عرض QR
+    if (qr) {
+      logger.info('[CM] 📱 رمز QR جديد — امسحه بواتساب');
+      if (this._qrCallback) this._qrCallback(qr);
+    }
+
+    if (connection === 'open') {
+      this._onConnected();
+    } else if (connection === 'close') {
+      this._onDisconnected(lastDisconnect);
+    }
+  }
+
+  _onConnected() {
+    const wasReconnect = !this._isFirstConnect;
+    const prevAttempts = this._attempt;
+
+    this._isConnecting  = false;
+    this._isFirstConnect = false;
+    this._attempt       = 0;
+    this._clearReconnectTimer();
+    if (this._qrClearCallback) this._qrClearCallback();
+
+    const ts = new Date().toISOString();
+    if (wasReconnect) {
+      logger.info(`[CM] ✅ RECONNECTED | ${ts} | بعد ${prevAttempts} محاولة`);
+      this.emit('RECONNECTED', { sock: this._sock, attempt: prevAttempts, ts });
+    } else {
+      logger.info(`[CM] ✅ CONNECTED | ${ts}`);
+      this.emit('CONNECTED', { sock: this._sock, isReconnect: false, ts });
+    }
+  }
+
+  _onDisconnected(lastDisconnect) {
+    this._isConnecting = false;
+    const err        = new Boom(lastDisconnect?.error);
+    const code       = err?.output?.statusCode;
+    const rawReason  = DISCONNECT_REASONS[code] || `كود غير معروف (${code})`;
+    const ts         = new Date().toISOString();
+
+    logger.warn(`[CM] ⚡ DISCONNECTED | ${ts} | السبب: ${rawReason}`);
+    this.emit('DISCONNECTED', { reason: rawReason, code, ts });
+
+    // تسجيل الخروج الكامل — لا إعادة اتصال
+    if (code === DisconnectReason.loggedOut) {
+      logger.error('[CM] ❌ تم تسجيل الخروج! احذف مجلد auth وأعد المسح.');
+      this.emit('LOGGED_OUT', { ts });
+      return;
+    }
+
+    // جلسة تالفة — لا إعادة اتصال تلقائية
+    if (code === DisconnectReason.badSession) {
+      logger.error('[CM] ❌ جلسة تالفة! احذف مجلد auth وأعد المسح.');
+      this.emit('BAD_SESSION', { ts });
+      return;
+    }
+
+    if (this._destroyed) return;
+
+    // تحديد التأخير بناءً على الكود
+    let delayMs;
+    if (code === 440) {
+      delayMs = CONFLICT_DELAY_MS + Math.random() * 30_000;
+    } else if (code === 408 || code === 503) {
+      delayMs = TIMEOUT_DELAY_MS + Math.random() * 5_000;
+    } else {
+      delayMs = this._calcBackoff();
+    }
+
+    this._scheduleReconnect(delayMs, rawReason);
+  }
+
+  // ====================================================
+  // إعادة الاتصال مع Exponential Backoff
+  // ====================================================
+
+  _calcBackoff() {
+    const exp    = Math.min(this._attempt, 10);
+    const base   = BACKOFF_BASE_MS * Math.pow(BACKOFF_FACTOR, exp);
+    const capped = Math.min(base, BACKOFF_MAX_MS);
+    const jitter = capped * BACKOFF_JITTER * (Math.random() * 2 - 1);
+    return Math.round(capped + jitter);
+  }
+
+  _scheduleReconnect(delayMs, reason) {
+    if (this._destroyed) return;
+    this._clearReconnectTimer();
+
+    this._attempt++;
+    const delay = delayMs ?? this._calcBackoff();
+    const ts    = new Date().toISOString();
+
+    logger.info(`[CM] 🔄 RECONNECTING | ${ts} | محاولة ${this._attempt} | بعد ${Math.round(delay / 1000)}ث | السبب: ${reason || 'غير محدد'}`);
+    this.emit('RECONNECTING', { attempt: this._attempt, delayMs: delay, reason, ts });
+
+    this._reconnectTimer = setTimeout(async () => {
+      if (this._destroyed) return;
+      // إعادة تحميل بيانات المصادقة قبل الاتصال
+      try {
+        const authPath = path.resolve(config.whatsapp.authPath);
+        const { state, saveCreds } = await useMultiFileAuthState(authPath);
+        this._authState = state;
+        this._saveCreds = saveCreds;
+      } catch (e) {
+        logger.warn('[CM] فشل إعادة تحميل بيانات المصادقة', { error: e.message });
+      }
+      await this._connect();
+    }, delay);
+  }
+
+  _clearReconnectTimer() {
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+  }
+
+  // ====================================================
+  // إغلاق Socket بأمان
+  // ====================================================
+
+  _closeSock(reason) {
+    if (!this._sock) return;
+    try {
+      this._sock.ev.removeAllListeners();
+      this._sock.ws?.close();
+      this._sock.end(new Error(reason));
+    } catch { /* تجاهل أخطاء الإغلاق */ }
+    this._sock = null;
+  }
+
+  // ====================================================
+  // معالجة الرسائل (تحمي Socket من الأخطاء)
+  // ====================================================
+
+  async _onMessagesUpsert(data) {
+    if (!this._messageHandler) return;
+    try {
+      await this._messageHandler(data, this._sock);
+    } catch (err) {
+      // خطأ في معالجة رسالة لا يُسقط Socket
+      logger.error('[CM] خطأ في معالجة رسالة (محمي)', { error: err.message });
+      this.emit('MESSAGE_HANDLER_ERROR', { error: err.message });
+    }
+  }
+
+  async _onMessagesDelete(data) {
+    try {
+      this.emit('messages.delete', data);
+    } catch { /* تجاهل */ }
+  }
+}
+
+// ====================================================
+// تصدير instance وحيد (Singleton)
+// ====================================================
+
+const connectionManager = new ConnectionManager();
+module.exports = connectionManager;
