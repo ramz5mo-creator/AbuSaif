@@ -32,14 +32,13 @@ let sheetsApi = null;
 let isInitialized = false;
 let spreadsheetId = '';
 
-// مسارا التوكن والمصادقة — يبحث أولاً في VOLUME_PATH ثم في المجلد الحالي
+// مسار ملف Service Account — يبحث أولاً في VOLUME_PATH ثم في المجلد الحالي
 const VOLUME_PATH = process.env.VOLUME_PATH || './data';
-const TOKEN_PATH = fs.existsSync(path.resolve(VOLUME_PATH, 'token.json'))
-  ? path.resolve(VOLUME_PATH, 'token.json')
-  : path.resolve('./token.json');
-const CREDENTIALS_PATH = fs.existsSync(path.resolve(VOLUME_PATH, 'oauth-credentials.json'))
-  ? path.resolve(VOLUME_PATH, 'oauth-credentials.json')
-  : path.resolve('./oauth-credentials.json');
+const SA_KEY_PATH = fs.existsSync(path.resolve(VOLUME_PATH, 'service-account.json'))
+  ? path.resolve(VOLUME_PATH, 'service-account.json')
+  : path.resolve('./service-account.json');
+// محتوى Service Account من Environment Variable (بديل عن الملف)
+const SA_KEY_ENV = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || null;
 
 // كاش لأسماء الأوراق الموجودة (لتجنب إنشاء مكرر)
 const existingSheets = new Set();
@@ -81,35 +80,32 @@ async function initialize() {
   spreadsheetId = config.sheets.spreadsheetId;
   if (!spreadsheetId) throw new Error('لم يتم تحديد معرف الجدول');
 
-  if (!fs.existsSync(CREDENTIALS_PATH))
-    throw new Error('ملف oauth-credentials.json غير موجود!');
+  // استخدام Service Account بدلاً من OAuth — لا ينتهي أبداً
+  let saKey = null;
+  if (SA_KEY_ENV) {
+    // قراءة من Environment Variable (Railway)
+    try {
+      saKey = JSON.parse(SA_KEY_ENV);
+      logger.info('[Service Account] تم تحميل المفتاح من GOOGLE_SERVICE_ACCOUNT_JSON');
+    } catch (e) {
+      throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON غير صالح: ' + e.message);
+    }
+  } else if (fs.existsSync(SA_KEY_PATH)) {
+    // قراءة من ملف (للتطوير المحلي)
+    saKey = JSON.parse(fs.readFileSync(SA_KEY_PATH, 'utf8'));
+    logger.info('[Service Account] تم تحميل المفتاح من الملف: ' + SA_KEY_PATH);
+  } else {
+    throw new Error('لم يُعثر على Service Account! أضف GOOGLE_SERVICE_ACCOUNT_JSON كـ Environment Variable في Railway');
+  }
+  if (saKey.type !== 'service_account')
+    throw new Error('Service Account غير صالح — يجب أن يكون type: service_account');
 
-  const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH, 'utf8'));
-  const { client_id, client_secret, redirect_uris } =
-    credentials.installed || credentials.web || {};
-
-  if (!client_id || !client_secret)
-    throw new Error('ملف oauth-credentials.json غير صالح');
-
-  const oAuth2Client = new google.auth.OAuth2(
-    client_id,
-    client_secret,
-    redirect_uris?.[0] || 'http://localhost:3000/callback'
-  );
-
-  if (!fs.existsSync(TOKEN_PATH))
-    throw new Error('لم يتم تسجيل الدخول! شغّل: node setup-auth.js');
-
-  const token = JSON.parse(fs.readFileSync(TOKEN_PATH, 'utf8'));
-  oAuth2Client.setCredentials(token);
-
-  oAuth2Client.on('tokens', (newTokens) => {
-    const updatedToken = { ...token, ...newTokens };
-    fs.writeFileSync(TOKEN_PATH, JSON.stringify(updatedToken, null, 2));
-    logger.debug('تم تحديث الـ token');
+  const auth = new google.auth.GoogleAuth({
+    credentials: saKey,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
   });
 
-  sheetsApi = google.sheets({ version: 'v4', auth: oAuth2Client });
+  sheetsApi = google.sheets({ version: 'v4', auth });
 
   try {
     const response = await sheetsApi.spreadsheets.get({ spreadsheetId });
@@ -120,7 +116,7 @@ async function initialize() {
         existingSheets.add(sheet.properties.title);
       }
     }
-    logger.info('تم الاتصال بالجدول', { title, sheets: existingSheets.size });
+    logger.info('✅ [Service Account] تم الاتصال بالجدول', { title, sheets: existingSheets.size });
     isInitialized = true;
     
     // ضمان وجود أوراق التسجيل
@@ -129,8 +125,8 @@ async function initialize() {
     // تحميل أسماء المسجلين في الكاش
     await loadRegisteredUsers();
   } catch (error) {
-    if (error.code === 401 || error.code === 403)
-      throw new Error('انتهت صلاحية تسجيل الدخول! شغّل: node setup-auth.js');
+    if (error.code === 403)
+      throw new Error('Service Account لا يملك صلاحية الوصول للجدول! شارك الجدول مع: ' + (saKey.client_email || 'unknown'));
     throw error;
   }
 }

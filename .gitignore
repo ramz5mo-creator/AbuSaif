@@ -3,3 +3,5 @@ logs/
 auth/
 credentials.json
 .env
+service-account.json
+token.json
