@@ -763,12 +763,25 @@ async function syncAllLidsFull() {
   }
   saveLidMap();
   let resolvedNow = 0;
-  for (const lid of unresolved) {
-    try {
-      const result = await resolveLidDirect(lid);
-      if (result && result.includes('@s.whatsapp.net')) resolvedNow++;
-    } catch (e) {}
-    await new Promise(resolve => setTimeout(resolve, 500));
+  const LID_BATCH_SIZE = 20;
+  const unresolvedArr = Array.from(unresolved);
+  const totalUnresolved = unresolvedArr.length;
+
+  for (let i = 0; i < unresolvedArr.length; i += LID_BATCH_SIZE) {
+    const batch = unresolvedArr.slice(i, i + LID_BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map(lid => resolveLidDirect(lid))
+    );
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value && r.value.includes('@s.whatsapp.net')) {
+        resolvedNow++;
+      }
+    }
+    const done = Math.min(i + LID_BATCH_SIZE, totalUnresolved);
+    logger.info(`[LID Sync] ${done}/${totalUnresolved} | حُلّ: ${resolvedNow}`);
+    if (i + LID_BATCH_SIZE < unresolvedArr.length) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
   }
   saveLidMap();
   return { success: true, totalMembers, totalLids, newLinks, alreadyKnown, attemptedResolve: unresolved.size, resolvedNow, resolved: totalLids - unresolved.size + resolvedNow, unresolved: Math.max(0, unresolved.size - resolvedNow) };
