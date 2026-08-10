@@ -549,7 +549,7 @@ async function resolveLidDirect(lid) {
       }
     }
   } catch (e) {
-    logger.debug('فشل resolveLidDirect', { error: e.message, lid: lid.substring(0, 15) });
+    logger.warn(`⚠️ فشل resolveLidDirect [${lid.substring(0, 20)}]: ${e.message}`);
   }
   return null;
 }
