@@ -132,7 +132,7 @@ const httpServer = http.createServer(async (req, res) => {
       connected: whatsapp.isConnected ? whatsapp.isConnected() : false,
       processedMessages: processedMessageIds.size,
       cacheStats: whatsapp.getCacheStats(),
-      connectionManager: cm ? cm.getStatus() : null,
+      connectionManager: cm ? { connected: cm.isConnected() } : null,
       recovery: recoveryStats,
       uptime: process.uptime(),
       timestamp: new Date().toISOString()
