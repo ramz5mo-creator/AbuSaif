@@ -2147,7 +2147,16 @@ async function createDashboardSheet() {
       { updateDimensionProperties: { range: { sheetId: dashSheetId, dimension: 'COLUMNS', startIndex: 2, endIndex: 3 }, properties: { pixelSize: 110 }, fields: 'pixelSize' } },
       { updateDimensionProperties: { range: { sheetId: dashSheetId, dimension: 'COLUMNS', startIndex: 3, endIndex: 8 }, properties: { pixelSize: 130 }, fields: 'pixelSize' } },
       // تجميد السطرين الأولين
-      { freezePane: { sheetId: dashSheetId, frozenRowCount: 5 } },
+      // تجميد الصفوف — الصيغة الصحيحة لـ Sheets API v4
+      {
+        updateSheetProperties: {
+          properties: {
+            sheetId: dashSheetId,
+            gridProperties: { frozenRowCount: 5 }
+          },
+          fields: 'gridProperties.frozenRowCount'
+        }
+      },
       // دمج الخلايا
       ...merges.map(m => ({ mergeCells: { range: { sheetId: dashSheetId, ...m }, mergeType: 'MERGE_ALL' } })),
       // تنسيق الخلايا
