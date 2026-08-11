@@ -35,7 +35,8 @@ const tamCache     = new Map();
 const orderCache   = new Map();
 const lidToPhoneMap = new Map();
 
-const LID_MAP_PATH = path.resolve(config.volumePath, 'lid-map.json');
+const LID_MAP_PATH   = path.resolve(config.volumePath, 'lid-map.json');
+const TAM_CACHE_PATH = path.resolve(config.volumePath, 'tam-cache.json');
 
 let sheetsModule = null;
 function getSheets() {
@@ -81,8 +82,9 @@ function getSocket() {
  * بدء الاتصال بواتساب (يستخدم ConnectionManager الآن)
  */
 async function connect() {
-  // تحميل lidMap من القرص عند بدء التشغيل
+  // تحميل lidMap وtamCache من القرص عند بدء التشغيل
   loadLidMap();
+  loadTamCache();
   recoveryService.loadCursors();
 
   // ربط أحداث ConnectionManager
@@ -621,6 +623,74 @@ function saveLidMapDebounced() {
   _lidSaveTimer = setTimeout(saveLidMap, 3000);
 }
 
+// ====================================================
+// حفظ وتحميل tamCache وorderCache (دائم على Volume)
+// ====================================================
+const TAM_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 ساعة — بعدها تُحذف المدخلات القديمة
+
+function saveTamCache() {
+  try {
+    const dir = path.dirname(TAM_CACHE_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const now = Date.now();
+    // تحويل Map إلى Object مع تنظيف القديم
+    const tamObj = {};
+    for (const [k, v] of tamCache.entries()) {
+      const ts = typeof v === 'object' ? (v.ts || now) : now;
+      if (now - ts < TAM_CACHE_TTL_MS) {
+        tamObj[k] = typeof v === 'string' ? { captain: v, ts } : v;
+      }
+    }
+    const orderObj = {};
+    for (const [k, v] of orderCache.entries()) {
+      const ts = typeof v === 'object' ? (v.ts || now) : now;
+      if (now - ts < TAM_CACHE_TTL_MS) {
+        orderObj[k] = typeof v === 'string' ? { producer: v, ts } : v;
+      }
+    }
+    fs.writeFileSync(TAM_CACHE_PATH, JSON.stringify({ tamCache: tamObj, orderCache: orderObj, savedAt: new Date().toISOString() }, null, 2));
+    logger.debug(`💾 tamCache محفوظ (${Object.keys(tamObj).length} تم + ${Object.keys(orderObj).length} طلب)`);
+  } catch (e) {
+    logger.warn('فشل حفظ tamCache', { error: e.message });
+  }
+}
+
+function loadTamCache() {
+  try {
+    if (!fs.existsSync(TAM_CACHE_PATH)) return;
+    const raw = JSON.parse(fs.readFileSync(TAM_CACHE_PATH, 'utf8'));
+    const now = Date.now();
+    let tamCount = 0, orderCount = 0, skipped = 0;
+    for (const [k, v] of Object.entries(raw.tamCache || {})) {
+      const ts = v.ts || 0;
+      if (now - ts < TAM_CACHE_TTL_MS) {
+        tamCache.set(k, v);
+        tamCount++;
+      } else {
+        skipped++;
+      }
+    }
+    for (const [k, v] of Object.entries(raw.orderCache || {})) {
+      const ts = v.ts || 0;
+      if (now - ts < TAM_CACHE_TTL_MS) {
+        orderCache.set(k, v);
+        orderCount++;
+      } else {
+        skipped++;
+      }
+    }
+    logger.info(`📂 tamCache محمَّل: ${tamCount} تم + ${orderCount} طلب (تجاهل ${skipped} قديم)`);
+  } catch (e) {
+    logger.warn('فشل تحميل tamCache من القرص', { error: e.message });
+  }
+}
+
+let _tamSaveTimer = null;
+function saveTamCacheDebounced() {
+  if (_tamSaveTimer) clearTimeout(_tamSaveTimer);
+  _tamSaveTimer = setTimeout(saveTamCache, 2000);
+}
+
 async function loadGroupParticipants() {
   const sock = connectionManager.getSocket();
   if (!sock) return;
@@ -801,21 +871,29 @@ async function syncAllLidsFull() {
 
 function setCaptainForMessage(messageId, captainPhone) {
   if (!messageId || !captainPhone) return;
-  tamCache.set(messageId, captainPhone);
+  tamCache.set(messageId, { captain: captainPhone, ts: Date.now() });
+  saveTamCacheDebounced();
   logger.debug('💾 tamCache', { msgId: messageId.substring(0, 8), captain: captainPhone, size: tamCache.size });
 }
 
 function getCaptainByMessageId(messageId) {
-  return tamCache.get(messageId) || null;
+  const entry = tamCache.get(messageId);
+  if (!entry) return null;
+  // دعم البنية القديمة (string) والجديدة ({captain, ts})
+  return typeof entry === 'string' ? entry : (entry.captain || null);
 }
 
 function setOrderForReply(replyMsgId, producerPhone) {
   if (!replyMsgId || !producerPhone) return;
-  orderCache.set(replyMsgId, producerPhone);
+  orderCache.set(replyMsgId, { producer: producerPhone, ts: Date.now() });
+  saveTamCacheDebounced();
 }
 
 function getOrderByReplyId(replyMsgId) {
-  return orderCache.get(replyMsgId) || null;
+  const entry = orderCache.get(replyMsgId);
+  if (!entry) return null;
+  // دعم البنية القديمة (string) والجديدة ({producer, ts})
+  return typeof entry === 'string' ? entry : (entry.producer || null);
 }
 
 function getCachedMessage(messageId) {
