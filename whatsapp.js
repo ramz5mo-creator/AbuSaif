@@ -102,10 +102,11 @@ async function connect() {
 // ====================================================
 
 function _bindConnectionEvents() {
-  // CONNECTED: أول اتصال
+  // CONNECTED: أول اتصال بعد التشغيل. يجب تشغيل Recovery أيضاً لأن الخدمة
+  // قد تكون أعيد تشغيلها بينما وصلت رسائل أثناء توقفها.
   connectionManager.on('CONNECTED', async ({ sock, isReconnect }) => {
     logger.info(`[WA] ✅ CONNECTED | ${new Date().toISOString()}`);
-    await _onConnected(sock, false);
+    await _onConnected(sock, true);
   });
 
   // RECONNECTED: بعد انقطاع
@@ -153,14 +154,15 @@ function _bindConnectionEvents() {
 // عند نجاح الاتصال (أول مرة أو إعادة)
 // ====================================================
 
-async function _onConnected(sock, isReconnect) {
+async function _onConnected(sock, shouldRecover = true) {
   logger.info(`📦 tamCache: ${tamCache.size} | msgCache: ${messageCache.size}`);
 
   // ربط أحداث الجروبات على Socket الجديد
   sock.ev.on('group-participants.update', _handleGroupParticipantsUpdate);
 
-  if (isReconnect) {
-    // Recovery بعد إعادة الاتصال
+  if (shouldRecover) {
+    // Recovery بعد كل اتصال ناجح، بما فيه بدء الخدمة من جديد.
+    // تستخدم الخدمة مؤشرات دائمة ومنع تكرار لمعالجة الفجوة بأمان.
     setTimeout(async () => {
       try {
         const result = await recoveryService.runRecovery(sock);

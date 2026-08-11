@@ -4,6 +4,8 @@
  */
 
 const parser = require('./parser');
+const fs = require('fs');
+const path = require('path');
 
 console.log('═══════════════════════════════════════');
 console.log('   اختبار نظام AbuSaif');
@@ -73,10 +75,20 @@ const phoneTests = [
 ];
 
 phoneTests.forEach(({ input, expected }) => {
-  const result = parser.extractPhone(input);
+  const result = parser.cleanPhone(input);
   const status = result === expected ? '✅' : '❌';
   console.log(`  ${status} "${input}" → "${result}" (متوقع: "${expected}")`);
 });
+
+// === اختبار Recovery بعد التشغيل الأولي ===
+console.log('\n🔄 اختبار Recovery بعد الاتصال الأولي:');
+const whatsappSource = fs.readFileSync(path.join(__dirname, 'whatsapp.js'), 'utf8');
+const connectedHandler = whatsappSource.match(/connectionManager\.on\('CONNECTED',[\s\S]*?\n  \}\);/);
+const initialConnectionRunsRecovery = Boolean(
+  connectedHandler && connectedHandler[0].includes('await _onConnected(sock, true);')
+);
+console.log(`  ${initialConnectionRunsRecovery ? '✅' : '❌'} الاتصال الأولي يفعّل Recovery`);
+if (!initialConnectionRunsRecovery) process.exitCode = 1;
 
 console.log('\n═══════════════════════════════════════');
 console.log('   انتهى الاختبار');
