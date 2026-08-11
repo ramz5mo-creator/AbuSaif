@@ -225,7 +225,9 @@ async function _onConnected(sock, isReconnect) {
 // ====================================================
 
 async function _handleMessagesUpsert({ messages, type }, sock) {
-  if (type !== 'notify') return;
+  // الـ reactions في Baileys تصل أحياناً بـ type: 'append' — نسمح بها
+  const hasReactions = messages.some(m => m.message?.reactionMessage);
+  if (type !== 'notify' && !hasReactions) return;
 
   for (const msg of messages) {
     if (!msg.message) continue;
