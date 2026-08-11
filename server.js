@@ -620,18 +620,32 @@ const httpServer = http.createServer(async (req, res) => {
     const requestPath = path.join(config.volumePath, 'one-time-broadcast.json');
     const sentPath = path.join(config.volumePath, 'one-time-broadcast.sent.json');
     const sendingPath = path.join(config.volumePath, 'one-time-broadcast.sending.json');
-    if (fs.existsSync(sentPath) || fs.existsSync(sendingPath) || fs.existsSync(requestPath)) {
-      res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ error: 'طلب الإرسال منفذ أو قيد التنفيذ بالفعل' }));
+    if (fs.existsSync(sentPath)) {
+      const receipt = JSON.parse(fs.readFileSync(sentPath, 'utf8'));
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ status: 'already-sent', messageId: receipt.messageId || '' }));
       return;
     }
-    fs.writeFileSync(requestPath, JSON.stringify({
-      type: 'dreamax-test-message',
-      text: 'اهلا بالجميع',
-    }));
-    logger.info('📣 تم تجهيز طلب التحية الأحادي إلى السيف');
-    res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ accepted: true }));
+    if (fs.existsSync(sendingPath)) {
+      res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: 'محاولة الإرسال قيد التحقق بالفعل' }));
+      return;
+    }
+    if (!fs.existsSync(requestPath)) {
+      fs.writeFileSync(requestPath, JSON.stringify({
+        type: 'dreamax-test-message',
+        text: 'اهلا بالجميع',
+      }));
+      logger.info('📣 تم تجهيز طلب التحية الأحادي إلى السيف');
+    }
+    const result = await oneTimeBroadcast.processPendingRequest();
+    if (result.status !== 'sent') {
+      res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ status: result.status, error: result.error || 'لم يتم الإرسال بعد' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ status: result.status, messageId: result.receipt.messageId || '' }));
   } else if (req.url.startsWith('/api/link-lid') && req.method === 'POST') {
     // ربط LID برقم يدوياً: POST /api/link-lid?lid=XXX@lid&phone=9627XXXXXXXX
     let body = '';
