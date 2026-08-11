@@ -67,6 +67,10 @@ const sheets = require('./sheets');
 // ====================================================
 const processedMessageIds = new Set();
 const PROCESSED_MSG_MAX = 10000;
+// Map مؤقتة لتخزين الإيموجي الجديد (غير المعتمد) عند تغيير الإيموجي
+// مفتاح: `${phone}_${targetMsgId}` قيمة: { emoji, ts }
+const pendingEmojiReplace = new Map();
+const PENDING_EMOJI_TTL = 5000; // 5 ثوانٍ كافية لربط remove + add
 
 function isAlreadyProcessed(msgId) {
   return processedMessageIds.has(msgId);
@@ -1482,6 +1486,13 @@ async function start() {
           // تسجيل في ورقة سجل التعديلات — من حذف + الكمية المحذوفة
           try {
             const deleterName = sheets.getRegisteredName(producerPhone) || producerPhone;
+            // البحث عن الإيموجي الجديد إذا كان هذا تغيير إيموجي وليس حذف مباشر
+            const _replaceKey = `${producerPhone}_${quotedMsgId}`;
+            const _pendingReplace = pendingEmojiReplace.get(_replaceKey);
+            const _deleteNotes = _pendingReplace
+              ? `تغيير إيموجي: ${result.reactionText || '?'} → ${_pendingReplace.emoji}`
+              : `حذف إيموجي مباشر`;
+            if (_pendingReplace) pendingEmojiReplace.delete(_replaceKey);
             await sheets.logEdit({
               editorPhone: producerPhone,
               editorName: deleterName,
@@ -1489,6 +1500,7 @@ async function start() {
               captainPhone: removeCaptain || '',
               oldQuantity: removeQuantity,
               newQuantity: 0,
+              notes: _deleteNotes,
             });
             logger.info('📝 تم تسجيل الحذف في سجل التعديلات', {
               deleter: producerPhone,

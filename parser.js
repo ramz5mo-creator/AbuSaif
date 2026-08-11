@@ -243,8 +243,18 @@ async function processMessage(msg, sock) {
 
     // فقط التفاعلات الكمية أو الإلغاء أو الحذف
     if (!isQuantityEmoji(reactionText) && !isCancelEmoji && !isRemoveEmoji) {
-      logger.debug('تفاعل غير كمي وغير إلغاء - تجاهل', { text: reactionText });
-      return null;
+      logger.debug('تفاعل غير كمي وغير إلغاء - إرجاع unknown_emoji', { text: reactionText });
+      // نُرجع unknown_emoji بدلاً من null حتى يتمكن server.js من تتبعه
+      // (مثلاً: تغيير 👍 إلى 🙏 يُرسَل كـ remove + add، نحتاج معرفة الإيموجي الجديد)
+      return {
+        type: 'unknown_emoji',
+        messageId,
+        phone: cleanPhone(whatsapp.getSenderJid(msg)) || (whatsapp.getSenderJid(msg) || '').split(':')[0],
+        reactionText,
+        targetMessageId: whatsapp.getReactionTargetId(msg),
+        timestamp: new Date().toISOString(),
+        groupId: msg.key.remoteJid,
+      };
     }
 
     const targetMessageId = whatsapp.getReactionTargetId(msg);
