@@ -697,7 +697,6 @@ function saveTamCacheDebounced() {
 }
 
 async function loadGroupParticipants() {
-async function loadGroupParticipants() {
   const sock = connectionManager.getSocket();
   if (!sock) return;
   if (!connectionManager.isConnected()) return;
@@ -731,7 +730,6 @@ async function loadGroupParticipants() {
   }
 }
 
-async function loadGroupParticipantsAndSync() {
 async function loadGroupParticipantsAndSync() {
   const sock = connectionManager.getSocket();
   if (!sock) return;
