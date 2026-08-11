@@ -609,6 +609,29 @@ const httpServer = http.createServer(async (req, res) => {
       res.writeHead(500);
       res.end(JSON.stringify({ error: e.message }));
     }
+  } else if (req.url === '/internal/one-time-saif-greeting' && req.method === 'POST') {
+    const configuredToken = process.env.ONE_TIME_BROADCAST_TOKEN || '';
+    const requestToken = req.headers['x-one-time-broadcast-token'] || '';
+    if (!configuredToken || requestToken !== configuredToken) {
+      res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: 'غير موجود' }));
+      return;
+    }
+    const requestPath = path.join(config.volumePath, 'one-time-broadcast.json');
+    const sentPath = path.join(config.volumePath, 'one-time-broadcast.sent.json');
+    const sendingPath = path.join(config.volumePath, 'one-time-broadcast.sending.json');
+    if (fs.existsSync(sentPath) || fs.existsSync(sendingPath) || fs.existsSync(requestPath)) {
+      res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: 'طلب الإرسال منفذ أو قيد التنفيذ بالفعل' }));
+      return;
+    }
+    fs.writeFileSync(requestPath, JSON.stringify({
+      type: 'dreamax-test-message',
+      text: 'اهلا بالجميع',
+    }));
+    logger.info('📣 تم تجهيز طلب التحية الأحادي إلى السيف');
+    res.writeHead(202, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ accepted: true }));
   } else if (req.url.startsWith('/api/link-lid') && req.method === 'POST') {
     // ربط LID برقم يدوياً: POST /api/link-lid?lid=XXX@lid&phone=9627XXXXXXXX
     let body = '';
