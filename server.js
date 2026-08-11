@@ -26,6 +26,7 @@ const logger = require('./logger');
 const whatsapp = require('./whatsapp');
 const parser = require('./parser');
 const sheets = require('./sheets');
+const { createOneTimeBroadcastProcessor } = require('./one-time-broadcast');
 
 // ============================================================
 // تنظيف السجلات عند بدء التشغيل — يفرّغ كل ملف >10MB فوراً
@@ -1932,6 +1933,26 @@ async function start() {
   }).catch((error) => {
     logger.error('❌ فشل الاتصال الأولي', { error: error.message });
   });
+
+  // 4b. قناة تنفيذ أحادية الاستخدام: تقرأ طلباً محلياً من الـVolume ثم تحذفه بعد الإرسال.
+  // لا يوجد مسار HTTP عام ولا يمكنها إعادة الإرسال بعد إنشاء إيصال .sent.
+  const oneTimeBroadcast = createOneTimeBroadcastProcessor({
+    volumePath: config.volumePath,
+    targetGroupId: config.whatsapp.targetGroups.find(group => group.prefix === 'دريمكس').id,
+    getSocket: whatsapp.getSocket,
+    isConnected: whatsapp.isConnected,
+    logger,
+  });
+  let oneTimeBroadcastInProgress = false;
+  setInterval(async () => {
+    if (oneTimeBroadcastInProgress) return;
+    oneTimeBroadcastInProgress = true;
+    try {
+      await oneTimeBroadcast.processPendingRequest();
+    } finally {
+      oneTimeBroadcastInProgress = false;
+    }
+  }, 2000);
 
   // 5. تحديث الإعدادات دورياً
   setInterval(async () => {
