@@ -1191,6 +1191,183 @@ async function recordTransaction(transaction) {
 }
 
 // ====================================================
+// تفاصيل الطلبات — سجل تدقيقي مستقل عن الجداول اليومية
+// ====================================================
+
+const ORDER_DETAILS_HEADERS = [
+  'رقم العملية', 'وقت العملية', 'الجروب',
+  'المنتج', 'رقم المنتج',
+  'الكابتن المستلم', 'رقم الكابتن',
+  'واضع التفاعل', 'رقم واضع التفاعل',
+  'الكمية', 'نص الطلب', 'رسالة تم', 'التفاعل',
+  'الحالة', 'معرف رسالة تم', 'معرف رسالة الطلب', 'المصدر', 'ملاحظات'
+];
+
+async function ensureOrderDetailsSheet() {
+  const sheetName = config.sheets.sheetNames.orderDetails || 'تفاصيل الطلبات';
+  if (existingSheets.has(sheetName)) return;
+
+  try {
+    await sheetsApi.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: sheetName, rightToLeft: true } } }],
+      },
+    });
+
+    await sheetsApi.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${sheetName}'!A1:R1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [ORDER_DETAILS_HEADERS] },
+    });
+
+    const meta = await sheetsApi.spreadsheets.get({ spreadsheetId });
+    const sheet = (meta.data.sheets || []).find(s => s.properties?.title === sheetName);
+    if (sheet?.properties?.sheetId !== undefined) {
+      await sheetsApi.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [
+            {
+              updateSheetProperties: {
+                properties: { sheetId: sheet.properties.sheetId, gridProperties: { frozenRowCount: 1 } },
+                fields: 'gridProperties.frozenRowCount',
+              },
+            },
+            {
+              setBasicFilter: {
+                filter: { range: { sheetId: sheet.properties.sheetId, startRowIndex: 0, endRowIndex: 10000, startColumnIndex: 0, endColumnIndex: ORDER_DETAILS_HEADERS.length } },
+              },
+            },
+            {
+              repeatCell: {
+                range: { sheetId: sheet.properties.sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: ORDER_DETAILS_HEADERS.length },
+                cell: { userEnteredFormat: {
+                  backgroundColor: { red: 0.08, green: 0.32, blue: 0.27 },
+                  textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
+                  horizontalAlignment: 'CENTER',
+                  verticalAlignment: 'MIDDLE',
+                  wrapStrategy: 'WRAP',
+                } },
+                fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)',
+              },
+            },
+          ],
+        },
+      });
+    }
+
+    existingSheets.add(sheetName);
+    logger.info(`📋 تم إنشاء ورقة تفاصيل الطلبات`);
+  } catch (error) {
+    if (error.message?.includes('already exists')) {
+      existingSheets.add(sheetName);
+      return;
+    }
+    throw error;
+  }
+}
+
+function formatJordanDateTime(timestamp) {
+  const date = timestamp ? new Date(timestamp) : new Date();
+  if (Number.isNaN(date.getTime())) return String(timestamp || '');
+  return new Date(date.getTime() + (3 * 60 * 60 * 1000))
+    .toISOString().replace('T', ' ').substring(0, 19);
+}
+
+async function findOrderDetailRowByTransactionId(transactionId) {
+  if (!transactionId) return null;
+  const sheetName = config.sheets.sheetNames.orderDetails || 'تفاصيل الطلبات';
+  const response = await sheetsApi.spreadsheets.values.get({
+    spreadsheetId,
+    range: `'${sheetName}'!A:A`,
+  });
+  const rows = response.data.values || [];
+  const index = rows.findIndex((row, rowIndex) => rowIndex > 0 && row[0] === transactionId);
+  return index >= 0 ? index + 1 : null;
+}
+
+/**
+ * إنشاء أو تحديث صف واحد لكل حركة مؤكدة. يضمن عدم تكرار تفاصيل العملية
+ * في Recovery أو عند وصول نفس الحدث أكثر من مرة.
+ */
+async function upsertOrderDetails(detail) {
+  if (!isInitialized || !detail?.transactionId) return;
+
+  const sheetName = config.sheets.sheetNames.orderDetails || 'تفاصيل الطلبات';
+  const row = [
+    detail.transactionId,
+    formatJordanDateTime(detail.timestamp),
+    detail.groupPrefix || '',
+    detail.producerName || 'غير معروف', detail.producerPhone || '',
+    detail.captainName || 'غير محدد', detail.captainPhone || '',
+    detail.reactorName || '', detail.reactorPhone || '',
+    detail.quantity || 0,
+    detail.orderText || 'غير متوفر', detail.tamText || 'غير متوفر', detail.emoji || '',
+    detail.status || 'نشط', detail.tamMessageId || '', detail.orderMessageId || '',
+    detail.source || '', detail.notes || '',
+  ];
+
+  try {
+    await ensureOrderDetailsSheet();
+    const existingRow = await findOrderDetailRowByTransactionId(detail.transactionId);
+    if (existingRow) {
+      await sheetsApi.spreadsheets.values.update({
+        spreadsheetId,
+        range: `'${sheetName}'!A${existingRow}:R${existingRow}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [row] },
+      });
+    } else {
+      await sheetsApi.spreadsheets.values.append({
+        spreadsheetId,
+        range: `'${sheetName}'!A:R`,
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: [row] },
+      });
+    }
+  } catch (error) {
+    logger.error('فشل حفظ تفاصيل الطلب', { error: error.message, transactionId: detail.transactionId });
+  }
+}
+
+/**
+ * تحديث الحالة أو الكمية في سجل التفاصيل، مع الإبقاء على أسماء ونصوص العملية الأصلية.
+ */
+async function updateOrderDetailStatus(transactionId, updates = {}) {
+  if (!isInitialized || !transactionId) return;
+
+  try {
+    await ensureOrderDetailsSheet();
+    const rowIndex = await findOrderDetailRowByTransactionId(transactionId);
+    if (!rowIndex) return;
+
+    const sheetName = config.sheets.sheetNames.orderDetails || 'تفاصيل الطلبات';
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${sheetName}'!A${rowIndex}:R${rowIndex}`,
+    });
+    const row = response.data.values?.[0] || [];
+    while (row.length < ORDER_DETAILS_HEADERS.length) row.push('');
+
+    if (updates.quantity !== undefined) row[9] = updates.quantity;
+    if (updates.status) row[13] = updates.status;
+    if (updates.notes) row[17] = updates.notes;
+
+    await sheetsApi.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${sheetName}'!A${rowIndex}:R${rowIndex}`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [row] },
+    });
+  } catch (error) {
+    logger.error('فشل تحديث تفاصيل الطلب', { error: error.message, transactionId });
+  }
+}
+
+// ====================================================
 // سجل التعديلات
 // ====================================================
 
@@ -2242,6 +2419,13 @@ async function updateTransactionStatus(rowIndex, updates) {
       requestBody: { values: [updatedRow] },
     });
 
+    const detailTransactionId = (currentRow[0] || '').replace(/^CANCELLED_/, '');
+    await updateOrderDetailStatus(detailTransactionId, {
+      status: updates.status,
+      quantity: updates.quantity,
+      notes: updates.notes,
+    });
+
     logger.info(`✅ تحديث حالة العملية في الصف ${rowIndex}: ${updates.status || 'بدون تغيير'}`);
   } catch (error) {
     logger.error('❌ فشل تحديث حالة العملية', { error: error.message, rowIndex });
@@ -2647,6 +2831,9 @@ module.exports = {
   getCaptainFromTamSheet,
   // سجل الحركات
   recordTransaction,
+  ensureOrderDetailsSheet,
+  upsertOrderDetails,
+  updateOrderDetailStatus,
   isSupervisor,
   cancelTransaction,
   generateWeeklyReport,

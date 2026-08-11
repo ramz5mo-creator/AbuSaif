@@ -906,6 +906,60 @@ async function resolveLidPhone(phone) {
   return phone.split(':')[0]; // أرجع الجزء الرقمي فقط (بدون @lid)
 }
 
+function normalizePhoneForComparison(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 9 ? digits.slice(-9) : digits;
+}
+
+function getCachedMessageContext(message) {
+  const payload = message?.message || {};
+  return payload.extendedTextMessage?.contextInfo ||
+    payload.imageMessage?.contextInfo ||
+    payload.videoMessage?.contextInfo ||
+    payload.audioMessage?.contextInfo ||
+    payload.documentMessage?.contextInfo || null;
+}
+
+/** يبني صف التدقيق دون الاعتماد على نجاحه في تسجيل الأرصدة اليومية. */
+function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone, captainPhone, reactorPhone }) {
+  const targetMessage = quotedMsgId ? whatsapp.getCachedMessage(quotedMsgId) : null;
+  const targetContext = getCachedMessageContext(targetMessage);
+  const persistedContext = quotedMsgId ? whatsapp.getOrderContextByReplyId(quotedMsgId) : null;
+  const orderMessageId = persistedContext?.orderMessageId || targetContext?.stanzaId || quotedMsgId || '';
+  const originalOrderMessage = orderMessageId
+    ? whatsapp.getCachedMessage(orderMessageId)
+    : targetMessage;
+
+  const producerName = sheets.getRegisteredName(producerPhone) ||
+    whatsapp.getPushName(originalOrderMessage) || 'غير معروف';
+  const captainName = sheets.getRegisteredName(captainPhone) ||
+    whatsapp.getPushName(targetMessage) || 'غير محدد';
+  const reactorName = sheets.getRegisteredName(reactorPhone) || whatsapp.getPushName(msg) || '';
+  const samePerson = normalizePhoneForComparison(producerPhone) &&
+    normalizePhoneForComparison(producerPhone) === normalizePhoneForComparison(captainPhone);
+
+  return {
+    transactionId: result.transactionId,
+    timestamp: result.timestamp,
+    groupPrefix,
+    producerName,
+    producerPhone,
+    captainName,
+    captainPhone,
+    reactorName,
+    reactorPhone,
+    quantity: result.quantity,
+    orderText: persistedContext?.orderText || whatsapp.extractText(originalOrderMessage) || 'غير متوفر',
+    tamText: persistedContext?.tamText || (targetContext ? (whatsapp.extractText(targetMessage) || 'غير متوفر') : ''),
+    emoji: result.text || '',
+    status: samePerson ? 'يحتاج مراجعة' : 'نشط',
+    tamMessageId: (targetContext || persistedContext) ? quotedMsgId : '',
+    orderMessageId,
+    source: (targetContext || persistedContext) ? 'تفاعل على رسالة تم' : 'تفاعل على الطلب',
+    notes: samePerson ? 'تحذير: رقم المنتج والكابتن متطابقان' : '',
+  };
+}
+
 // ====================================================
 // بدء التشغيل
 // ====================================================
@@ -935,6 +989,8 @@ async function start() {
     logger.info('✅ Google Sheets متصل');
         await sheets.loadSettings();
     logger.info('✅ الإعدادات محمّلة');
+    await sheets.ensureOrderDetailsSheet();
+    logger.info('✅ ورقة تفاصيل الطلبات جاهزة');
     // إنشاء/تحديث ورقة الرئيسية عند بدء التشغيل
     sheets.createDashboardSheet().catch(e => logger.warn('فشل تحديث الرئيسية', { error: e.message }));
   } catch (error) {
@@ -1150,7 +1206,11 @@ async function start() {
             // حفظ في tamCache للمرات القادمة
             whatsapp.setCaptainForMessage(quotedMsgId, captainPhone);
             if (realProducerPhone) {
-              whatsapp.setOrderForReply(quotedMsgId, realProducerPhone);
+              whatsapp.setOrderForReply(quotedMsgId, realProducerPhone, {
+                orderMessageId: originalOrderMsgId || '',
+                orderText: whatsapp.extractText(originalOrderMsg) || '',
+                tamText: whatsapp.extractText(targetMsg) || '',
+              });
             }
             logger.info('📌 حالة 1c: إيموجي على رسالة تم (من messageCache/contextInfo)', {
               captain: captainPhone, producer: realProducerPhone, qty: quantity
@@ -1255,6 +1315,16 @@ async function start() {
           status: 'نشط',
           notes: 'reaction'
         }).catch(() => {});
+
+        sheets.upsertOrderDetails(buildOrderDetail({
+          result,
+          msg,
+          quotedMsgId,
+          groupPrefix,
+          producerPhone: finalProducerPhone,
+          captainPhone: resolvedCaptainForSheet || '',
+          reactorPhone: producerPhone,
+        })).catch(() => {});
 
       } else if (result.type === 'cancel') {
         // === إلغاء ❌ ===
@@ -1675,7 +1745,14 @@ async function start() {
               }
             }
           }
-          whatsapp.setOrderForReply(tamMessageId, resolvedOwner);
+          const originalOrderMessage = result.quotedMessageId
+            ? whatsapp.getCachedMessage(result.quotedMessageId)
+            : null;
+          whatsapp.setOrderForReply(tamMessageId, resolvedOwner, {
+            orderMessageId: result.quotedMessageId || '',
+            orderText: whatsapp.extractText(originalOrderMessage) || '',
+            tamText: whatsapp.extractText(msg) || '',
+          });
         }
         
         logger.info('💾 حفظ "تم"', { 

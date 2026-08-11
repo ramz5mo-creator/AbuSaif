@@ -890,9 +890,15 @@ function getCaptainByMessageId(messageId) {
   return typeof entry === 'string' ? entry : (entry.captain || null);
 }
 
-function setOrderForReply(replyMsgId, producerPhone) {
+function setOrderForReply(replyMsgId, producerPhone, context = {}) {
   if (!replyMsgId || !producerPhone) return;
-  orderCache.set(replyMsgId, { producer: producerPhone, ts: Date.now() });
+  orderCache.set(replyMsgId, {
+    producer: producerPhone,
+    ts: Date.now(),
+    orderMessageId: context.orderMessageId || '',
+    orderText: context.orderText || '',
+    tamText: context.tamText || '',
+  });
   saveTamCacheDebounced();
 }
 
@@ -901,6 +907,12 @@ function getOrderByReplyId(replyMsgId) {
   if (!entry) return null;
   // دعم البنية القديمة (string) والجديدة ({producer, ts})
   return typeof entry === 'string' ? entry : (entry.producer || null);
+}
+
+function getOrderContextByReplyId(replyMsgId) {
+  const entry = orderCache.get(replyMsgId);
+  if (!entry || typeof entry === 'string') return null;
+  return { ...entry };
 }
 
 function getCachedMessage(messageId) {
@@ -1269,6 +1281,7 @@ module.exports = {
   addLidMapping,
   setOrderForReply,
   getOrderByReplyId,
+  getOrderContextByReplyId,
   getPushNameFromCachedMessage,
   resolvePhoneByPushName,
   syncGroupLids,
