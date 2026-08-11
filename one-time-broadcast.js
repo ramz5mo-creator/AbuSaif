@@ -10,7 +10,9 @@ function createOneTimeBroadcastProcessor({ volumePath, targetGroupId, getSocket,
     if (fs.existsSync(sentPath)) return { status: 'already-sent' };
     if (fs.existsSync(sendingPath)) return { status: 'unknown-after-send-attempt' };
     if (!fs.existsSync(requestPath)) return { status: 'idle' };
-    if (!isConnected()) return { status: 'waiting-for-connection' };
+    const connected = isConnected();
+    logger.info('📣 طلب إرسال أحادي بانتظار التنفيذ', { connected, hasSocket: Boolean(getSocket()) });
+    if (!connected) return { status: 'waiting-for-connection' };
 
     fs.renameSync(requestPath, sendingPath);
     try {
@@ -25,6 +27,7 @@ function createOneTimeBroadcastProcessor({ volumePath, targetGroupId, getSocket,
         throw new Error('اتصال واتساب غير جاهز للإرسال');
       }
 
+      logger.info('📣 بدء إرسال التحية الأحادية إلى السيف');
       const result = await sock.sendMessage(targetGroupId, { text });
       const receipt = {
         type: request.type,
