@@ -557,7 +557,7 @@ async function resolveLidDirect(lid) {
       }
     }
   } catch (e) {
-    logger.warn(`⚠️ فشل resolveLidDirect [${lid.substring(0, 20)}]: ${e.message}`);
+    logger.debug(`فشل resolveLidDirect [${lid.substring(0, 20)}]: ${e.message}`);
   }
   return null;
 }
@@ -1008,6 +1008,10 @@ let _autoResolveRunning = false;
 let _intervalsStarted = false;   // منع تكرار setInterval عند إعادة الاتصال
 let _autoResolveStarted = false; // منع تكرار startAutoResolveLids
 const _newlyResolvedLids = new Map();
+// عداد فشل لكل LID — بعد MAX_LID_FAILURES فشل متتالي يُنقل لقائمة "مستحيل الحل"
+const _lidFailCount = new Map();
+const _permanentlyFailedLids = new Set();
+const MAX_LID_FAILURES = 10;
 
 function queueLidForResolve(lid) {
   if (!lid || !lid.includes('@lid')) return;
@@ -1032,11 +1036,17 @@ async function autoResolveLidsBatch() {
   logger.info(`🤖 autoResolve: محاولة حل ${batch.length} LID من ${_lidResolveQueue.size} في الانتظار`);
   let resolved = 0;
   for (const lid of batch) {
+    // تخطي الـ LIDs المستحيلة
+    if (_permanentlyFailedLids.has(lid)) {
+      _lidResolveQueue.delete(lid);
+      continue;
+    }
     try {
       const result = await resolveLidDirect(lid);
       if (result) {
         resolved++;
         _lidResolveQueue.delete(lid);
+        _lidFailCount.delete(lid);
         const phone = result.split('@')[0].replace(/\D/g, '');
         if (phone.length >= 9) {
           _newlyResolvedLids.set(lid, phone);
@@ -1044,9 +1054,26 @@ async function autoResolveLidsBatch() {
           if (db) db.upsertMember({ lid, phone: phone.slice(-9) });
         }
         logger.info(`✅ autoResolve: ${lid.substring(0,15)} → ${phone}`);
+      } else {
+        // فشل بدون exception — زيادة عداد الفشل
+        const fails = (_lidFailCount.get(lid) || 0) + 1;
+        _lidFailCount.set(lid, fails);
+        if (fails >= MAX_LID_FAILURES) {
+          _permanentlyFailedLids.add(lid);
+          _lidResolveQueue.delete(lid);
+          logger.warn(`🚫 LID مستحيل الحل بعد ${fails} محاولة — تم إيقاف المحاولة: ${lid.substring(0,20)}`);
+        }
       }
     } catch(e) {
-      logger.debug(`autoResolve فشل: ${lid.substring(0,15)}`, { error: e.message });
+      const fails = (_lidFailCount.get(lid) || 0) + 1;
+      _lidFailCount.set(lid, fails);
+      if (fails >= MAX_LID_FAILURES) {
+        _permanentlyFailedLids.add(lid);
+        _lidResolveQueue.delete(lid);
+        logger.warn(`🚫 LID مستحيل الحل بعد ${fails} محاولة — تم إيقاف المحاولة: ${lid.substring(0,20)}`);
+      } else {
+        logger.debug(`autoResolve فشل (${fails}/${MAX_LID_FAILURES}): ${lid.substring(0,15)}`, { error: e.message });
+      }
     }
     await new Promise(r => setTimeout(r, 500));
   }

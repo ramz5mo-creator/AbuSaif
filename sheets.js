@@ -2153,7 +2153,9 @@ async function createDashboardSheet() {
           fields: 'gridProperties.frozenRowCount'
         }
       },
-      // دمج الخلايا
+      // فك الدمج القديم أولاً (لتجنب خطأ "You must select all cells in a merged range")
+      { unmergeCells: { range: { sheetId: dashSheetId, startRowIndex: 0, endRowIndex: 500, startColumnIndex: 0, endColumnIndex: 8 } } },
+      // دمج الخلايا الجديد
       ...merges.map(m => ({ mergeCells: { range: { sheetId: dashSheetId, ...m }, mergeType: 'MERGE_ALL' } })),
       // تنسيق الخلايا
       ...requests,
