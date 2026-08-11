@@ -26,6 +26,7 @@ const fs = require('fs');
 const path = require('path');
 const config = require('./config');
 const logger = require('./logger');
+const { normalizeReviewAnswer, getReviewResolution } = require('./review-workflow');
 const parser = require('./parser');
 
 let sheetsApi = null;
@@ -1364,6 +1365,199 @@ async function updateOrderDetailStatus(transactionId, updates = {}) {
     });
   } catch (error) {
     logger.error('فشل تحديث تفاصيل الطلب', { error: error.message, transactionId });
+  }
+}
+
+// ====================================================
+// مراجعة العمليات — قرار يدوي بنعم/لا، بلا تأثير تلقائي على الأرصدة
+// ====================================================
+
+const OPERATION_REVIEWS_HEADERS = [
+  'رقم المراجعة', 'وقت الإنشاء', 'الجروب', 'نوع التنبيه', 'المعرف المرجعي',
+  'سبب المراجعة', 'الرد (نعم/لا)', 'حالة المعالجة', 'وقت قراءة الرد', 'ملاحظات النظام'
+];
+
+function getOperationReviewsSheetName() {
+  return config.sheets.sheetNames.operationReviews || 'مراجعة العمليات';
+}
+
+async function ensureOperationReviewsSheet() {
+  const sheetName = getOperationReviewsSheetName();
+  if (existingSheets.has(sheetName)) return;
+
+  try {
+    await sheetsApi.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: sheetName, rightToLeft: true } } }],
+      },
+    });
+
+    await sheetsApi.spreadsheets.values.update({
+      spreadsheetId,
+      range: `'${sheetName}'!A1:J1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [OPERATION_REVIEWS_HEADERS] },
+    });
+
+    const meta = await sheetsApi.spreadsheets.get({ spreadsheetId });
+    const sheet = (meta.data.sheets || []).find(s => s.properties?.title === sheetName);
+    if (sheet?.properties?.sheetId !== undefined) {
+      const sheetId = sheet.properties.sheetId;
+      await sheetsApi.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: [
+            {
+              updateSheetProperties: {
+                properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
+                fields: 'gridProperties.frozenRowCount',
+              },
+            },
+            {
+              setBasicFilter: {
+                filter: { range: { sheetId, startRowIndex: 0, endRowIndex: 10000, startColumnIndex: 0, endColumnIndex: OPERATION_REVIEWS_HEADERS.length } },
+              },
+            },
+            {
+              repeatCell: {
+                range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: OPERATION_REVIEWS_HEADERS.length },
+                cell: { userEnteredFormat: {
+                  backgroundColor: { red: 0.72, green: 0.38, blue: 0.05 },
+                  textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
+                  horizontalAlignment: 'CENTER', verticalAlignment: 'MIDDLE', wrapStrategy: 'WRAP',
+                } },
+                fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)',
+              },
+            },
+            {
+              setDataValidation: {
+                range: { sheetId, startRowIndex: 1, endRowIndex: 10000, startColumnIndex: 6, endColumnIndex: 7 },
+                rule: {
+                  condition: { type: 'ONE_OF_LIST', values: [{ userEnteredValue: 'نعم' }, { userEnteredValue: 'لا' }] },
+                  strict: true, showCustomUi: true,
+                },
+              },
+            },
+          ],
+        },
+      });
+    }
+
+    existingSheets.add(sheetName);
+    logger.info('📋 تم إنشاء ورقة مراجعة العمليات مع خيارات نعم/لا');
+  } catch (error) {
+    if (error.message?.includes('already exists')) {
+      existingSheets.add(sheetName);
+      return;
+    }
+    throw error;
+  }
+}
+
+async function findOperationReviewRow(reviewId) {
+  if (!reviewId) return null;
+  const sheetName = getOperationReviewsSheetName();
+  const response = await sheetsApi.spreadsheets.values.get({ spreadsheetId, range: `'${sheetName}'!A:A` });
+  const rows = response.data.values || [];
+  const index = rows.findIndex((row, rowIndex) => rowIndex > 0 && row[0] === reviewId);
+  return index >= 0 ? index + 1 : null;
+}
+
+/** ينشئ تنبيهاً واحداً لكل عملية تحتاج مراجعة، ويحافظ على جواب المستخدم إذا كان موجوداً. */
+async function upsertOperationReview(review) {
+  if (!isInitialized || !review?.reviewId) return;
+  const sheetName = getOperationReviewsSheetName();
+  try {
+    await ensureOperationReviewsSheet();
+    const existingRow = await findOperationReviewRow(review.reviewId);
+    if (existingRow) return;
+
+    const row = [
+      review.reviewId, formatJordanDateTime(review.timestamp), review.groupPrefix || '',
+      review.alertType || 'يحتاج مراجعة', review.referenceId || '', review.reason || '',
+      '', 'بانتظار الرد', '', review.notes || '',
+    ];
+    await sheetsApi.spreadsheets.values.append({
+      spreadsheetId,
+      range: `'${sheetName}'!A:J`,
+      valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [row] },
+    });
+    logger.info('🔎 تمت إضافة عملية إلى ورقة المراجعات', { reviewId: review.reviewId.substring(0, 8) });
+  } catch (error) {
+    logger.error('فشل حفظ مراجعة العملية', { error: error.message, reviewId: review.reviewId });
+  }
+}
+
+/**
+ * ينقل التنبيهات القائمة «يحتاج مراجعة» إلى ورقة المراجعات مرة واحدة.
+ * لا يغيّر تفاصيل الطلب أو الأرصدة، ويحافظ على قرار المستخدم إن كان موجوداً.
+ */
+async function backfillOperationReviewsFromOrderDetails() {
+  if (!isInitialized) return { created: 0 };
+  const detailsSheetName = config.sheets.sheetNames.orderDetails || 'تفاصيل الطلبات';
+  try {
+    await ensureOperationReviewsSheet();
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${detailsSheetName}'!A2:R`,
+    });
+    const rows = response.data.values || [];
+    let created = 0;
+    for (const row of rows) {
+      const transactionId = row[0];
+      const status = row[13];
+      if (!transactionId || status !== 'يحتاج مراجعة') continue;
+      const reviewId = `REVIEW_${transactionId}`;
+      const exists = await findOperationReviewRow(reviewId);
+      if (exists) continue;
+      await upsertOperationReview({
+        reviewId,
+        timestamp: row[1],
+        groupPrefix: row[2] || '',
+        alertType: 'تطابق المنتج والكابتن',
+        referenceId: row[15] || row[0],
+        reason: row[17] || 'رقم المنتج والكابتن متطابقان',
+        notes: 'تنبيه قائم تم استيراده من تفاصيل الطلبات؛ لا يتم تعديل أي رصيد عند اختيار نعم أو لا',
+      });
+      created++;
+    }
+    return { created };
+  } catch (error) {
+    logger.error('فشل استيراد المراجعات القائمة', { error: error.message });
+    return { created: 0, error: error.message };
+  }
+}
+
+/** يقرأ إجابات المستخدم ويحدّث حالة الورقة فقط؛ لا يستدعي أي دوال أرصدة أو معاملات. */
+async function syncOperationReviewResponses() {
+  if (!isInitialized) return { updated: 0 };
+  const sheetName = getOperationReviewsSheetName();
+  try {
+    await ensureOperationReviewsSheet();
+    const response = await sheetsApi.spreadsheets.values.get({ spreadsheetId, range: `'${sheetName}'!A2:J` });
+    const rows = response.data.values || [];
+    let updated = 0;
+
+    for (let index = 0; index < rows.length; index++) {
+      const row = rows[index];
+      const answer = normalizeReviewAnswer(row[6]);
+      const resolution = getReviewResolution(answer);
+      if (!resolution || (row[7] === resolution.status && row[9] === resolution.note)) continue;
+
+      const rowNumber = index + 2;
+      await sheetsApi.spreadsheets.values.update({
+        spreadsheetId,
+        range: `'${sheetName}'!H${rowNumber}:J${rowNumber}`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [[resolution.status, formatJordanDateTime(), resolution.note]] },
+      });
+      updated++;
+    }
+    return { updated };
+  } catch (error) {
+    logger.error('فشل مزامنة إجابات المراجعات', { error: error.message });
+    return { updated: 0, error: error.message };
   }
 }
 
@@ -2834,6 +3028,10 @@ module.exports = {
   ensureOrderDetailsSheet,
   upsertOrderDetails,
   updateOrderDetailStatus,
+  ensureOperationReviewsSheet,
+  upsertOperationReview,
+  backfillOperationReviewsFromOrderDetails,
+  syncOperationReviewResponses,
   isSupervisor,
   cancelTransaction,
   generateWeeklyReport,

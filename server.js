@@ -1000,6 +1000,10 @@ async function start() {
     logger.info('✅ الإعدادات محمّلة');
     await sheets.ensureOrderDetailsSheet();
     logger.info('✅ ورقة تفاصيل الطلبات جاهزة');
+    await sheets.ensureOperationReviewsSheet();
+    logger.info('✅ ورقة مراجعة العمليات جاهزة');
+    const importedReviews = await sheets.backfillOperationReviewsFromOrderDetails();
+    if (importedReviews.created) logger.info('✅ تم استيراد مراجعات قائمة', importedReviews);
     // إنشاء/تحديث ورقة الرئيسية عند بدء التشغيل
     sheets.createDashboardSheet().catch(e => logger.warn('فشل تحديث الرئيسية', { error: e.message }));
   } catch (error) {
@@ -1325,7 +1329,7 @@ async function start() {
           notes: 'reaction'
         }).catch(() => {});
 
-        sheets.upsertOrderDetails(buildOrderDetail({
+        const orderDetail = buildOrderDetail({
           result,
           msg,
           quotedMsgId,
@@ -1333,7 +1337,19 @@ async function start() {
           producerPhone: finalProducerPhone,
           captainPhone: resolvedCaptainForSheet || '',
           reactorPhone: producerPhone,
-        })).catch(() => {});
+        });
+        sheets.upsertOrderDetails(orderDetail).catch(() => {});
+        if (orderDetail.status === 'يحتاج مراجعة') {
+          sheets.upsertOperationReview({
+            reviewId: `REVIEW_${result.transactionId}`,
+            timestamp: result.timestamp,
+            groupPrefix,
+            alertType: 'تطابق المنتج والكابتن',
+            referenceId: quotedMsgId || result.messageId || '',
+            reason: orderDetail.notes || 'رقم المنتج والكابتن متطابقان',
+            notes: 'لا يتم تعديل أي رصيد عند اختيار نعم أو لا',
+          }).catch(() => {});
+        }
 
       } else if (result.type === 'cancel') {
         // === إلغاء ❌ ===
@@ -1353,7 +1369,17 @@ async function start() {
 
         const existingTx = await sheets.findTransactionByMessageId(quotedMsgId, null);
         if (!existingTx) {
-          logger.warn('⛔ لم يتم العثور على عملية للإلغاء', { msgId: quotedMsgId?.substring(0, 8) });
+          const cancellerName = sheets.getRegisteredName(cancellerPhone) || whatsapp.getPushName(msg) || 'غير معروف';
+          await sheets.logEdit({
+            editorPhone: cancellerPhone,
+            editorName: cancellerName,
+            producerPhone: result.orderOwnerPhone || '',
+            captainPhone: result.quotedPhone || '',
+            oldQuantity: 0,
+            newQuantity: 0,
+            notes: `إلغاء بلا عملية أصلية — لا تأثير على الرصيد | group:${groupPrefix} | targetMsg:${quotedMsgId} | reactionEvent:${result.messageId}`,
+          });
+          logger.info('📝 تم توثيق إلغاء بلا عملية أصلية', { msgId: quotedMsgId?.substring(0, 8), reactionId: result.messageId?.substring(0, 8) });
           return;
         }
 
@@ -1932,6 +1958,20 @@ async function start() {
       logger.debug('فشل المطابقة اليومية', { error: e.message });
     }
   }, 60 * 60 * 1000); // كل ساعة
+  // 6d. قراءة قرارات المراجعة اليدوية كل دقيقة — لا تغيّر الأرصدة
+  let reviewSyncInProgress = false;
+  setInterval(async () => {
+    if (reviewSyncInProgress) return;
+    reviewSyncInProgress = true;
+    try {
+      const result = await sheets.syncOperationReviewResponses();
+      if (result.updated) logger.info('🔎 تمت مزامنة إجابات المراجعات', { updated: result.updated });
+    } catch (e) {
+      logger.debug('فشل مزامنة إجابات المراجعات', { error: e.message });
+    } finally {
+      reviewSyncInProgress = false;
+    }
+  }, 60 * 1000);
   // 6. التحقق من الإغلاق الأسبوعي (الجمعة 11:00 مساءً)
   setInterval(async () => {
     const now = new Date();
