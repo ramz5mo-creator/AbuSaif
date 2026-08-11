@@ -42,10 +42,8 @@ const BACKOFF_FACTOR    = 2;
 const BACKOFF_JITTER    = 0.2;     // ±20%
 const CONFLICT_DELAY_MS = 60_000;  // 60 ثانية عند تعارض الجلسة (440)
 const TIMEOUT_DELAY_MS  = 15_000;  // 15 ثانية عند timeout/unavailable
-const BAD_SESSION_DELAY_MS = 5_000; // 5 ثوانٍ بعد مسح auth التالفة
-
-// الملفات التي يجب الحفاظ عليها عند مسح auth (Cache دائم)
-const AUTH_KEEP_FILES = ['tam-cache.json', 'lid-map.json', 'recovery-cursors.json'];
+const BAD_SESSION_RETRY_DELAY_MS = 10_000; // 10 ثوانٍ — إعادة المحاولة بنفس الجلسة
+const BAD_SESSION_MAX_RETRIES    = 3;      // بعد 3 فشل متتالي → مسح session
 
 // أسباب الانقطاع المعروفة
 const DISCONNECT_REASONS = {
@@ -176,7 +174,8 @@ class ConnectionManager extends EventEmitter {
         browser:             ['AbuSaif-Bot', 'Safari', '17.0'],
         syncFullHistory:     false,
         retryRequestDelayMs: 500,
-        keepAliveIntervalMs: 25_000,
+        keepAliveIntervalMs: 20_000,  // ping كل 20 ثانية (أقل من 408 timeout)
+        connectTimeoutMs:    60_000,  // 60 ثانية للاتصال الأولي
         markOnlineOnConnect: false,
         getMessage: async (key) => {
           // يُستدعى من الخارج عبر حدث 'getMessage'
@@ -229,6 +228,7 @@ class ConnectionManager extends EventEmitter {
     this._isConnecting  = false;
     this._isFirstConnect = false;
     this._attempt       = 0;
+    this._badSessionRetries = 0; // نجح الاتصال — نصفّر عداد BAD_SESSION
     this._clearReconnectTimer();
     if (this._qrClearCallback) this._qrClearCallback();
 
@@ -262,9 +262,16 @@ class ConnectionManager extends EventEmitter {
 
     // جلسة تالفة — لا إعادة اتصال تلقائية
     if (code === DisconnectReason.badSession) {
-      logger.warn('[CM] ⚠️ BAD_SESSION — مسح auth وإعادة الاتصال تلقائياً...');
-      this.emit('BAD_SESSION', { ts });
-      this._clearAuthAndReconnect(ts, 'BAD_SESSION');
+      this._badSessionRetries = (this._badSessionRetries || 0) + 1;
+      this.emit('BAD_SESSION', { ts, retries: this._badSessionRetries });
+      if (this._badSessionRetries <= BAD_SESSION_MAX_RETRIES) {
+        logger.warn(`[CM] ⚠️ BAD_SESSION (${this._badSessionRetries}/${BAD_SESSION_MAX_RETRIES}) — إعادة المحاولة بنفس الجلسة...`);
+        this._scheduleReconnect(BAD_SESSION_RETRY_DELAY_MS, `BAD_SESSION retry ${this._badSessionRetries}`);
+      } else {
+        logger.warn(`[CM] ⚠️ BAD_SESSION تكرر ${this._badSessionRetries}x — مسح session وطلب QR جديد`);
+        this._badSessionRetries = 0;
+        this._clearAuthAndReconnect(ts, 'BAD_SESSION');
+      }
       return;
     }
 
@@ -353,7 +360,7 @@ class ConnectionManager extends EventEmitter {
     this._authState = null;
 
     // جدولة إعادة الاتصال بعد تأخير قصير
-    this._scheduleReconnect(BAD_SESSION_DELAY_MS, reason);
+    this._scheduleReconnect(BAD_SESSION_RETRY_DELAY_MS, reason);
   }
 
   // ====================================================
