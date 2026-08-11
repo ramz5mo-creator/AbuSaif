@@ -1241,11 +1241,12 @@ async function logEdit(editData) {
     editData.oldQuantity || 0,
     editData.newQuantity || 0,
     (editData.newQuantity || 0) - (editData.oldQuantity || 0),
+    editData.notes || '',  // عمود I: السبب / الملاحظة
   ];
   try {
     await sheetsApi.spreadsheets.values.append({
       spreadsheetId,
-      range: `'${sheetName}'!A:H`,
+      range: `'${sheetName}'!A:I`,
       valueInputOption: 'RAW',
       insertDataOption: 'INSERT_ROWS',
       requestBody: { values: [row] },
@@ -1303,7 +1304,10 @@ async function findTransactionByMessageId(messageId, reactorPhone) {
       const rowNotes = row[9] || '';
 
       // تخطي الملغاة (نعرفها إذا كان معرف العملية يبدأ بـ CANCELLED أو الملاحظات تحتوي على ملغى)
-      if (rowId.startsWith('CANCELLED') || rowNotes.includes('ملغى')) continue;
+      // تخطي الملغاة والمحذوفة — لا نريد رفض إيموجي جديد بسبب عملية محذوفة سابقة
+      if (rowId.startsWith('CANCELLED') || rowNotes.includes('ملغى') ||
+          rowNotes.includes('محذوف') || rowNotes.includes('حذف إيموجي') ||
+          rowNotes.includes('تغيير إيموجي')) continue;
 
       // مطابقة: messageId في العمود المخصص له (I) أو ضمن الملاحظات (J)
       const idMatch = rowMsgId === messageId || rowMsgId.includes(messageId) || 
