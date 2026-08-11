@@ -1652,34 +1652,126 @@ async function start() {
           msgId: (tamMessageId || '').substring(0, 8) 
         });
 
-        // إذا كان الرد يحتوي على إيموجي كمي مباشرة (مثل رد بـ 👍)
-        if (result.quantity > 0 && result.orderOwnerPhone) {
+        // ====================================================
+        // رد كمي (6️⃣ وما فوق) على رسالة "تم"
+        // ====================================================
+        // المنطق:
+        // - من أرسل 6️⃣ = result.phone = صاحب الطلب (المنتج)
+        // - صاحب رسالة "تم" = الكابتن (محفوظ في tamCache)
+        //
+        // إذا لم يتحدَّد الكابتن وصاحب الطلب بشكل موثوق:
+        //   → لا تُسجَّل بأدوار خاطئة
+        //   → تُحفظ في سجل الحركات بحالة "⏳ معلّق" للمراجعة اليدوية
+        // ====================================================
+        if (result.quantity > 0) {
           const targetGroups = config.whatsapp.targetGroups || [];
           const groupInfo = targetGroups.find(g => g.id === result.groupId);
           const groupPrefix = groupInfo ? groupInfo.prefix : '';
-          
-          try {
-            const ownerName = whatsapp.getPushName(msg); // pushName للمستلم (الراد)
-            const captainRegName = sheets.getRegisteredName(captainPhone) || ownerName;
-            const producerRegName = sheets.getRegisteredName(result.orderOwnerPhone) || 'منتج';
-            await sheets.updateTotalsProduction(result.orderOwnerPhone, result.quantity, groupPrefix, producerRegName);
-            await sheets.updateTotalsReception(captainPhone, result.quantity, groupPrefix, captainRegName);
-            
+          const quotedMsgIdKmi = result.quotedMessageId;
+
+          // الخطوة 1: تحديد الكابتن من tamCache (المصدر الموثوق)
+          let realCaptain = null;
+          let realProducer = null;
+          let rolesConfirmed = false;
+
+          if (quotedMsgIdKmi) {
+            const captainFromCache = whatsapp.getCaptainByMessageId(quotedMsgIdKmi);
+            const producerFromCache = whatsapp.getOrderByReplyId(quotedMsgIdKmi);
+            if (captainFromCache) {
+              realCaptain = captainFromCache;
+              // صاحب الطلب: من orderCache أو من أرسل 6️⃣
+              realProducer = producerFromCache || result.phone;
+              rolesConfirmed = true;
+              logger.info('✅ أدوار الرد الكمي من tamCache', {
+                captain: realCaptain,
+                producer: realProducer,
+                qty: result.quantity
+              });
+            }
+          }
+
+          // الخطوة 2: إذا لم يُعثر في tamCache — نحاول من result مباشرة
+          if (!rolesConfirmed) {
+            // result.orderOwnerPhone = صاحب رسالة "تم" = الكابتن
+            // result.phone = من أرسل 6️⃣ = صاحب الطلب
+            if (result.orderOwnerPhone && result.phone && result.orderOwnerPhone !== result.phone) {
+              realCaptain = result.orderOwnerPhone;
+              realProducer = result.phone;
+              rolesConfirmed = true;
+              logger.info('✅ أدوار الرد الكمي من result مباشرة', {
+                captain: realCaptain,
+                producer: realProducer,
+                qty: result.quantity
+              });
+            }
+          }
+
+          // حل LID وتنظيف الأرقام
+          if (realCaptain && typeof realCaptain === 'string' && realCaptain.includes('@lid')) {
+            const resolved = whatsapp.resolveLid(realCaptain);
+            if (resolved && !resolved.includes('@lid')) realCaptain = resolved.split('@')[0].replace(/\D/g, '');
+            else realCaptain = realCaptain.split(':')[0].replace(/\D/g, '');
+          }
+          if (realProducer && typeof realProducer === 'string' && realProducer.includes('@lid')) {
+            const resolved = whatsapp.resolveLid(realProducer);
+            if (resolved && !resolved.includes('@lid')) realProducer = resolved.split('@')[0].replace(/\D/g, '');
+            else realProducer = realProducer.split(':')[0].replace(/\D/g, '');
+          }
+          if (realCaptain && typeof realCaptain === 'string' && realCaptain.includes('@')) realCaptain = realCaptain.split('@')[0].replace(/\D/g, '');
+          if (realProducer && typeof realProducer === 'string' && realProducer.includes('@')) realProducer = realProducer.split('@')[0].replace(/\D/g, '');
+
+          // الخطوة 3: التسجيل أو الحفظ معلّقاً
+          if (rolesConfirmed && realCaptain && realProducer && realCaptain !== realProducer) {
+            // ✅ الأدوار صحيحة — سجّل مباشرة
+            try {
+              const captainRegName = sheets.getRegisteredName(realCaptain) || 'كابتن';
+              const producerRegName = sheets.getRegisteredName(realProducer) || 'منتج';
+              await sheets.updateTotalsProduction(realProducer, result.quantity, groupPrefix, producerRegName);
+              await sheets.updateTotalsReception(realCaptain, result.quantity, groupPrefix, captainRegName);
+              sheets.recordTransaction({
+                transactionId: result.transactionId,
+                timestamp: result.timestamp,
+                producerPhone: realProducer,
+                captainPhone: realCaptain,
+                quantity: result.quantity,
+                type: 'استلام (رد كمي)',
+                emoji: result.text || '⌨️',
+                groupPrefix: groupPrefix,
+                messageId: tamMessageId || '',
+                status: 'نشط',
+                notes: 'reply-quantity'
+              }).catch(() => {});
+              logger.info(`✅ رد كمي مُسجَّل: منتج=${realProducer} +${result.quantity} | كابتن=${realCaptain} [${groupPrefix}]`);
+            } catch (error) {
+              logger.error('فشل تسجيل رد كمي', { error: error.message });
+            }
+          } else {
+            // ⏳ الأدوار غير مؤكدة — احفظ معلّقاً لا تضيّع العملية
+            const pendingInfo = {
+              rawPhone: result.phone || '',
+              rawOrderOwner: result.orderOwnerPhone || '',
+              quotedMsgId: quotedMsgIdKmi || '',
+              captainFromMsg: captainPhone || '',
+              reason: !rolesConfirmed ? 'لم يُعثر على tamCache' : (realCaptain === realProducer ? 'الكابتن = المنتج' : 'بيانات ناقصة')
+            };
+            logger.warn('⏳ رد كمي معلّق — حُفظ للمراجعة', {
+              qty: result.quantity,
+              group: groupPrefix,
+              ...pendingInfo
+            });
             sheets.recordTransaction({
               transactionId: result.transactionId,
               timestamp: result.timestamp,
-              producerPhone: result.orderOwnerPhone,
-              captainPhone: captainPhone,
+              producerPhone: pendingInfo.rawOrderOwner || pendingInfo.rawPhone || '?',
+              captainPhone: pendingInfo.captainFromMsg || '?',
               quantity: result.quantity,
-              type: 'استلام (رد)',
-              emoji: '⌨️',
+              type: 'رد كمي (معلّق)',
+              emoji: result.text || '⌨️',
               groupPrefix: groupPrefix,
               messageId: tamMessageId || '',
-              status: 'نشط',
-              notes: 'reply'
+              status: '⏳ معلّق',
+              notes: `يحتاج مراجعة | ${pendingInfo.reason} | quotedMsg=${pendingInfo.quotedMsgId.substring(0,8)}`
             }).catch(() => {});
-          } catch (error) {
-            logger.error('فشل تسجيل رد كمي', { error: error.message });
           }
         }
       }
