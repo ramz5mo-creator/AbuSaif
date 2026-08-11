@@ -1479,6 +1479,26 @@ async function start() {
             quantity: 0,  // تصفير الكمية في عمود E
             notes: `حذف إيموجي بواسطة ${producerPhone} في ${new Date().toISOString()} | الكمية الأصلية: ${removeQuantity} | msgId:${quotedMsgId}`
           });
+          // تسجيل في ورقة سجل التعديلات — من حذف + الكمية المحذوفة
+          try {
+            const deleterName = sheets.getRegisteredName(producerPhone) || producerPhone;
+            await sheets.logEdit({
+              editorPhone: producerPhone,
+              editorName: deleterName,
+              producerPhone: removeProducer,
+              captainPhone: removeCaptain || '',
+              oldQuantity: removeQuantity,
+              newQuantity: 0,
+            });
+            logger.info('📝 تم تسجيل الحذف في سجل التعديلات', {
+              deleter: producerPhone,
+              producer: removeProducer,
+              captain: removeCaptain || '—',
+              qty: removeQuantity,
+            });
+          } catch (logErr) {
+            logger.error('فشل تسجيل حذف الإيموجي في سجل التعديلات', { error: logErr.message });
+          }
         }
       }
 
