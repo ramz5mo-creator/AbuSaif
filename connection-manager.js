@@ -72,6 +72,7 @@ class ConnectionManager extends EventEmitter {
     this._reconnectTimer = null; // مؤقت إعادة الاتصال
     this._attempt      = 0;      // عداد المحاولات المتتالية
     this._isFirstConnect = true; // هل هذا أول اتصال
+    this._isConnected  = false;  // حالة موثوقة تحدثها connection.update
     this._destroyed    = false;  // هل تم إيقاف المدير نهائياً
     this._messageHandler = null; // معالج الرسائل الخارجي
     this._qrCallback   = null;   // callback لعرض QR
@@ -121,7 +122,7 @@ class ConnectionManager extends EventEmitter {
 
   /** هل الاتصال مفتوح الآن */
   isConnected() {
-    return this._sock?.ws?.readyState === 1;
+    return Boolean(this._isConnected && this._sock);
   }
 
   // ====================================================
@@ -226,6 +227,7 @@ class ConnectionManager extends EventEmitter {
     const prevAttempts = this._attempt;
 
     this._isConnecting  = false;
+    this._isConnected   = true;
     this._isFirstConnect = false;
     this._attempt       = 0;
     this._badSessionRetries = 0; // نجح الاتصال — نصفّر عداد BAD_SESSION
@@ -244,6 +246,7 @@ class ConnectionManager extends EventEmitter {
 
   _onDisconnected(lastDisconnect) {
     this._isConnecting = false;
+    this._isConnected  = false;
     const err        = new Boom(lastDisconnect?.error);
     const code       = err?.output?.statusCode;
     const rawReason  = DISCONNECT_REASONS[code] || `كود غير معروف (${code})`;
@@ -368,6 +371,7 @@ class ConnectionManager extends EventEmitter {
   // ====================================================
 
   _closeSock(reason) {
+    this._isConnected = false;
     if (!this._sock) return;
     try {
       this._sock.ev.removeAllListeners();
