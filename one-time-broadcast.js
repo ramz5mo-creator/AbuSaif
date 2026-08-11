@@ -35,7 +35,7 @@ function createOneTimeBroadcastProcessor({ volumePath, targetGroupId, getSocket,
       };
       fs.writeFileSync(sentPath, JSON.stringify(receipt, null, 2));
       fs.unlinkSync(sendingPath);
-      logger.info('📣 تم إرسال الرسالة التجريبية الأحادية إلى دريمكس', { messageId: receipt.messageId });
+      logger.info('📣 تم إرسال الرسالة التجريبية الأحادية إلى السيف', { messageId: receipt.messageId });
       return { status: 'sent', receipt };
     } catch (error) {
       logger.error('فشل إرسال الرسالة التجريبية الأحادية', { error: error.message });

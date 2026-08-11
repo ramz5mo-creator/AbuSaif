@@ -1938,7 +1938,7 @@ async function start() {
   // لا يوجد مسار HTTP عام ولا يمكنها إعادة الإرسال بعد إنشاء إيصال .sent.
   const oneTimeBroadcast = createOneTimeBroadcastProcessor({
     volumePath: config.volumePath,
-    targetGroupId: config.whatsapp.targetGroups.find(group => group.prefix === 'دريمكس').id,
+    targetGroupId: config.whatsapp.targetGroups.find(group => group.prefix === 'السيف').id,
     getSocket: whatsapp.getSocket,
     isConnected: whatsapp.isConnected,
     logger,
