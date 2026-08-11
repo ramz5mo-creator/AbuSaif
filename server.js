@@ -920,6 +920,12 @@ function getCachedMessageContext(message) {
     payload.documentMessage?.contextInfo || null;
 }
 
+/** يستخرج نص الرسالة الأصلية المضمّن داخل رد واتساب عندما لا تكون في messageCache. */
+function getQuotedContextText(contextInfo) {
+  if (!contextInfo?.quotedMessage) return '';
+  return whatsapp.extractText({ message: contextInfo.quotedMessage }) || '';
+}
+
 /** يبني صف التدقيق دون الاعتماد على نجاحه في تسجيل الأرصدة اليومية. */
 function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone, captainPhone, reactorPhone }) {
   const targetMessage = quotedMsgId ? whatsapp.getCachedMessage(quotedMsgId) : null;
@@ -929,6 +935,9 @@ function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone
   const originalOrderMessage = orderMessageId
     ? whatsapp.getCachedMessage(orderMessageId)
     : targetMessage;
+  const embeddedOrderText = getQuotedContextText(targetContext);
+  const cachedOrderText = whatsapp.extractText(originalOrderMessage) || '';
+  const cachedTamText = whatsapp.extractText(targetMessage) || '';
 
   const producerName = sheets.getRegisteredName(producerPhone) ||
     whatsapp.getPushName(originalOrderMessage) || 'غير معروف';
@@ -949,8 +958,8 @@ function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone
     reactorName,
     reactorPhone,
     quantity: result.quantity,
-    orderText: persistedContext?.orderText || whatsapp.extractText(originalOrderMessage) || 'غير متوفر',
-    tamText: persistedContext?.tamText || (targetContext ? (whatsapp.extractText(targetMessage) || 'غير متوفر') : ''),
+    orderText: persistedContext?.orderText || cachedOrderText || embeddedOrderText || result.quotedText || 'غير متوفر',
+    tamText: persistedContext?.tamText || (targetContext ? (cachedTamText || result.quotedText || 'غير متوفر') : ''),
     emoji: result.text || '',
     status: samePerson ? 'يحتاج مراجعة' : 'نشط',
     tamMessageId: (targetContext || persistedContext) ? quotedMsgId : '',
@@ -1208,7 +1217,7 @@ async function start() {
             if (realProducerPhone) {
               whatsapp.setOrderForReply(quotedMsgId, realProducerPhone, {
                 orderMessageId: originalOrderMsgId || '',
-                orderText: whatsapp.extractText(originalOrderMsg) || '',
+                orderText: whatsapp.extractText(originalOrderMsg) || getQuotedContextText(targetContextInfo),
                 tamText: whatsapp.extractText(targetMsg) || '',
               });
             }
@@ -1750,7 +1759,7 @@ async function start() {
             : null;
           whatsapp.setOrderForReply(tamMessageId, resolvedOwner, {
             orderMessageId: result.quotedMessageId || '',
-            orderText: whatsapp.extractText(originalOrderMessage) || '',
+            orderText: whatsapp.extractText(originalOrderMessage) || result.quotedText || '',
             tamText: whatsapp.extractText(msg) || '',
           });
         }
