@@ -659,7 +659,10 @@ function saveTamCache() {
 
 function loadTamCache() {
   try {
-    if (!fs.existsSync(TAM_CACHE_PATH)) return;
+    if (!fs.existsSync(TAM_CACHE_PATH)) {
+      logger.info('📂 tamCache: لا يوجد ملف محفوظ — سيُنشأ عند أول "تم"');
+      return;
+    }
     const raw = JSON.parse(fs.readFileSync(TAM_CACHE_PATH, 'utf8'));
     const now = Date.now();
     let tamCount = 0, orderCount = 0, skipped = 0;
