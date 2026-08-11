@@ -42,6 +42,10 @@ const BACKOFF_FACTOR    = 2;
 const BACKOFF_JITTER    = 0.2;     // ±20%
 const CONFLICT_DELAY_MS = 60_000;  // 60 ثانية عند تعارض الجلسة (440)
 const TIMEOUT_DELAY_MS  = 15_000;  // 15 ثانية عند timeout/unavailable
+const BAD_SESSION_DELAY_MS = 5_000; // 5 ثوانٍ بعد مسح auth التالفة
+
+// الملفات التي يجب الحفاظ عليها عند مسح auth (Cache دائم)
+const AUTH_KEEP_FILES = ['tam-cache.json', 'lid-map.json', 'recovery-cursors.json'];
 
 // أسباب الانقطاع المعروفة
 const DISCONNECT_REASONS = {
@@ -250,15 +254,17 @@ class ConnectionManager extends EventEmitter {
 
     // تسجيل الخروج الكامل — لا إعادة اتصال
     if (code === DisconnectReason.loggedOut) {
-      logger.error('[CM] ❌ تم تسجيل الخروج! احذف مجلد auth وأعد المسح.');
+      logger.warn('[CM] ⚠️ LOGGED_OUT — مسح auth وإعادة الاتصال تلقائياً...');
       this.emit('LOGGED_OUT', { ts });
+      this._clearAuthAndReconnect(ts, 'LOGGED_OUT');
       return;
     }
 
     // جلسة تالفة — لا إعادة اتصال تلقائية
     if (code === DisconnectReason.badSession) {
-      logger.error('[CM] ❌ جلسة تالفة! احذف مجلد auth وأعد المسح.');
+      logger.warn('[CM] ⚠️ BAD_SESSION — مسح auth وإعادة الاتصال تلقائياً...');
       this.emit('BAD_SESSION', { ts });
+      this._clearAuthAndReconnect(ts, 'BAD_SESSION');
       return;
     }
 
@@ -320,6 +326,34 @@ class ConnectionManager extends EventEmitter {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
     }
+  }
+
+  // ====================================================
+  // مسح auth التالفة وإعادة الاتصال (QR جديد)
+  // ====================================================
+
+  _clearAuthAndReconnect(ts, reason) {
+    if (this._destroyed) return;
+
+    const authPath = path.resolve(config.whatsapp.authPath);
+    logger.warn(`[CM] 🗑️ مسح ملفات auth التالفة (${reason}) — المسار: ${authPath}`);
+
+    try {
+      if (fs.existsSync(authPath)) {
+        // مسح المجلد بالكامل (authPath = /app/auth/session — لا يحتوي على الكاشات الدائمة)
+        fs.rmSync(authPath, { recursive: true, force: true });
+        logger.info(`[CM] ✅ تم مسح مجلد session — سيظهر QR جديد`);
+      }
+    } catch (e) {
+      logger.error('[CM] فشل مسح auth', { error: e.message });
+    }
+
+    // إعادة تهيئة saveCreds لإعادة تحميل الجلسة الجديدة
+    this._saveCreds = null;
+    this._authState = null;
+
+    // جدولة إعادة الاتصال بعد تأخير قصير
+    this._scheduleReconnect(BAD_SESSION_DELAY_MS, reason);
   }
 
   // ====================================================

@@ -697,8 +697,10 @@ function saveTamCacheDebounced() {
 }
 
 async function loadGroupParticipants() {
+async function loadGroupParticipants() {
   const sock = connectionManager.getSocket();
   if (!sock) return;
+  if (!connectionManager.isConnected()) return;
   try {
     const targetGroups = config.whatsapp.targetGroups || [];
     for (const group of targetGroups) {
@@ -730,8 +732,10 @@ async function loadGroupParticipants() {
 }
 
 async function loadGroupParticipantsAndSync() {
+async function loadGroupParticipantsAndSync() {
   const sock = connectionManager.getSocket();
   if (!sock) return;
+  if (!connectionManager.isConnected()) return;
   const db = getMembersDb();
   const targetGroups = config.whatsapp.targetGroups || [];
   const newMembers = [];
@@ -1177,7 +1181,7 @@ async function autoResolveLidsBatch() {
 
 async function collectAllUnresolvedLids() {
   const sock = connectionManager.getSocket();
-  if (!sock) return 0;
+  if (!sock || !connectionManager.isConnected()) return 0;
   const targetGroups = config.whatsapp.targetGroups || [];
   let queued = 0;
   for (const group of targetGroups) {
@@ -1208,9 +1212,21 @@ async function startAutoResolveLids() {
   logger.info('🚀 بدء نظام LID الشامل (5 طبقات)');
   await collectAllUnresolvedLids();
   setTimeout(autoResolveLidsBatch, 5 * 1000);
-  setInterval(async () => { await collectAllUnresolvedLids(); await autoResolveLidsBatch(); }, 5 * 60 * 1000);
-  setInterval(autoResolveLidsBatch, 30 * 1000);
-  setInterval(async () => { logger.info('🔄 تحديث دوري لقائمة الأعضاء (كل ساعة)'); await loadGroupParticipants(); await collectAllUnresolvedLids(); }, 60 * 60 * 1000);
+  setInterval(async () => {
+    if (!connectionManager.isConnected()) return;
+    await collectAllUnresolvedLids();
+    await autoResolveLidsBatch();
+  }, 5 * 60 * 1000);
+  setInterval(async () => {
+    if (!connectionManager.isConnected()) return;
+    await autoResolveLidsBatch();
+  }, 30 * 1000);
+  setInterval(async () => {
+    if (!connectionManager.isConnected()) return;
+    logger.info('🔄 تحديث دوري لقائمة الأعضاء (كل ساعة)');
+    await loadGroupParticipants();
+    await collectAllUnresolvedLids();
+  }, 60 * 60 * 1000);
   logger.info(`✅ نظام LID نشط: ${_lidResolveQueue.size} في القائمة`);
 }
 
