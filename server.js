@@ -90,6 +90,7 @@ function markAsProcessed(msgId) {
 // خادم ويب لعرض QR + حالة البوت
 // ====================================================
 let currentQR = null;
+let oneTimeBroadcast = null;
 
 const httpServer = http.createServer(async (req, res) => {
   if (req.url === '/' || req.url === '/qr') {
@@ -637,6 +638,11 @@ const httpServer = http.createServer(async (req, res) => {
         text: 'اهلا بالجميع',
       }));
       logger.info('📣 تم تجهيز طلب التحية الأحادي إلى السيف');
+    }
+    if (!oneTimeBroadcast) {
+      res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: 'معالج الإرسال لم يكتمل تشغيله بعد' }));
+      return;
     }
     const result = await oneTimeBroadcast.processPendingRequest();
     if (result.status !== 'sent') {
@@ -1973,7 +1979,7 @@ async function start() {
 
   // 4b. قناة تنفيذ أحادية الاستخدام: تقرأ طلباً محلياً من الـVolume ثم تحذفه بعد الإرسال.
   // لا يوجد مسار HTTP عام ولا يمكنها إعادة الإرسال بعد إنشاء إيصال .sent.
-  const oneTimeBroadcast = createOneTimeBroadcastProcessor({
+  oneTimeBroadcast = createOneTimeBroadcastProcessor({
     volumePath: config.volumePath,
     targetGroupId: config.whatsapp.targetGroups.find(group => group.prefix === 'السيف').id,
     getSocket: whatsapp.getSocket,
