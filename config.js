@@ -54,6 +54,7 @@ module.exports = {
       supervisorEditHours: 168, // المشرف يمكنه التعديل خلال الأسبوع (168 ساعة)
     },
     weeklyReport: {
+      enabled: false, // موقوف مؤقتاً بطلب الإدارة؛ لا يولّد التقرير ولا يكتب في ورقة نهاية الأسبوع
       cutoffDay: 5,    // الجمعة (0: الأحد, 5: الجمعة)
       cutoffHour: 23,   // 11:00 مساءً
       cutoffMinute: 0

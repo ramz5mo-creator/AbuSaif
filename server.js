@@ -105,7 +105,9 @@ const httpServer = http.createServer(async (req, res) => {
           <p>آخر تحديث: ${new Date().toLocaleString('ar-JO', {timeZone:'Asia/Amman'})}</p>
         </div>
         <div style="margin-top:30px;">
-          <a href="/weekly-report" style="color:#0f0;text-decoration:none;border:1px solid #0f0;padding:10px;border-radius:5px;margin-left:10px;">📊 تقرير نهاية الأسبوع</a>
+          ${config.sheets.weeklyReport?.enabled === true
+            ? '<a href="/weekly-report" style="color:#0f0;text-decoration:none;border:1px solid #0f0;padding:10px;border-radius:5px;margin-left:10px;">📊 تقرير نهاية الأسبوع</a>'
+            : '<span style="color:#888;border:1px solid #555;padding:10px;border-radius:5px;margin-left:10px;">📊 تقرير نهاية الأسبوع (موقوف مؤقتاً)</span>'}
           <a href="/groups" style="color:#0f0;text-decoration:none;border:1px solid #0f0;padding:10px;border-radius:5px;margin-left:10px;">👥 الجروبات</a>
           <a href="/logout" style="color:#f00;text-decoration:none;border:1px solid #f00;padding:10px;border-radius:5px;">⚠️ تسجيل الخروج</a>
         </div>
@@ -282,6 +284,11 @@ const httpServer = http.createServer(async (req, res) => {
       res.end('Error: ' + e.message);
     }
   } else if (req.url === '/weekly-report') {
+    if (config.sheets.weeklyReport?.enabled !== true) {
+      res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<html><body style="background:#111;color:#ff0;text-align:center;padding:40px;font-family:monospace;direction:rtl;"><h1>تقرير نهاية الأسبوع موقوف مؤقتاً</h1><p>لن يتم إنشاء أو تعديل أي تقرير حتى إعادة تفعيله صراحةً.</p><br><a href="/" style="color:#fff;">العودة للرئيسية</a></body></html>');
+      return;
+    }
     try {
       const success = await sheets.generateWeeklyReport();
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -2080,21 +2087,25 @@ async function start() {
       reviewSyncInProgress = false;
     }
   }, 60 * 1000);
-  // 6. التحقق من الإغلاق الأسبوعي (الجمعة 11:00 مساءً)
-  setInterval(async () => {
-    const now = new Date();
-    // توقيت الأردن GMT+3
-    const jordanTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
-    
-    // الجمعة = 5
-    // نتحقق من الدقيقة الصفر لضمان التشغيل مرة واحدة فقط في تلك الساعة
-    if (jordanTime.getUTCDay() === 5 && 
-        jordanTime.getUTCHours() === 23 && 
-        jordanTime.getUTCMinutes() === 0) {
-      logger.info('🕒 موعد الإغلاق الأسبوعي - توليد التقرير...');
-      await sheets.generateWeeklyReport();
-    }
-  }, 60000); // كل دقيقة
+  // 6. التحقق من الإغلاق الأسبوعي (الجمعة 11:00 مساءً) عند تفعيله صراحةً فقط.
+  if (config.sheets.weeklyReport?.enabled === true) {
+    setInterval(async () => {
+      const now = new Date();
+      // توقيت الأردن GMT+3
+      const jordanTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
+
+      // الجمعة = 5
+      // نتحقق من الدقيقة الصفر لضمان التشغيل مرة واحدة فقط في تلك الساعة
+      if (jordanTime.getUTCDay() === 5 &&
+          jordanTime.getUTCHours() === 23 &&
+          jordanTime.getUTCMinutes() === 0) {
+        logger.info('🕒 موعد الإغلاق الأسبوعي - توليد التقرير...');
+        await sheets.generateWeeklyReport();
+      }
+    }, 60000); // كل دقيقة
+  } else {
+    logger.info('📊 تقرير نهاية الأسبوع موقوف مؤقتاً بطلب الإدارة');
+  }
 
   logger.info('✅ النظام جاهز. في انتظار الرسائل...');
 }

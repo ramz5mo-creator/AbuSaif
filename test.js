@@ -4,6 +4,7 @@
  */
 
 const parser = require('./parser');
+const config = require('./config');
 const fs = require('fs');
 const path = require('path');
 
@@ -105,6 +106,13 @@ const historicalWindowIsBounded = recoverySource.includes('runHistoricalRecovery
   recoverySource.includes('_cursors = cursorsBefore');
 console.log(`  ${historicalWindowIsBounded ? '✅' : '❌'} الاستعادة التاريخية مقيدة زمنياً ولا تغيّر مؤشر الرسائل الحي`);
 if (!historicalWindowIsBounded) process.exitCode = 1;
+
+// === اختبار تعطيل تقرير نهاية الأسبوع ===
+console.log('\n📊 اختبار تعطيل تقرير نهاية الأسبوع:');
+const weeklyReportIsDisabled = config.sheets.weeklyReport?.enabled === false &&
+  serverSource.includes("config.sheets.weeklyReport?.enabled === true");
+console.log(`  ${weeklyReportIsDisabled ? '✅' : '❌'} التقرير لا يعمل يدوياً أو تلقائياً عندما يكون موقوفاً`);
+if (!weeklyReportIsDisabled) process.exitCode = 1;
 
 console.log('\n═══════════════════════════════════════');
 console.log('   انتهى الاختبار');
