@@ -90,6 +90,22 @@ const initialConnectionRunsRecovery = Boolean(
 console.log(`  ${initialConnectionRunsRecovery ? '✅' : '❌'} الاتصال الأولي يفعّل Recovery`);
 if (!initialConnectionRunsRecovery) process.exitCode = 1;
 
+// === اختبار منع تكرار عملية مسجلة في Google Sheets ===
+console.log('\n🛡️ اختبار منع التكرار الدائم:');
+const serverSource = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+const persistentDuplicateIsIgnored = serverSource.includes('تفاعل مسترجع مكرر — العملية موجودة بالكمية نفسها');
+console.log(`  ${persistentDuplicateIsIgnored ? '✅' : '❌'} العملية المطابقة في Google Sheets لا تعيد الأرصدة`);
+if (!persistentDuplicateIsIgnored) process.exitCode = 1;
+
+// === اختبار الاستعادة التاريخية المقيدة ===
+console.log('\n🕓 اختبار الاستعادة التاريخية المقيدة:');
+const recoverySource = fs.readFileSync(path.join(__dirname, 'recovery-service.js'), 'utf8');
+const historicalWindowIsBounded = recoverySource.includes('runHistoricalRecovery') &&
+  recoverySource.includes('timestamp <= toTimestamp') &&
+  recoverySource.includes('_cursors = cursorsBefore');
+console.log(`  ${historicalWindowIsBounded ? '✅' : '❌'} الاستعادة التاريخية مقيدة زمنياً ولا تغيّر مؤشر الرسائل الحي`);
+if (!historicalWindowIsBounded) process.exitCode = 1;
+
 console.log('\n═══════════════════════════════════════');
 console.log('   انتهى الاختبار');
 console.log('═══════════════════════════════════════');

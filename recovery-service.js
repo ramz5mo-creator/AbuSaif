@@ -110,6 +110,72 @@ async function runRecovery(sock) {
 }
 
 /**
+ * استعادة تاريخية محكومة لجروب واحد ضمن نافذة زمنية محددة.
+ * لا تغيّر مؤشر Recovery الدائم، وتحفظ نسخة سابقة من المؤشرات على الـVolume.
+ * تُستخدم فقط لردم فجوة مؤكدة بعد موافقة المشغّل.
+ */
+async function runHistoricalRecovery(sock, { groupId, fromTimestamp, toTimestamp }) {
+  if (_isRunning) throw new Error('Recovery جارٍ بالفعل');
+  if (!sock) throw new Error('لا يوجد Socket متصل');
+  if (!groupId || !Number.isFinite(fromTimestamp) || !Number.isFinite(toTimestamp) || fromTimestamp >= toTimestamp) {
+    throw new Error('نافذة الاستعادة التاريخية غير صالحة');
+  }
+
+  const group = (config.whatsapp.targetGroups || []).find(item => item.id === groupId);
+  if (!group) throw new Error('الجروب المطلوب غير مسجل');
+
+  _isRunning = true;
+  loadCursors();
+  const cursorsBefore = JSON.parse(JSON.stringify(_cursors));
+  const backupName = `recovery-cursors.before-historical-${Date.now()}.json`;
+  const backupPath = path.join(config.volumePath, backupName);
+
+  try {
+    fs.writeFileSync(backupPath, JSON.stringify(cursorsBefore, null, 2));
+    logger.info(`[Recovery] 🗂️ HISTORICAL_RECOVERY_BACKUP | ${backupName}`);
+
+    const messages = await _fetchMissedMessages(sock, groupId, fromTimestamp);
+    const candidates = (messages || [])
+      .filter(msg => {
+        const timestamp = (msg.messageTimestamp || 0) * 1000;
+        return timestamp > fromTimestamp && timestamp <= toTimestamp;
+      })
+      .sort((a, b) => ((a.messageTimestamp || 0) * 1000) - ((b.messageTimestamp || 0) * 1000));
+
+    let recovered = 0;
+    let skipped = 0;
+    let errors = 0;
+    logger.info(`[Recovery] 🔄 HISTORICAL_RECOVERY_STARTED | ${group.name} | ${new Date(fromTimestamp).toISOString()} → ${new Date(toTimestamp).toISOString()} | رسائل: ${candidates.length}`);
+
+    for (const msg of candidates) {
+      const msgId = msg.key?.id;
+      if (!msgId || !msg.message) continue;
+      if (_processedIds.has(msgId)) {
+        skipped++;
+        continue;
+      }
+
+      try {
+        _processedIds.add(msgId);
+        await _messageHandler({ messages: [msg], type: 'notify' }, sock);
+        recovered++;
+      } catch (error) {
+        errors++;
+        logger.error(`[Recovery] ❌ HISTORICAL_RECOVERY_ERROR | ${group.name} | ${msgId.substring(0, 8)}`, { error: error.message });
+      }
+    }
+
+    logger.info(`[Recovery] ✅ HISTORICAL_RECOVERY_COMPLETED | ${group.name} | مسترجع: ${recovered} | مكرر: ${skipped} | أخطاء: ${errors}`);
+    return { group: group.name, recovered, skipped, errors, candidates: candidates.length, backupName };
+  } finally {
+    // لا تسمح للاستعادة التاريخية بتقديم/تغيير مؤشر الرسائل الحي.
+    _cursors = cursorsBefore;
+    saveCursors();
+    _isRunning = false;
+  }
+}
+
+/**
  * تحديث مؤشر آخر رسالة معالجة لجروب معين
  * يُستدعى من pipeline الرسائل العادية بعد كل معالجة ناجحة
  * @param {string} groupId
@@ -417,6 +483,7 @@ function _sleep(ms) {
 module.exports = {
   setMessageHandler,
   runRecovery,
+  runHistoricalRecovery,
   updateCursor,
   markProcessed,
   isProcessed,

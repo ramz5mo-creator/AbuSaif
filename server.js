@@ -20,6 +20,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const QRCode = require('qrcode');
 const config = require('./config');
 const logger = require('./logger');
@@ -143,6 +144,40 @@ const httpServer = http.createServer(async (req, res) => {
       uptime: process.uptime(),
       timestamp: new Date().toISOString()
     }, null, 2));
+  } else if (req.method === 'POST' && req.url === '/internal/recover-dreamax-2026-08-12') {
+    // مسار مؤقت ومحمي لاستعادة فجوة دريمكس التي تم اعتمادها فقط (00:00–00:41 بتوقيت عمّان).
+    const expectedToken = process.env.HISTORICAL_RECOVERY_TOKEN || '';
+    const receivedToken = String(req.headers['x-historical-recovery-token'] || '');
+    const tokenMatches = expectedToken.length > 0 && receivedToken.length === expectedToken.length &&
+      crypto.timingSafeEqual(Buffer.from(expectedToken), Buffer.from(receivedToken));
+    if (!tokenMatches) {
+      res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ success: false, error: 'غير مصرح' }));
+      return;
+    }
+
+    const socket = whatsapp.getSocket();
+    const recovery = whatsapp.recoveryService;
+    const dreamax = (config.whatsapp.targetGroups || []).find(group => group.prefix === 'دريمكس');
+    if (!socket || !whatsapp.isConnected?.() || !recovery || !dreamax) {
+      res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ success: false, error: 'واتساب أو خدمة الاسترجاع غير جاهزة' }));
+      return;
+    }
+
+    try {
+      const result = await recovery.runHistoricalRecovery(socket, {
+        groupId: dreamax.id,
+        fromTimestamp: Date.parse('2026-08-11T21:00:00.000Z'),
+        toTimestamp: Date.parse('2026-08-11T21:41:59.999Z'),
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ success: true, ...result }));
+    } catch (error) {
+      logger.error('[Historical Recovery] فشل الاسترجاع المعتمد لدريمكس', { error: error.message });
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ success: false, error: error.message }));
+    }
   } else if (req.url.startsWith('/debug/')) {
     const phone = req.url.replace('/debug/', '').trim();
     const lookup = whatsapp.lookupPhone(phone);
@@ -1289,7 +1324,8 @@ async function start() {
         // === فحص هل هذا تعديل (إيموجي جديد على نفس الرسالة المسجلة سابقاً) ===
         const existingTransaction = await sheets.findTransactionByMessageId(quotedMsgId, realProducerPhone || producerPhone);
         
-        if (existingTransaction && existingTransaction.quantity !== quantity) {
+        if (existingTransaction) {
+          if (existingTransaction.quantity !== quantity) {
           // هذا تعديل - تغيير الإيموجي
           const producerName = whatsapp.getPushName(msg);
           logger.info('✏️ محاولة تعديل', {
@@ -1313,6 +1349,14 @@ async function start() {
             logger.warn(`⚠️ فشل التعديل: ${editResult.message} - سيتم تسجيل كعملية جديدة`);
             // إذا فشل التعديل (انتهت المهلة)، لا نسجل عملية جديدة لنفس الرسالة
           }
+          return;
+          }
+
+          // نفس العملية والكمية مسجلتان بالفعل. لا نعيد تحديث الأرصدة أو نسجل صفاً ثانياً.
+          logger.info('⏭️ تفاعل مسترجع مكرر — العملية موجودة بالكمية نفسها', {
+            msgId: quotedMsgId?.substring(0, 8),
+            quantity,
+          });
           return;
         }
 
