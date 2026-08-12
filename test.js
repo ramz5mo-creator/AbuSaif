@@ -140,6 +140,14 @@ const qrRefreshReturnsToQrMode = whatsappSource.includes('async function refresh
 console.log(`  ${qrRefreshReturnsToQrMode ? '✅' : '❌'} يمكن إلغاء رمز الهاتف والعودة إلى QR`);
 if (!qrRefreshReturnsToQrMode) process.exitCode = 1;
 
+const restartRequiredSavesNewAuth = connectionManagerSource.includes('this._pendingCredsSave = Promise.resolve()') &&
+  connectionManagerSource.includes("sock.ev.on('creds.update', () => this._queueCredsSave())") &&
+  connectionManagerSource.includes('code === DisconnectReason.restartRequired') &&
+  connectionManagerSource.includes('await this._pendingCredsSave') &&
+  connectionManagerSource.includes("_scheduleReconnect(1_000, reason || 'restartRequired')");
+console.log(`  ${restartRequiredSavesNewAuth ? '✅' : '❌'} يحفظ QR الجديد قبل إعادة التشغيل المطلوبة`);
+if (!restartRequiredSavesNewAuth) process.exitCode = 1;
+
 // === اختبار عدم ضياع الطرف غير المسجل ===
 console.log('\n🧾 اختبار الطرف غير المسجل:');
 const sheetsSource = fs.readFileSync(path.join(__dirname, 'sheets.js'), 'utf8');

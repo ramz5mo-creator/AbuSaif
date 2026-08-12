@@ -85,6 +85,8 @@ class ConnectionManager extends EventEmitter {
     this._rejectPairingCode = null;
     this._pairingModeActive = false;
     this._pairingCodeRequestedSock = null;
+    this._pendingCredsSave = Promise.resolve();
+    this._restartReconnectPending = false;
   }
 
   // ====================================================
@@ -246,7 +248,9 @@ class ConnectionManager extends EventEmitter {
       this._sock = sock;
 
       // ربط الأحداث
-      sock.ev.on('creds.update', this._saveCreds);
+      // عند ربط QR يطلب واتساب غالباً restartRequired. نضع حفظ
+      // بيانات الجلسة في طابور كي لا يبدأ Socket التالي قبل اكتماله.
+      sock.ev.on('creds.update', () => this._queueCredsSave());
       sock.ev.on('connection.update', (update) => this._onConnectionUpdate(update, sock));
       sock.ev.on('messages.upsert', (data) => this._onMessagesUpsert(data));
       sock.ev.on('messages.delete', (data) => this._onMessagesDelete(data));
@@ -347,6 +351,7 @@ class ConnectionManager extends EventEmitter {
     this._isFirstConnect = false;
     this._attempt       = 0;
     this._badSessionRetries = 0; // نجح الاتصال — نصفّر عداد BAD_SESSION
+    this._restartReconnectPending = false;
     this._clearReconnectTimer();
     this._clearPairingMode();
     if (this._qrClearCallback) this._qrClearCallback();
@@ -379,6 +384,17 @@ class ConnectionManager extends EventEmitter {
       this._rejectPairingCode?.(new Error('أغلق واتساب جلسة الاقتران قبل اكتمال الربط'));
       this._clearPairingMode();
       this._clearAuthAndReconnect(ts, 'LOGGED_OUT');
+      return;
+    }
+
+    // بعد مسح QR ناجح يطلب واتساب غالباً إعادة إنشاء الاتصال (515).
+    // ننتظر حفظ creds الجديدة ثم نعيد الاتصال فوراً؛ التأخير الطويل هنا
+    // يسمح لواتساب بإغلاق الجلسة الحديثة وإرجاعنا إلى QR جديد.
+    if (code === DisconnectReason.restartRequired) {
+      if (this._restartReconnectPending) return;
+      this._restartReconnectPending = true;
+      logger.info('[CM] 🔁 RESTART_REQUIRED — حفظ بيانات الجلسة ثم إعادة الاتصال فوراً');
+      void this._reconnectAfterRestartRequired(rawReason);
       return;
     }
 
@@ -448,6 +464,28 @@ class ConnectionManager extends EventEmitter {
       }
       await this._connect();
     }, delay);
+  }
+
+  /** يضمن تسلسل عمليات حفظ credentials دون تزامن أو فقدان تحديث QR الأخير. */
+  _queueCredsSave() {
+    const persist = async () => {
+      try {
+        await this._saveCreds?.();
+      } catch (error) {
+        logger.error('[CM] فشل حفظ بيانات auth', { error: error.message });
+      }
+    };
+    this._pendingCredsSave = this._pendingCredsSave.then(persist, persist);
+    return this._pendingCredsSave;
+  }
+
+  /** يعيد إنشاء Socket جديداً فقط بعد اكتمال حفظ auth عند restartRequired. */
+  async _reconnectAfterRestartRequired(reason) {
+    try {
+      await this._pendingCredsSave;
+    } catch { /* تسجل _queueCredsSave الخطأ داخلياً */ }
+    this._restartReconnectPending = false;
+    this._scheduleReconnect(1_000, reason || 'restartRequired');
   }
 
   _clearReconnectTimer() {
