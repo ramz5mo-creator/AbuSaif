@@ -83,7 +83,8 @@ class ConnectionManager extends EventEmitter {
     this._pairingCodePromise = null;
     this._resolvePairingCode = null;
     this._rejectPairingCode = null;
-    this._pairingAttemptTimer = null;
+    this._pairingModeActive = false;
+    this._pairingCodeRequestedSock = null;
   }
 
   // ====================================================
@@ -144,17 +145,21 @@ class ConnectionManager extends EventEmitter {
     }
     if (this._pairingCodePromise) return this._pairingCodePromise;
 
-    this._pairingPhone = normalizedPhone;
-    this._pairingCodePromise = new Promise((resolve, reject) => {
+    const pairingPromise = new Promise((resolve, reject) => {
       this._resolvePairingCode = resolve;
       this._rejectPairingCode = reject;
     });
+    this._pairingPhone = normalizedPhone;
+    this._pairingCodePromise = pairingPromise;
+    this._pairingModeActive = true;
+    this._pairingCodeRequestedSock = null;
 
-    // نبدأ طلب الربط من Socket جديد؛ Socket القديم يُغلق أولاً داخل _connect().
+    // نبدأ طلب الربط من Socket جديد؛ لا يُطلب الرمز إلا عند حدث QR/connecting
+    // الذي يؤكد أن النقل صار جاهزاً، وفق تسلسل Baileys الرسمي.
     this._clearReconnectTimer();
     this._isConnecting = false;
     await this._connect();
-    return this._pairingCodePromise;
+    return pairingPromise;
   }
 
   // ====================================================
@@ -198,10 +203,6 @@ class ConnectionManager extends EventEmitter {
       // إغلاق Socket القديم إن وُجد
       this._closeSock('إعادة اتصال');
 
-      // لا نعرض QR في الطرفية. وعند طلب رمز الربط، تتجاهل واجهة QR أي
-      // قيمة تصدر مؤقتاً من الخادم حتى لا يختلط على المستخدم مسارا الربط.
-      const pairingMode = Boolean(this._pairingPhone && !this._authState?.creds?.registered);
-
       // إنشاء Socket جديد
       const sock = makeWASocket({
         version,
@@ -231,13 +232,6 @@ class ConnectionManager extends EventEmitter {
       sock.ev.on('messages.upsert', (data) => this._onMessagesUpsert(data));
       sock.ev.on('messages.delete', (data) => this._onMessagesDelete(data));
 
-      // لا يجوز الاستدعاء مباشرة بعد makeWASocket لأن WebSocket لم يفتح بعد.
-      // ننتظر مدة وجيزة ثم نطلب الرمز من Socket نفسه، مع المحافظة على Socket واحد.
-      if (pairingMode) {
-        logger.info('[CM] 📲 وضع رمز الربط مفعل — تم تعطيل عرض QR مؤقتاً');
-        this._requestPairingCodeWhenReady(sock);
-      }
-
     } catch (err) {
       this._isConnecting = false;
       logger.error('[CM] خطأ في إنشاء Socket', { error: err.message });
@@ -254,12 +248,24 @@ class ConnectionManager extends EventEmitter {
 
     // عرض QR
     if (qr) {
-      if (this._pairingPhone && sourceSock === this._sock) {
+      if (this._pairingModeActive && sourceSock === this._sock) {
         logger.info('[CM] 📲 تم تجاوز QR لأن رمز الربط قيد الإصدار');
       } else {
         logger.info('[CM] 📱 رمز QR جديد — امسحه بواتساب');
         if (this._qrCallback) this._qrCallback(qr);
       }
+    }
+
+    // في وضع رمز الربط، QR أو connecting هو الإشارة الموثوقة بأن النقل جاهز.
+    // لا نعرض QR للمستخدم ولا نطلب الرمز أكثر من مرة على Socket واحد.
+    if (
+      this._pairingModeActive &&
+      this._pairingPhone &&
+      sourceSock === this._sock &&
+      !this._authState?.creds?.registered &&
+      (connection === 'connecting' || Boolean(qr))
+    ) {
+      this._requestPairingCodeAtReadyEvent(sourceSock);
     }
 
     if (connection === 'open') {
@@ -270,41 +276,46 @@ class ConnectionManager extends EventEmitter {
   }
 
   /**
-   * يطلب رمز الربط بعد فتح النقل فعلياً. الاستدعاء المتزامن مع makeWASocket
-   * يفشل لأن Baileys لم يفتح WebSocket بعد.
+   * يطلب رمز الربط عند أول حدث QR أو connecting من Socket غير مسجّل.
+   * هذا هو التوقيت الموصى به في توثيق Baileys، وليس وقت makeWASocket.
    */
-  _requestPairingCodeWhenReady(sock) {
-    if (this._pairingAttemptTimer) clearTimeout(this._pairingAttemptTimer);
-    this._pairingAttemptTimer = setTimeout(async () => {
-      if (sock !== this._sock || !this._pairingPhone || this._authState?.creds?.registered) return;
+  _requestPairingCodeAtReadyEvent(sock) {
+    if (this._pairingCodeRequestedSock === sock) return;
+    this._pairingCodeRequestedSock = sock;
 
+    Promise.resolve().then(async () => {
       try {
         const pairingCode = await sock.requestPairingCode(this._pairingPhone);
         if (!pairingCode) throw new Error('لم يُرجع واتساب رمز ربط صالحاً');
         logger.info('[CM] 📲 تم إصدار رمز ربط بديل مؤقت');
         this._resolvePairingCode?.(pairingCode);
-        this._clearPairingRequest();
+        this._clearPairingCodeWaiter();
       } catch (error) {
-        // إذا أُغلق النقل قبل انقضاء المهلة، تستمر محاولة الربط على Socket
-        // إعادة الاتصال التالي ولا يظهر QR منافس للمستخدم.
+        // إذا أُغلق النقل أثناء الإصدار، يعاد الطلب فقط بعد حدث QR/connecting
+        // من Socket إعادة الاتصال التالي.
         if (/connection closed|connection terminated|not open/i.test(error.message || '')) {
-          logger.warn('[CM] قناة رمز الربط لم تفتح بعد — ستتم المحاولة على الاتصال التالي');
+          this._pairingCodeRequestedSock = null;
+          logger.warn('[CM] قناة رمز الربط أغلقت قبل الإصدار — ستتم المحاولة على الاتصال التالي');
           return;
         }
         logger.warn('[CM] تعذر إصدار رمز الربط البديل', { error: error.message });
         this._rejectPairingCode?.(error);
-        this._clearPairingRequest();
+        this._clearPairingMode();
       }
-    }, 1_600);
+    });
   }
 
-  _clearPairingRequest() {
-    if (this._pairingAttemptTimer) clearTimeout(this._pairingAttemptTimer);
-    this._pairingAttemptTimer = null;
+  _clearPairingCodeWaiter() {
     this._pairingPhone = null;
     this._pairingCodePromise = null;
     this._resolvePairingCode = null;
     this._rejectPairingCode = null;
+  }
+
+  _clearPairingMode() {
+    this._clearPairingCodeWaiter();
+    this._pairingModeActive = false;
+    this._pairingCodeRequestedSock = null;
   }
 
   _onConnected() {
@@ -317,6 +328,7 @@ class ConnectionManager extends EventEmitter {
     this._attempt       = 0;
     this._badSessionRetries = 0; // نجح الاتصال — نصفّر عداد BAD_SESSION
     this._clearReconnectTimer();
+    this._clearPairingMode();
     if (this._qrClearCallback) this._qrClearCallback();
 
     const ts = new Date().toISOString();
@@ -344,6 +356,7 @@ class ConnectionManager extends EventEmitter {
     if (code === DisconnectReason.loggedOut) {
       logger.warn('[CM] ⚠️ LOGGED_OUT — مسح auth وإعادة الاتصال تلقائياً...');
       this.emit('LOGGED_OUT', { ts });
+      this._clearPairingMode();
       this._clearAuthAndReconnect(ts, 'LOGGED_OUT');
       return;
     }
