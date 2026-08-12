@@ -1305,17 +1305,7 @@ function getUnresolvedLids() {
  * لا ينشئ Socket جديداً ولا يحفظ رقم الهاتف أو الرمز على القرص.
  */
 async function requestPairingCode(phoneNumber) {
-  const normalizedPhone = String(phoneNumber || '').replace(/\D/g, '').replace(/^00/, '');
-  if (!/^\d{8,15}$/.test(normalizedPhone)) {
-    throw new Error('صيغة رقم الهاتف غير صالحة لرمز الربط');
-  }
-
-  const sock = getSocket();
-  if (!sock || typeof sock.requestPairingCode !== 'function') {
-    throw new Error('Socket الربط غير جاهز حالياً');
-  }
-
-  return sock.requestPairingCode(normalizedPhone);
+  return connectionManager.requestPairingCode(phoneNumber);
 }
 
 // ====================================================

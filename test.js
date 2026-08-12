@@ -84,6 +84,7 @@ phoneTests.forEach(({ input, expected }) => {
 // === اختبار Recovery بعد التشغيل الأولي ===
 console.log('\n🔄 اختبار Recovery بعد الاتصال الأولي:');
 const whatsappSource = fs.readFileSync(path.join(__dirname, 'whatsapp.js'), 'utf8');
+const connectionManagerSource = fs.readFileSync(path.join(__dirname, 'connection-manager.js'), 'utf8');
 const connectedHandler = whatsappSource.match(/connectionManager\.on\('CONNECTED',[\s\S]*?\n  \}\);/);
 const initialConnectionRunsRecovery = Boolean(
   connectedHandler && connectedHandler[0].includes('await _onConnected(sock, true);')
@@ -121,7 +122,8 @@ if (!historicalRecoveryStatusIsReadOnly) process.exitCode = 1;
 // === اختبار رمز الربط البديل ===
 console.log('\n📲 اختبار رمز الربط البديل:');
 const pairingCodeUsesManagedSocket = whatsappSource.includes('async function requestPairingCode(phoneNumber)') &&
-  whatsappSource.includes('return sock.requestPairingCode(normalizedPhone);') &&
+  whatsappSource.includes('return connectionManager.requestPairingCode(phoneNumber);') &&
+  connectionManagerSource.includes('const pairingCode = await sock.requestPairingCode(this._pairingPhone);') &&
   whatsappSource.includes('requestPairingCode,');
 const pairingCodeRouteIsPostOnly = serverSource.includes("req.method === 'POST' && req.url === '/pairing-code'") &&
   serverSource.includes("'Cache-Control': 'no-store'");

@@ -79,6 +79,10 @@ class ConnectionManager extends EventEmitter {
     this._qrClearCallback = null;
     this._authState    = null;   // حالة المصادقة
     this._saveCreds    = null;   // دالة حفظ بيانات الاعتماد
+    this._pairingPhone = null;   // رقم مؤقت لطلب رمز الربط أثناء إنشاء Socket فقط
+    this._pairingCodePromise = null;
+    this._resolvePairingCode = null;
+    this._rejectPairingCode = null;
   }
 
   // ====================================================
@@ -123,6 +127,32 @@ class ConnectionManager extends EventEmitter {
   /** هل الاتصال مفتوح الآن */
   isConnected() {
     return Boolean(this._isConnected && this._sock);
+  }
+
+  /**
+   * إصدار رمز ربط بديل من Socket جديد مُدار.
+   * لا يُخزّن الرقم أو الرمز، ولا ينشئ أكثر من Socket واحد في أي وقت.
+   */
+  async requestPairingCode(phoneNumber) {
+    const normalizedPhone = String(phoneNumber || '').replace(/\D/g, '').replace(/^00/, '');
+    if (!/^\d{8,15}$/.test(normalizedPhone)) {
+      throw new Error('صيغة رقم الهاتف غير صالحة لرمز الربط');
+    }
+    if (this._authState?.creds?.registered) {
+      throw new Error('جلسة واتساب مرتبطة بالفعل');
+    }
+    if (this._pairingCodePromise) return this._pairingCodePromise;
+
+    this._pairingPhone = normalizedPhone;
+    this._pairingCodePromise = new Promise((resolve, reject) => {
+      this._resolvePairingCode = resolve;
+      this._rejectPairingCode = reject;
+    });
+
+    // نبدأ طلب الربط من Socket جديد؛ Socket القديم يُغلق أولاً داخل _connect().
+    this._isConnecting = false;
+    await this._connect();
+    return this._pairingCodePromise;
   }
 
   // ====================================================
@@ -194,6 +224,24 @@ class ConnectionManager extends EventEmitter {
       sock.ev.on('connection.update', (update) => this._onConnectionUpdate(update));
       sock.ev.on('messages.upsert', (data) => this._onMessagesUpsert(data));
       sock.ev.on('messages.delete', (data) => this._onMessagesDelete(data));
+
+      // توثيق Baileys يطلب رمز الاقتران مباشرة بعد إنشاء Socket غير مسجل.
+      if (this._pairingPhone && !this._authState?.creds?.registered) {
+        try {
+          const pairingCode = await sock.requestPairingCode(this._pairingPhone);
+          if (!pairingCode) throw new Error('لم يُرجع واتساب رمز ربط صالحاً');
+          logger.info('[CM] 📲 تم إصدار رمز ربط بديل مؤقت');
+          this._resolvePairingCode?.(pairingCode);
+        } catch (error) {
+          logger.warn('[CM] تعذر إصدار رمز الربط البديل', { error: error.message });
+          this._rejectPairingCode?.(error);
+        } finally {
+          this._pairingPhone = null;
+          this._pairingCodePromise = null;
+          this._resolvePairingCode = null;
+          this._rejectPairingCode = null;
+        }
+      }
 
     } catch (err) {
       this._isConnecting = false;
