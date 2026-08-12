@@ -1536,6 +1536,8 @@ async function start() {
             referenceId: quotedMsgId || result.messageId || '',
             reason: orderDetail.notes || 'رقم المنتج والكابتن متطابقان',
             notes: 'لا يتم تعديل أي رصيد عند اختيار نعم أو لا',
+            producerPhone: finalProducerPhone || '',
+            captainPhone: resolvedCaptainForSheet || '',
           }).catch(() => {});
         }
 

@@ -156,8 +156,12 @@ const unknownPartyFallbackIsSafe = serverSource.includes('async function queueUn
   serverSource.includes("await sheets.logUnregisteredNumber(normalizedPhone, 'مجهول');") &&
   serverSource.includes('const producerParty = await queueUnknownParty(finalProducerPhone') &&
   serverSource.includes('const captainParty = await queueUnknownParty(resolvedCaptainForSheet') &&
+  serverSource.includes('captainPhone: resolvedCaptainForSheet || \'\',') &&
+  sheetsSource.includes("'رقم الكابتن'") &&
+  sheetsSource.includes('review.captainPhone || \'\'') &&
+  sheetsSource.includes('captainPhone: row[6] || \'\'') &&
   sheetsSource.includes('logUnregisteredNumber,');
-console.log(`  ${unknownPartyFallbackIsSafe ? '✅' : '❌'} الرقم غير المسجل يُحفظ باسم مجهول والطرف المسجل لا يتأثر`);
+console.log(`  ${unknownPartyFallbackIsSafe ? '✅' : '❌'} الرقم غير المسجل يُحفظ باسم مجهول في السجل والتفاصيل والمراجعة`);
 if (!unknownPartyFallbackIsSafe) process.exitCode = 1;
 
 // === اختبار تعطيل تقرير نهاية الأسبوع ===

@@ -1374,16 +1374,38 @@ async function updateOrderDetailStatus(transactionId, updates = {}) {
 
 const OPERATION_REVIEWS_HEADERS = [
   'رقم المراجعة', 'وقت الإنشاء', 'الجروب', 'نوع التنبيه', 'المعرف المرجعي',
-  'سبب المراجعة', 'الرد (نعم/لا)', 'حالة المعالجة', 'وقت قراءة الرد', 'ملاحظات النظام'
+  'سبب المراجعة', 'الرد (نعم/لا)', 'حالة المعالجة', 'وقت قراءة الرد', 'ملاحظات النظام',
+  'رقم المنتج', 'رقم الكابتن'
 ];
 
 function getOperationReviewsSheetName() {
   return config.sheets.sheetNames.operationReviews || 'مراجعة العمليات';
 }
 
+/** يضيف حقلي الهوية إلى ورقة مراجعات موجودة من دون تغيير إجابة المستخدم أو البيانات السابقة. */
+async function ensureOperationReviewIdentityColumns(sheetName) {
+  const response = await sheetsApi.spreadsheets.values.get({
+    spreadsheetId,
+    range: `'${sheetName}'!K1:L1`,
+  });
+  const headers = response.data.values?.[0] || [];
+  if (headers[0] === 'رقم المنتج' && headers[1] === 'رقم الكابتن') return;
+
+  await sheetsApi.spreadsheets.values.update({
+    spreadsheetId,
+    range: `'${sheetName}'!K1:L1`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [['رقم المنتج', 'رقم الكابتن']] },
+  });
+  logger.info('📋 أضيفت حقول أرقام الأطراف إلى ورقة مراجعة العمليات');
+}
+
 async function ensureOperationReviewsSheet() {
   const sheetName = getOperationReviewsSheetName();
-  if (existingSheets.has(sheetName)) return;
+  if (existingSheets.has(sheetName)) {
+    await ensureOperationReviewIdentityColumns(sheetName);
+    return;
+  }
 
   try {
     await sheetsApi.spreadsheets.batchUpdate({
@@ -1395,7 +1417,7 @@ async function ensureOperationReviewsSheet() {
 
     await sheetsApi.spreadsheets.values.update({
       spreadsheetId,
-      range: `'${sheetName}'!A1:J1`,
+      range: `'${sheetName}'!A1:L1`,
       valueInputOption: 'RAW',
       requestBody: { values: [OPERATION_REVIEWS_HEADERS] },
     });
@@ -1477,10 +1499,11 @@ async function upsertOperationReview(review) {
       review.reviewId, formatJordanDateTime(review.timestamp), review.groupPrefix || '',
       review.alertType || 'يحتاج مراجعة', review.referenceId || '', review.reason || '',
       '', 'بانتظار الرد', '', review.notes || '',
+      review.producerPhone || '', review.captainPhone || '',
     ];
     await sheetsApi.spreadsheets.values.append({
       spreadsheetId,
-      range: `'${sheetName}'!A:J`,
+      range: `'${sheetName}'!A:L`,
       valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [row] },
     });
     logger.info('🔎 تمت إضافة عملية إلى ورقة المراجعات', { reviewId: review.reviewId.substring(0, 8) });
@@ -1519,6 +1542,8 @@ async function backfillOperationReviewsFromOrderDetails() {
         referenceId: row[15] || row[0],
         reason: row[17] || 'رقم المنتج والكابتن متطابقان',
         notes: 'تنبيه قائم تم استيراده من تفاصيل الطلبات؛ لا يتم تعديل أي رصيد عند اختيار نعم أو لا',
+        producerPhone: row[4] || '',
+        captainPhone: row[6] || '',
       });
       created++;
     }
@@ -1535,7 +1560,7 @@ async function syncOperationReviewResponses() {
   const sheetName = getOperationReviewsSheetName();
   try {
     await ensureOperationReviewsSheet();
-    const response = await sheetsApi.spreadsheets.values.get({ spreadsheetId, range: `'${sheetName}'!A2:J` });
+    const response = await sheetsApi.spreadsheets.values.get({ spreadsheetId, range: `'${sheetName}'!A2:L` });
     const rows = response.data.values || [];
     let updated = 0;
 
