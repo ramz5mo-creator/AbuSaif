@@ -37,6 +37,49 @@ const lidToPhoneMap = new Map();
 
 const LID_MAP_PATH   = path.resolve(config.volumePath, 'lid-map.json');
 const TAM_CACHE_PATH = path.resolve(config.volumePath, 'tam-cache.json');
+// نافذة الاستعادة التاريخية التي اعتمدتها الإدارة لسد فجوة دريمكس فقط.
+// يحفظ إيصالاً دائماً حتى لا تعاد المحاولة بعد نجاحها أو بعد إعادة تشغيل الخدمة.
+const DREAMAX_HISTORICAL_RECOVERY = {
+  groupId: '120363401940570759@g.us',
+  fromTimestamp: Date.parse('2026-08-11T21:00:00.000Z'), // 12-08 00:00 بتوقيت عمّان
+  toTimestamp: Date.parse('2026-08-11T21:41:59.999Z'),   // 12-08 00:41:59 بتوقيت عمّان
+  receiptPath: path.resolve(config.volumePath, 'historical-recovery-dreamax-2026-08-12.complete.json'),
+  lockPath: path.resolve(config.volumePath, 'historical-recovery-dreamax-2026-08-12.in-progress.json'),
+};
+let historicalDreamaxRecoveryInProgress = false;
+
+async function runApprovedDreamaxHistoricalRecoveryOnce(sock) {
+  const job = DREAMAX_HISTORICAL_RECOVERY;
+  if (historicalDreamaxRecoveryInProgress || fs.existsSync(job.receiptPath)) return { status: 'already-complete' };
+
+  if (fs.existsSync(job.lockPath)) {
+    const lockAgeMs = Date.now() - fs.statSync(job.lockPath).mtimeMs;
+    if (lockAgeMs < 15 * 60 * 1000) return { status: 'already-running' };
+    fs.unlinkSync(job.lockPath); // قفل قديم من عملية توقفت قبل الإكمال
+  }
+
+  historicalDreamaxRecoveryInProgress = true;
+  fs.writeFileSync(job.lockPath, JSON.stringify({ startedAt: new Date().toISOString(), groupId: job.groupId }, null, 2));
+  try {
+    logger.info('[WA] 🔄 RECOVERY_DREAMAX_HISTORICAL_STARTED | 12-08 00:00–00:41 عمّان');
+    const result = await recoveryService.runHistoricalRecovery(sock, job);
+    if (result.errors > 0) throw new Error(`الاستعادة التاريخية اكتملت بأخطاء: ${result.errors}`);
+
+    fs.writeFileSync(job.receiptPath, JSON.stringify({
+      completedAt: new Date().toISOString(),
+      window: { fromTimestamp: job.fromTimestamp, toTimestamp: job.toTimestamp },
+      ...result,
+    }, null, 2));
+    logger.info('[WA] ✅ RECOVERY_DREAMAX_HISTORICAL_COMPLETED', result);
+    return { status: 'completed', ...result };
+  } catch (error) {
+    logger.error('[WA] ❌ RECOVERY_DREAMAX_HISTORICAL_FAILED', { error: error.message });
+    throw error;
+  } finally {
+    if (fs.existsSync(job.lockPath)) fs.unlinkSync(job.lockPath);
+    historicalDreamaxRecoveryInProgress = false;
+  }
+}
 
 let sheetsModule = null;
 function getSheets() {
@@ -170,6 +213,7 @@ async function _onConnected(sock, shouldRecover = true) {
           total: result.totalRecovered,
           skipped: result.totalSkipped,
         });
+        await runApprovedDreamaxHistoricalRecoveryOnce(sock);
       } catch (e) {
         logger.error('[WA] فشل Recovery', { error: e.message });
       }

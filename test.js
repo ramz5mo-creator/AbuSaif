@@ -107,6 +107,12 @@ const historicalWindowIsBounded = recoverySource.includes('runHistoricalRecovery
 console.log(`  ${historicalWindowIsBounded ? '✅' : '❌'} الاستعادة التاريخية مقيدة زمنياً ولا تغيّر مؤشر الرسائل الحي`);
 if (!historicalWindowIsBounded) process.exitCode = 1;
 
+const approvedHistoricalRecoveryRunsOnce = whatsappSource.includes('historical-recovery-dreamax-2026-08-12.complete.json') &&
+  whatsappSource.includes('RECOVERY_DREAMAX_HISTORICAL_COMPLETED') &&
+  whatsappSource.includes('runApprovedDreamaxHistoricalRecoveryOnce(sock)');
+console.log(`  ${approvedHistoricalRecoveryRunsOnce ? '✅' : '❌'} استعادة دريمكس المعتمدة تنفذ مرة واحدة مع إيصال دائم`);
+if (!approvedHistoricalRecoveryRunsOnce) process.exitCode = 1;
+
 // === اختبار تعطيل تقرير نهاية الأسبوع ===
 console.log('\n📊 اختبار تعطيل تقرير نهاية الأسبوع:');
 const weeklyReportIsDisabled = config.sheets.weeklyReport?.enabled === false &&
