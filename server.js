@@ -1040,15 +1040,50 @@ async function resolveLidPhone(phone) {
     logger.debug('فشل حل LID عبر USyncQuery', { error: e.message });
   }
   
-  // إذا لم يُحل → أرجع الجزء الرقمي فقط (سيُسجل كمعرف مؤقت)
-  logger.warn(`⚠️ LID لم يُحل للتسجيل: ${phone.substring(0,15)} — سيُسجل كـ LID مؤقت`);
+  // إذا لم يُحل، نحتفظ بالـ LID كاملاً للتدقيق بدلاً من قصّه إلى رقم قد يبدو كرقم هاتف مزيف.
+  logger.warn(`⚠️ LID لم يُحل للتسجيل: ${phone.substring(0,15)} — سيبقى كمعرف مؤقت للتدقيق`);
   whatsapp.queueLidForResolve(phone);
-  return phone.split(':')[0]; // أرجع الجزء الرقمي فقط (بدون @lid)
+  return phone;
 }
 
 function normalizePhoneForComparison(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
   return digits.length >= 9 ? digits.slice(-9) : digits;
+}
+
+/** يتحقق من أن المعرف رقم هاتف قابل للتسجيل، وليس LID أو قيمة رقمية مشوهة. */
+function isRecordablePhone(phone) {
+  const raw = String(phone || '');
+  const digits = raw.replace(/\D/g, '');
+  return Boolean(raw) && !raw.includes('@lid') && digits.length >= 9 && digits.length <= 12;
+}
+
+/**
+ * لا نستخدم اسم واتساب غير المعتمد في الأرصدة: الطرف غير المسجل يظهر «مجهول»
+ * إلى أن يضاف في ورقة المسجلين، بينما يحتفظ الطرف المسجل باسمه الرسمي.
+ */
+function getSafePartyName(phone) {
+  if (!isRecordablePhone(phone)) return 'مجهول';
+  return sheets.getRegisteredName(phone) || 'مجهول';
+}
+
+/** يضع الرقم غير المسجل في قائمة المراجعة دون تعطيل تسجيل الطرف الآخر. */
+async function queueUnknownParty(phone, role) {
+  if (!isRecordablePhone(phone)) {
+    logger.warn('⚠️ تعذر تأكيد رقم هاتف الطرف للتسجيل اليومي؛ حُفظ المعرف في سجل العملية للتدقيق', {
+      role,
+      identifier: String(phone || '').substring(0, 40),
+    });
+    return { recordable: false, registered: false };
+  }
+
+  const registeredName = sheets.getRegisteredName(phone);
+  if (!registeredName) {
+    const normalizedPhone = normalizePhoneForComparison(phone);
+    await sheets.logUnregisteredNumber(normalizedPhone, 'مجهول');
+    logger.info('📝 طرف غير مسجل حُفظ للمراجعة باسم مجهول', { role, phone: normalizedPhone });
+  }
+  return { recordable: true, registered: Boolean(registeredName) };
 }
 
 function getCachedMessageContext(message) {
@@ -1079,10 +1114,8 @@ function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone
   const cachedOrderText = whatsapp.extractText(originalOrderMessage) || '';
   const cachedTamText = whatsapp.extractText(targetMessage) || '';
 
-  const producerName = sheets.getRegisteredName(producerPhone) ||
-    whatsapp.getPushName(originalOrderMessage) || 'غير معروف';
-  const captainName = sheets.getRegisteredName(captainPhone) ||
-    whatsapp.getPushName(targetMessage) || 'غير محدد';
+  const producerName = getSafePartyName(producerPhone);
+  const captainName = getSafePartyName(captainPhone);
   const reactorName = sheets.getRegisteredName(reactorPhone) || whatsapp.getPushName(msg) || '';
   const samePerson = normalizePhoneForComparison(producerPhone) &&
     normalizePhoneForComparison(producerPhone) === normalizePhoneForComparison(captainPhone);
@@ -1434,6 +1467,10 @@ async function start() {
         if (resolvedCaptainForSheet && resolvedCaptainForSheet.includes('@lid')) {
           resolvedCaptainForSheet = await resolveLidPhone(resolvedCaptainForSheet);
         }
+
+        // نسجل الرقم غير المسجل في قائمة مراجعة مستقلة، ولا نسمح لغياب اسمه أن يوقف الطرف الآخر.
+        const producerParty = await queueUnknownParty(finalProducerPhone, 'المنتج');
+        const captainParty = await queueUnknownParty(resolvedCaptainForSheet, 'الكابتن');
         
         logger.info('🎯 تسجيل انتاج+استلام', {
           producer: finalProducerPhone,
@@ -1443,17 +1480,19 @@ async function start() {
           group: groupInfo ? groupInfo.name : 'Unknown'
         });
 
-        try {
-          const producerName = sheets.getRegisteredName(finalProducerPhone) || whatsapp.getPushName(msg);
+        if (producerParty.recordable) {
+          try {
+          const producerName = getSafePartyName(finalProducerPhone);
           await sheets.updateTotalsProduction(finalProducerPhone, quantity, groupPrefix, producerName);
           logger.info(`✅ انتاج: ${finalProducerPhone} +${quantity} [${groupPrefix}]`);
-        } catch (error) {
-          logger.error('❌ فشل انتاج', { error: error.message });
+          } catch (error) {
+            logger.error('❌ فشل انتاج', { error: error.message });
+          }
         }
 
-        if (resolvedCaptainForSheet) {
+        if (resolvedCaptainForSheet && captainParty.recordable) {
           try {
-            const captainName = sheets.getRegisteredName(resolvedCaptainForSheet) || 'كابتن';
+            const captainName = getSafePartyName(resolvedCaptainForSheet);
             await sheets.updateTotalsReception(resolvedCaptainForSheet, quantity, groupPrefix, captainName);
             logger.info(`✅ استلام: ${resolvedCaptainForSheet} +${quantity} [${groupPrefix}]`);
           } catch (error) {

@@ -3020,6 +3020,7 @@ module.exports = {
   // الورقة اليومية
   updateTotalsProduction,
   updateTotalsReception,
+  logUnregisteredNumber,
   // سجل_تم
   saveTamToSheet,
   getCaptainFromTamSheet,

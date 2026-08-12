@@ -140,6 +140,18 @@ const qrRefreshReturnsToQrMode = whatsappSource.includes('async function refresh
 console.log(`  ${qrRefreshReturnsToQrMode ? '✅' : '❌'} يمكن إلغاء رمز الهاتف والعودة إلى QR`);
 if (!qrRefreshReturnsToQrMode) process.exitCode = 1;
 
+// === اختبار عدم ضياع الطرف غير المسجل ===
+console.log('\n🧾 اختبار الطرف غير المسجل:');
+const sheetsSource = fs.readFileSync(path.join(__dirname, 'sheets.js'), 'utf8');
+const unknownPartyFallbackIsSafe = serverSource.includes('async function queueUnknownParty(phone, role)') &&
+  serverSource.includes("return sheets.getRegisteredName(phone) || 'مجهول';") &&
+  serverSource.includes("await sheets.logUnregisteredNumber(normalizedPhone, 'مجهول');") &&
+  serverSource.includes('const producerParty = await queueUnknownParty(finalProducerPhone') &&
+  serverSource.includes('const captainParty = await queueUnknownParty(resolvedCaptainForSheet') &&
+  sheetsSource.includes('logUnregisteredNumber,');
+console.log(`  ${unknownPartyFallbackIsSafe ? '✅' : '❌'} الرقم غير المسجل يُحفظ باسم مجهول والطرف المسجل لا يتأثر`);
+if (!unknownPartyFallbackIsSafe) process.exitCode = 1;
+
 // === اختبار تعطيل تقرير نهاية الأسبوع ===
 console.log('\n📊 اختبار تعطيل تقرير نهاية الأسبوع:');
 const weeklyReportIsDisabled = config.sheets.weeklyReport?.enabled === false &&
