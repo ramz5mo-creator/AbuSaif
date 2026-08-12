@@ -188,6 +188,18 @@ const httpServer = http.createServer(async (req, res) => {
       res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ success: false, error: 'تعذر إصدار رمز الربط حالياً' }));
     }
+  } else if (req.method === 'POST' && req.url === '/qr/refresh') {
+    // مسار إداري مؤقت: يلغي رمز الهاتف المعلّق فقط ويطلب QR جديداً.
+    // لا يحذف بيانات auth ولا يعرض QR في الاستجابة؛ الصفحة /qr هي موضع عرضه.
+    try {
+      const refreshed = await whatsapp.refreshQRCode();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ success: true, refreshed }));
+    } catch (error) {
+      logger.warn('[QR Refresh] تعذر التحول إلى QR', { error: error.message });
+      res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ success: false, error: 'تعذر تجهيز QR حالياً' }));
+    }
   } else if (req.method === 'POST' && req.url === '/internal/recover-dreamax-2026-08-12') {
     // مسار مؤقت ومحمي لاستعادة فجوة دريمكس التي تم اعتمادها فقط (00:00–00:41 بتوقيت عمّان).
     const expectedToken = process.env.HISTORICAL_RECOVERY_TOKEN || '';

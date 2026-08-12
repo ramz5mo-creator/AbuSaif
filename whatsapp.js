@@ -1308,6 +1308,11 @@ async function requestPairingCode(phoneNumber) {
   return connectionManager.requestPairingCode(phoneNumber);
 }
 
+/** إلغاء وضع رمز الهاتف المؤقت والعودة إلى ربط QR. */
+async function refreshQRCode() {
+  return connectionManager.cancelPairingModeAndRefreshQR();
+}
+
 // ====================================================
 // تصدير (متوافق 100% مع server.js الحالي)
 // ====================================================
@@ -1320,6 +1325,7 @@ module.exports = {
   getCacheStats,
   getSocket,
   requestPairingCode,
+  refreshQRCode,
   extractText,
   getMessageType,
   isReaction,

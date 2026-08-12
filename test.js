@@ -133,6 +133,13 @@ const pairingCodeRouteIsPostOnly = serverSource.includes("req.method === 'POST' 
 console.log(`  ${pairingCodeUsesManagedSocket && pairingCodeRouteIsPostOnly ? '✅' : '❌'} رمز الربط يستخدم Socket المُدار ولا يُخزّن في الاستجابة المؤقتة`);
 if (!pairingCodeUsesManagedSocket || !pairingCodeRouteIsPostOnly) process.exitCode = 1;
 
+const qrRefreshReturnsToQrMode = whatsappSource.includes('async function refreshQRCode()') &&
+  whatsappSource.includes('connectionManager.cancelPairingModeAndRefreshQR()') &&
+  connectionManagerSource.includes('async cancelPairingModeAndRefreshQR()') &&
+  serverSource.includes("req.method === 'POST' && req.url === '/qr/refresh'");
+console.log(`  ${qrRefreshReturnsToQrMode ? '✅' : '❌'} يمكن إلغاء رمز الهاتف والعودة إلى QR`);
+if (!qrRefreshReturnsToQrMode) process.exitCode = 1;
+
 // === اختبار تعطيل تقرير نهاية الأسبوع ===
 console.log('\n📊 اختبار تعطيل تقرير نهاية الأسبوع:');
 const weeklyReportIsDisabled = config.sheets.weeklyReport?.enabled === false &&

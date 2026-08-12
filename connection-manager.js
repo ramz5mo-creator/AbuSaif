@@ -162,6 +162,25 @@ class ConnectionManager extends EventEmitter {
     return pairingPromise;
   }
 
+  /**
+   * يلغي وضع رمز الهاتف المؤقت ويعيد إنشاء Socket واحد لإظهار QR جديد.
+   * لا يمسح بيانات auth ولا يسجل أي رقم هاتف أو رمز.
+   */
+  async cancelPairingModeAndRefreshQR() {
+    if (!this._pairingModeActive) return false;
+
+    this._rejectPairingCode?.(new Error('أُلغي رمز الهاتف بطلب الإدارة والتحول إلى QR'));
+    this._clearPairingMode();
+    this._clearReconnectTimer();
+    if (this._qrClearCallback) this._qrClearCallback();
+
+    // _connect يغلق Socket السابق قبل إنشاء الجديد، لذلك لا يوجد Socketان معاً.
+    this._isConnecting = false;
+    await this._connect();
+    logger.info('[CM] 📱 أُلغي وضع رمز الهاتف — تم طلب QR جديد');
+    return true;
+  }
+
   // ====================================================
   // منطق الاتصال الداخلي
   // ====================================================
