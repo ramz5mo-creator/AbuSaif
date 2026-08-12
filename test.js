@@ -67,6 +67,20 @@ acceptTests.forEach(({ input, expected }) => {
   console.log(`  ${status} "${input}" → ${result} (متوقع: ${expected})`);
 });
 
+// === اختبار منع «تم» المستقلة بلا طلب ===
+console.log('\n🚫 اختبار منع التأكيد الذاتي بلا طلب:');
+const standaloneAcceptTests = [
+  { text: 'تم', isReply: false, expected: true, label: 'تم مستقلة تُهمل' },
+  { text: 'تم', isReply: true, expected: false, label: 'تم رداً على طلب تبقى صالحة' },
+  { text: 'طلب الجبيهة', isReply: false, expected: false, label: 'طلب أصلي لا يُهمل' },
+];
+standaloneAcceptTests.forEach(({ text, isReply, expected, label }) => {
+  const result = parser.isStandaloneAcceptWithoutOrder(text, isReply);
+  const status = result === expected ? '✅' : '❌';
+  console.log(`  ${status} ${label}`);
+  if (result !== expected) process.exitCode = 1;
+});
+
 // === اختبار استخراج رقم الهاتف ===
 console.log('\n📱 اختبار استخراج رقم الهاتف:');
 const phoneTests = [
@@ -164,6 +178,14 @@ const unknownPartyFallbackIsSafe = serverSource.includes('async function queueUn
 console.log(`  ${unknownPartyFallbackIsSafe ? '✅' : '❌'} الرقم غير المسجل يُحفظ باسم مجهول في السجل والتفاصيل والمراجعة`);
 if (!unknownPartyFallbackIsSafe) process.exitCode = 1;
 
+// === اختبار حماية التفاعل على «تم» مستقلة ===
+console.log('\n🛑 اختبار حارس التفاعل الذاتي:');
+const standaloneAcceptReactionIsIgnored =
+  serverSource.includes('parser.isStandaloneAcceptWithoutOrder(_targetTextEarly, _isTargetAReply)') &&
+  serverSource.includes('تجاهل تفاعل على رسالة استلام مستقلة بلا طلب مقتبس');
+console.log(`  ${standaloneAcceptReactionIsIgnored ? '✅' : '❌'} لا يُنشئ التفاعل على «تم» بلا طلب أي عملية`);
+if (!standaloneAcceptReactionIsIgnored) process.exitCode = 1;
+
 // === اختبار تعطيل تقرير نهاية الأسبوع ===
 console.log('\n📊 اختبار تعطيل تقرير نهاية الأسبوع:');
 const weeklyReportIsDisabled = config.sheets.weeklyReport?.enabled === false &&
@@ -171,6 +193,31 @@ const weeklyReportIsDisabled = config.sheets.weeklyReport?.enabled === false &&
 console.log(`  ${weeklyReportIsDisabled ? '✅' : '❌'} التقرير لا يعمل يدوياً أو تلقائياً عندما يكون موقوفاً`);
 if (!weeklyReportIsDisabled) process.exitCode = 1;
 
-console.log('\n═══════════════════════════════════════');
-console.log('   انتهى الاختبار');
-console.log('═══════════════════════════════════════');
+// === اختبار تشغيل فعلي: رسالة «تم» مستقلة لا تعبر محلل الرسائل ===
+async function runStandaloneAcceptRuntimeTest() {
+  console.log('\n🔬 اختبار تشغيل رسالة «تم» مستقلة:');
+  const standaloneTam = {
+    key: {
+      id: 'test-standalone-tam-no-order',
+      remoteJid: 'test-group@g.us',
+      participant: '962798765432@s.whatsapp.net',
+      fromMe: false,
+    },
+    message: { conversation: 'تم' },
+  };
+  const result = await parser.processMessage(standaloneTam, null);
+  const ignored = result === null;
+  console.log(`  ${ignored ? '✅' : '❌'} رسالة «تم» بلا رد على طلب لا تصل لمسار الأرصدة`);
+  if (!ignored) process.exitCode = 1;
+}
+
+runStandaloneAcceptRuntimeTest()
+  .catch((error) => {
+    console.error('❌ فشل اختبار رسالة تم المستقلة:', error.message);
+    process.exitCode = 1;
+  })
+  .finally(() => {
+    console.log('\n═══════════════════════════════════════');
+    console.log('   انتهى الاختبار');
+    console.log('═══════════════════════════════════════');
+  });

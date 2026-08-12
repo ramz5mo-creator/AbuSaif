@@ -1204,6 +1204,7 @@ async function start() {
       const _captainFromTamEarly = quotedMsgId ? whatsapp.getCaptainByMessageId(quotedMsgId) : null;
       // فحص إضافي: هل الرسالة المستهدفة هي reply (تم) من messageCache
       let _isTargetAReply = !!_captainFromTamEarly;
+      let _targetTextEarly = '';
       if (!_isTargetAReply && quotedMsgId) {
         const _targetMsgEarly = whatsapp.getCachedMessage(quotedMsgId);
         const _targetMsgObjEarly = _targetMsgEarly?.message || {};
@@ -1214,6 +1215,17 @@ async function start() {
           _targetMsgObjEarly.audioMessage?.contextInfo ||
           _targetMsgObjEarly.documentMessage?.contextInfo || null;
         _isTargetAReply = !!_targetCtxEarly?.quotedMessage;
+        _targetTextEarly = whatsapp.extractText(_targetMsgEarly) || '';
+
+        // لا نعالج أي إيموجي على «تم» مستقلة لم ترد على طلب أصلي.
+        // حتى لو كان واضع الإيموجي شخصاً آخر، لا توجد عملية يمكن نسبتها بأمان.
+        if (parser.isStandaloneAcceptWithoutOrder(_targetTextEarly, _isTargetAReply)) {
+          logger.info('⚠️ تجاهل تفاعل على رسالة استلام مستقلة بلا طلب مقتبس', {
+            msgId: quotedMsgId.substring(0, 8),
+            text: _targetTextEarly.substring(0, 30),
+          });
+          return;
+        }
       }
 
       if (!_isTargetAReply) {

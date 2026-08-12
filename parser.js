@@ -205,6 +205,14 @@ function isAcceptMessage(text) {
   return false;
 }
 
+/**
+ * رسالة قبول لا ترد على طلب أصلي لا تمثل عملية. مثال: يكتب الشخص «تم»
+ * كرسالة مستقلة ثم يضع تفاعلاً عليها. لا يجوز إنشاء رصيد من هذا المسار.
+ */
+function isStandaloneAcceptWithoutOrder(text, isReply) {
+  return !isReply && isAcceptMessage(text);
+}
+
 function addProcessedId(id) {
   processedIds.add(id);
   if (processedIds.size > 10000) {
@@ -427,6 +435,18 @@ async function processMessage(msg, sock) {
   // أي رسالة ليست رداً تعتبر "طلب" (Production)
   // ====================================================
   if (!isReply) {
+    // «تم» أو أي كلمة استلام مستقلة ليست طلباً ولا تُحفظ كمرجع لعملية.
+    // يحمي ذلك من احتساب تفاعل الشخص على رسالة «تم» كتبها بنفسه.
+    if (isStandaloneAcceptWithoutOrder(text, isReply)) {
+      addProcessedId(messageId);
+      logger.info('⚠️ تجاهل رسالة استلام مستقلة بلا طلب مقتبس', {
+        phone: effectiveSenderPhone,
+        text: (text || '').substring(0, 30),
+        msgId: messageId.substring(0, 8),
+      });
+      return null;
+    }
+
     // إذا كانت الرسالة مجرد إيموجي رقمي أو 👍 بدون رد → نتجاهلها كطلب لأنها غالباً خطأ
     if (text && isQuantityEmoji(text)) {
       logger.debug('تجاهل إيموجي كمي بدون رد', { phone: effectiveSenderPhone, text });
@@ -620,6 +640,7 @@ module.exports = {
   extractQuantity,
   emojiToNumber,
   isAcceptMessage,
+  isStandaloneAcceptWithoutOrder,
   isQuantityEmoji,
   cleanPhone,
 };
