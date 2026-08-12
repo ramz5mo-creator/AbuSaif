@@ -113,6 +113,11 @@ const approvedHistoricalRecoveryRunsOnce = whatsappSource.includes('historical-r
 console.log(`  ${approvedHistoricalRecoveryRunsOnce ? '✅' : '❌'} استعادة دريمكس المعتمدة تنفذ مرة واحدة مع إيصال دائم`);
 if (!approvedHistoricalRecoveryRunsOnce) process.exitCode = 1;
 
+const historicalRecoveryStatusIsReadOnly = serverSource.includes("req.url === '/recovery-status/dreamax-2026-08-12'") &&
+  serverSource.includes("completed: Boolean(receipt)");
+console.log(`  ${historicalRecoveryStatusIsReadOnly ? '✅' : '❌'} حالة الاستعادة قراءة فقط ولا تعيد التنفيذ`);
+if (!historicalRecoveryStatusIsReadOnly) process.exitCode = 1;
+
 // === اختبار تعطيل تقرير نهاية الأسبوع ===
 console.log('\n📊 اختبار تعطيل تقرير نهاية الأسبوع:');
 const weeklyReportIsDisabled = config.sheets.weeklyReport?.enabled === false &&

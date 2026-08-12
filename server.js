@@ -146,6 +146,26 @@ const httpServer = http.createServer(async (req, res) => {
       uptime: process.uptime(),
       timestamp: new Date().toISOString()
     }, null, 2));
+  } else if (req.url === '/recovery-status/dreamax-2026-08-12') {
+    // قراءة فقط: لا تشغّل أي Recovery ولا تعرض بيانات رسائل أو أرقام هواتف.
+    const receiptPath = path.resolve(config.volumePath, 'historical-recovery-dreamax-2026-08-12.complete.json');
+    let receipt = null;
+    try {
+      if (fs.existsSync(receiptPath)) receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+    } catch (error) {
+      logger.warn('[Historical Recovery] تعذر قراءة إيصال دريمكس', { error: error.message });
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({
+      recovery: 'dreamax-2026-08-12',
+      completed: Boolean(receipt),
+      result: receipt ? {
+        completedAt: receipt.completedAt || null,
+        recovered: Number(receipt.recovered || 0),
+        skipped: Number(receipt.skipped || 0),
+        errors: Number(receipt.errors || 0),
+      } : null,
+    }, null, 2));
   } else if (req.method === 'POST' && req.url === '/internal/recover-dreamax-2026-08-12') {
     // مسار مؤقت ومحمي لاستعادة فجوة دريمكس التي تم اعتمادها فقط (00:00–00:41 بتوقيت عمّان).
     const expectedToken = process.env.HISTORICAL_RECOVERY_TOKEN || '';
