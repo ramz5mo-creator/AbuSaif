@@ -256,14 +256,15 @@ class ConnectionManager extends EventEmitter {
       }
     }
 
-    // في وضع رمز الربط، QR أو connecting هو الإشارة الموثوقة بأن النقل جاهز.
+    // في وضع رمز الربط، QR هو الإشارة المؤكدة بأن النقل جاهز. لا نستخدم
+    // connecting وحده لأنه قد يصل قبل اكتمال قناة WebSocket في بعض الإصدارات.
     // لا نعرض QR للمستخدم ولا نطلب الرمز أكثر من مرة على Socket واحد.
     if (
       this._pairingModeActive &&
       this._pairingPhone &&
       sourceSock === this._sock &&
       !this._authState?.creds?.registered &&
-      (connection === 'connecting' || Boolean(qr))
+      Boolean(qr)
     ) {
       this._requestPairingCodeAtReadyEvent(sourceSock);
     }
@@ -276,8 +277,8 @@ class ConnectionManager extends EventEmitter {
   }
 
   /**
-   * يطلب رمز الربط عند أول حدث QR أو connecting من Socket غير مسجّل.
-   * هذا هو التوقيت الموصى به في توثيق Baileys، وليس وقت makeWASocket.
+   * يطلب رمز الربط عند أول حدث QR من Socket غير مسجّل. هذا هو التوقيت
+   * الأكثر موثوقية في توثيق Baileys، وليس وقت makeWASocket أو connecting.
    */
   _requestPairingCodeAtReadyEvent(sock) {
     if (this._pairingCodeRequestedSock === sock) return;
@@ -356,6 +357,7 @@ class ConnectionManager extends EventEmitter {
     if (code === DisconnectReason.loggedOut) {
       logger.warn('[CM] ⚠️ LOGGED_OUT — مسح auth وإعادة الاتصال تلقائياً...');
       this.emit('LOGGED_OUT', { ts });
+      this._rejectPairingCode?.(new Error('أغلق واتساب جلسة الاقتران قبل اكتمال الربط'));
       this._clearPairingMode();
       this._clearAuthAndReconnect(ts, 'LOGGED_OUT');
       return;

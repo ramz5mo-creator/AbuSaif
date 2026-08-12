@@ -125,7 +125,7 @@ const pairingCodeUsesManagedSocket = whatsappSource.includes('async function req
   whatsappSource.includes('return connectionManager.requestPairingCode(phoneNumber);') &&
   connectionManagerSource.includes('const pairingCode = await sock.requestPairingCode(this._pairingPhone);') &&
   connectionManagerSource.includes('_requestPairingCodeAtReadyEvent(sourceSock)') &&
-  connectionManagerSource.includes("connection === 'connecting' || Boolean(qr)") &&
+  connectionManagerSource.includes('Boolean(qr)') &&
   connectionManagerSource.includes('تم تجاوز QR لأن رمز الربط قيد الإصدار') &&
   whatsappSource.includes('requestPairingCode,');
 const pairingCodeRouteIsPostOnly = serverSource.includes("req.method === 'POST' && req.url === '/pairing-code'") &&
