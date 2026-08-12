@@ -166,6 +166,28 @@ const httpServer = http.createServer(async (req, res) => {
         errors: Number(receipt.errors || 0),
       } : null,
     }, null, 2));
+  } else if (req.method === 'POST' && req.url === '/pairing-code') {
+    // مسار مؤقت للربط البديل برقم الهاتف. لا يسجل الرقم أو الرمز ولا ينشئ Socket جديداً.
+    let body = '';
+    for await (const chunk of req) {
+      body += chunk;
+      if (body.length > 128) {
+        res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ success: false, error: 'طلب كبير غير مسموح' }));
+        return;
+      }
+    }
+
+    try {
+      const payload = JSON.parse(body || '{}');
+      const pairingCode = await whatsapp.requestPairingCode(payload.phone);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ success: true, pairingCode }));
+    } catch (error) {
+      logger.warn('[Pairing Code] تعذر إصدار رمز الربط', { error: error.message });
+      res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ success: false, error: 'تعذر إصدار رمز الربط حالياً' }));
+    }
   } else if (req.method === 'POST' && req.url === '/internal/recover-dreamax-2026-08-12') {
     // مسار مؤقت ومحمي لاستعادة فجوة دريمكس التي تم اعتمادها فقط (00:00–00:41 بتوقيت عمّان).
     const expectedToken = process.env.HISTORICAL_RECOVERY_TOKEN || '';

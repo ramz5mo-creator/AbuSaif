@@ -118,6 +118,16 @@ const historicalRecoveryStatusIsReadOnly = serverSource.includes("req.url === '/
 console.log(`  ${historicalRecoveryStatusIsReadOnly ? '✅' : '❌'} حالة الاستعادة قراءة فقط ولا تعيد التنفيذ`);
 if (!historicalRecoveryStatusIsReadOnly) process.exitCode = 1;
 
+// === اختبار رمز الربط البديل ===
+console.log('\n📲 اختبار رمز الربط البديل:');
+const pairingCodeUsesManagedSocket = whatsappSource.includes('async function requestPairingCode(phoneNumber)') &&
+  whatsappSource.includes('return sock.requestPairingCode(normalizedPhone);') &&
+  whatsappSource.includes('requestPairingCode,');
+const pairingCodeRouteIsPostOnly = serverSource.includes("req.method === 'POST' && req.url === '/pairing-code'") &&
+  serverSource.includes("'Cache-Control': 'no-store'");
+console.log(`  ${pairingCodeUsesManagedSocket && pairingCodeRouteIsPostOnly ? '✅' : '❌'} رمز الربط يستخدم Socket المُدار ولا يُخزّن في الاستجابة المؤقتة`);
+if (!pairingCodeUsesManagedSocket || !pairingCodeRouteIsPostOnly) process.exitCode = 1;
+
 // === اختبار تعطيل تقرير نهاية الأسبوع ===
 console.log('\n📊 اختبار تعطيل تقرير نهاية الأسبوع:');
 const weeklyReportIsDisabled = config.sheets.weeklyReport?.enabled === false &&
