@@ -1208,6 +1208,12 @@ async function start() {
       if (!_isTargetAReply && quotedMsgId) {
         const _targetMsgEarly = whatsapp.getCachedMessage(quotedMsgId);
         const _targetMsgObjEarly = _targetMsgEarly?.message || {};
+        if (_targetMsgObjEarly.stickerMessage) {
+          logger.info('⚠️ تجاهل تفاعل على ملصق: لا يُحتسب كطلب أو حركة', {
+            msgId: quotedMsgId.substring(0, 8),
+          });
+          return;
+        }
         const _targetCtxEarly = 
           _targetMsgObjEarly.extendedTextMessage?.contextInfo ||
           _targetMsgObjEarly.imageMessage?.contextInfo ||

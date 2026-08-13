@@ -416,6 +416,17 @@ async function processMessage(msg, sock) {
   const text = whatsapp.extractText(msg);
   const msgType = whatsapp.getMessageType(msg); // 'text' | 'audio' | 'image' | 'video' | 'other'
 
+  // قاعدة صريحة: الملصقات ليست طلبات، ولا يجوز أن تكون مرجعاً لعملية.
+  // نضيف المعرّف كمعالج كي لا يعاد فحصه أثناء الاستعادة، من دون إنشاء cache أو رصيد.
+  if (msgType === 'sticker') {
+    addProcessedId(messageId);
+    logger.info('⚠️ تجاهل ملصق: لا يُحتسب كطلب أو حركة', {
+      phone: effectiveSenderPhone,
+      msgId: messageId.substring(0, 8),
+    });
+    return null;
+  }
+
   // التحقق من الرد — نبحث عن contextInfo في جميع أنواع الرسائل
   const msgObj = msg.message || {};
   const contextInfo =
@@ -429,6 +440,16 @@ async function processMessage(msg, sock) {
     msgObj.listResponseMessage?.contextInfo ||
     msgObj.conversation && null; // conversation لا يحمل contextInfo
   const isReply = !!contextInfo?.quotedMessage;
+
+  // حتى لو كان الرد نصاً مثل «تم»، لا نسمح بتحويل الرد على ملصق إلى استلام.
+  if (contextInfo?.quotedMessage?.stickerMessage) {
+    addProcessedId(messageId);
+    logger.info('⚠️ تجاهل رد على ملصق: لا يُحتسب كاستلام أو حركة', {
+      phone: effectiveSenderPhone,
+      msgId: messageId.substring(0, 8),
+    });
+    return null;
+  }
 
   // ====================================================
   // حالة 2أ: رسالة أصلية (ليست ردًا)

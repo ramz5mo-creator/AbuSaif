@@ -165,6 +165,7 @@ if (!restartRequiredSavesNewAuth) process.exitCode = 1;
 // === اختبار عدم ضياع الطرف غير المسجل ===
 console.log('\n🧾 اختبار الطرف غير المسجل:');
 const sheetsSource = fs.readFileSync(path.join(__dirname, 'sheets.js'), 'utf8');
+const parserSource = fs.readFileSync(path.join(__dirname, 'parser.js'), 'utf8');
 const unknownPartyFallbackIsSafe = serverSource.includes('async function queueUnknownParty(phone, role)') &&
   serverSource.includes("return sheets.getRegisteredName(phone) || 'مجهول';") &&
   serverSource.includes("await sheets.logUnregisteredNumber(normalizedPhone, 'مجهول');") &&
@@ -185,6 +186,17 @@ const standaloneAcceptReactionIsIgnored =
   serverSource.includes('تجاهل تفاعل على رسالة استلام مستقلة بلا طلب مقتبس');
 console.log(`  ${standaloneAcceptReactionIsIgnored ? '✅' : '❌'} لا يُنشئ التفاعل على «تم» بلا طلب أي عملية`);
 if (!standaloneAcceptReactionIsIgnored) process.exitCode = 1;
+
+// === اختبار حماية الملصقات ===
+console.log('\n🧷 اختبار حماية الملصقات:');
+const stickerIsBlockedEverywhere =
+  parserSource.includes("if (msgType === 'sticker')") &&
+  parserSource.includes('تجاهل ملصق: لا يُحتسب كطلب أو حركة') &&
+  parserSource.includes('contextInfo?.quotedMessage?.stickerMessage') &&
+  serverSource.includes('_targetMsgObjEarly.stickerMessage') &&
+  serverSource.includes('تجاهل تفاعل على ملصق: لا يُحتسب كطلب أو حركة');
+console.log(`  ${stickerIsBlockedEverywhere ? '✅' : '❌'} الملصق والرد أو التفاعل عليه لا يصلان إلى الأرصدة`);
+if (!stickerIsBlockedEverywhere) process.exitCode = 1;
 
 // === اختبار تعطيل تقرير نهاية الأسبوع ===
 console.log('\n📊 اختبار تعطيل تقرير نهاية الأسبوع:');
@@ -211,7 +223,46 @@ async function runStandaloneAcceptRuntimeTest() {
   if (!ignored) process.exitCode = 1;
 }
 
+async function runStickerRuntimeTests() {
+  console.log('\n🔬 اختبار تشغيل الملصقات:');
+  const stickerMessage = {
+    key: {
+      id: 'test-sticker-not-an-order',
+      remoteJid: 'test-group@g.us',
+      participant: '962798765432@s.whatsapp.net',
+      fromMe: false,
+    },
+    message: { stickerMessage: { fileSha256: Buffer.from('sticker') } },
+  };
+  const replyToSticker = {
+    key: {
+      id: 'test-reply-to-sticker-not-a-receipt',
+      remoteJid: 'test-group@g.us',
+      participant: '962798765433@s.whatsapp.net',
+      fromMe: false,
+    },
+    message: {
+      extendedTextMessage: {
+        text: 'تم',
+        contextInfo: {
+          participant: '962798765432@s.whatsapp.net',
+          stanzaId: 'test-sticker-not-an-order',
+          quotedMessage: { stickerMessage: { fileSha256: Buffer.from('sticker') } },
+        },
+      },
+    },
+  };
+  const [stickerResult, replyResult] = await Promise.all([
+    parser.processMessage(stickerMessage, null),
+    parser.processMessage(replyToSticker, null),
+  ]);
+  const ignored = stickerResult === null && replyResult === null;
+  console.log(`  ${ignored ? '✅' : '❌'} الملصق والرد عليه لا يصلان لمسار الأرصدة`);
+  if (!ignored) process.exitCode = 1;
+}
+
 runStandaloneAcceptRuntimeTest()
+  .then(runStickerRuntimeTests)
   .catch((error) => {
     console.error('❌ فشل اختبار رسالة تم المستقلة:', error.message);
     process.exitCode = 1;
