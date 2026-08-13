@@ -88,6 +88,53 @@ function markAsProcessed(msgId) {
   }
 }
 
+/**
+ * عند وصول رد «تم» ثانٍ على التسجيل الصوتي، تصبح كل ردود هذا التسجيل غير
+ * صالحة. إذا سبق أن سُجّلت حركة فنعكسها ونبقي أثراً واضحاً في سجل التعديلات.
+ */
+async function invalidateVoiceReplyTransactions(voiceStatus) {
+  if (!voiceStatus?.invalidated || !Array.isArray(voiceStatus.replyMessageIds)) return;
+  for (const replyMessageId of voiceStatus.replyMessageIds) {
+    const transaction = await sheets.findTransactionByMessageId(replyMessageId, null);
+    if (!transaction || !(transaction.quantity > 0)) continue;
+
+    const quantity = transaction.quantity;
+    const groupPrefix = transaction.groupPrefix || '';
+    try {
+      if (transaction.producerPhone) {
+        await sheets.updateTotalsProduction(transaction.producerPhone, -quantity, groupPrefix, 'نظام حماية التسجيل الصوتي');
+      }
+      if (transaction.captainPhone) {
+        await sheets.updateTotalsReception(transaction.captainPhone, -quantity, groupPrefix, 'نظام حماية التسجيل الصوتي');
+      }
+      await sheets.updateTransactionStatus(transaction.rowIndex, {
+        status: 'ملغى - تعدد تم صوتي',
+        quantity: 0,
+        notes: `إلغاء تلقائي: وُجد أكثر من رد «تم» على التسجيل الصوتي ${voiceStatus.voiceMessageId} | الكمية الأصلية: ${quantity} | ردود تم: ${voiceStatus.replyCount}`,
+      });
+      await sheets.logEdit({
+        editorPhone: 'SYSTEM_VOICE_GUARD',
+        editorName: 'نظام حماية التسجيل الصوتي',
+        producerPhone: transaction.producerPhone || '',
+        captainPhone: transaction.captainPhone || '',
+        oldQuantity: quantity,
+        newQuantity: 0,
+        notes: `تعدد ردود تم على التسجيل ${voiceStatus.voiceMessageId}`,
+      });
+      logger.warn('↩️ عكس حركة تسجيل صوتي بسبب تعدد ردود تم', {
+        voiceMessageId: voiceStatus.voiceMessageId?.substring(0, 8),
+        replyMessageId: replyMessageId.substring(0, 8),
+        quantity,
+      });
+    } catch (error) {
+      logger.error('❌ فشل عكس حركة تسجيل صوتي غير صالحة', {
+        replyMessageId: replyMessageId.substring(0, 8),
+        error: error.message,
+      });
+    }
+  }
+}
+
 // ====================================================
 // خادم ويب لعرض QR + حالة البوت
 // ====================================================
@@ -1439,6 +1486,16 @@ async function start() {
       const isReactionOnAcceptedReply = Boolean(
         captainPhone && (captainFromTam || _captainFromTamEarly || _isTargetAReply)
       );
+      const voiceReplyStatus = quotedMsgId ? whatsapp.getVoiceReplyStatusByReplyId(quotedMsgId) : null;
+      const voiceOrderContext = quotedMsgId ? whatsapp.getOrderContextByReplyId(quotedMsgId) : null;
+      if (voiceOrderContext?.isVoiceOrder && (!voiceReplyStatus || voiceReplyStatus.replyCount !== 1 || voiceReplyStatus.invalidated)) {
+        logger.warn('⚠️ تجاهل تفاعل على تسجيل صوتي غير مؤهل', {
+          msgId: quotedMsgId?.substring(0, 8),
+          voiceMessageId: voiceOrderContext.voiceMessageId?.substring(0, 8),
+          replyCount: voiceReplyStatus?.replyCount || 0,
+        });
+        return;
+      }
       if (result.type === 'accept' && isReactionOnAcceptedReply) {
         const authorization = authorizeQuantityReaction({
           reactorPhone: producerPhone,
@@ -1939,6 +1996,9 @@ async function start() {
     if (result.type === 'accept') {
       let captainPhone = result.phone;
       const tamMessageId = result.messageId;
+      const isVoiceAcceptance = Boolean(
+        result.isVoiceReply && result.voiceMessageId && parser.isAcceptMessage(result.text) && !parser.isQuantityEmoji(result.text)
+      );
       // إذا كان captainPhone هو LID غير محلول، نحاول حله الآن
       if (captainPhone && captainPhone.includes('@lid')) {
         // محاولة 1: من lidToPhoneMap
@@ -1981,6 +2041,17 @@ async function start() {
       if (captainPhone && tamMessageId) {
         whatsapp.setCaptainForMessage(tamMessageId, captainPhone);
         sheets.saveTamToSheet(tamMessageId, captainPhone).catch(() => {});
+        const voiceReplyStatus = isVoiceAcceptance
+          ? whatsapp.registerVoiceReply(result.voiceMessageId, tamMessageId, captainPhone)
+          : null;
+        if (voiceReplyStatus?.invalidated) {
+          logger.warn('⚠️ تسجيل صوتي غير مؤهل: تعدد ردود «تم»', {
+            voiceMessageId: result.voiceMessageId.substring(0, 8),
+            replyCount: voiceReplyStatus.replyCount,
+            replyMessageIds: voiceReplyStatus.replyMessageIds.map(id => id.substring(0, 8)),
+          });
+          await invalidateVoiceReplyTransactions(voiceReplyStatus);
+        }
         
         // حفظ رقم صاحب الطلب مربوطاً بـ id رسالة الرد
         // حتى يعرف النظام من هو صاحب الطلب عند وضع إيموجي على رسالة الكابتن
@@ -2025,6 +2096,10 @@ async function start() {
             orderMessageId: result.quotedMessageId || '',
             orderText: whatsapp.extractText(originalOrderMessage) || result.quotedText || '',
             tamText: whatsapp.extractText(msg) || '',
+            isVoiceOrder: isVoiceAcceptance,
+            voiceMessageId: isVoiceAcceptance ? result.voiceMessageId : '',
+            voiceReplyCount: voiceReplyStatus?.replyCount || 0,
+            voiceReplyInvalidated: Boolean(voiceReplyStatus?.invalidated),
           });
         }
         
@@ -2050,6 +2125,15 @@ async function start() {
           const groupInfo = targetGroups.find(g => g.id === result.groupId);
           const groupPrefix = groupInfo ? groupInfo.prefix : '';
           const quotedMsgIdKmi = result.quotedMessageId;
+          const voiceReplyStatus = quotedMsgIdKmi ? whatsapp.getVoiceReplyStatusByReplyId(quotedMsgIdKmi) : null;
+          if (voiceReplyStatus) {
+            logger.warn('⚠️ تجاهل رد كمي على رسالة تم تخص تسجيلاً صوتياً؛ الاعتماد للتفاعل فقط وبعد رد تم وحيد', {
+              msgId: quotedMsgIdKmi?.substring(0, 8),
+              voiceMessageId: voiceReplyStatus.voiceMessageId?.substring(0, 8),
+              replyCount: voiceReplyStatus.replyCount,
+            });
+            return;
+          }
 
           // الخطوة 1: تحديد الكابتن من tamCache (المصدر الموثوق)
           let realCaptain = null;

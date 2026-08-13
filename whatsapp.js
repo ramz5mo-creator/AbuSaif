@@ -33,6 +33,9 @@ const healthMonitor     = require('./health-monitor');
 const messageCache = new Map();
 const tamCache     = new Map();
 const orderCache   = new Map();
+// مفتاحها معرف التسجيل الصوتي الأصلي، وقيمتها قائمة ردود «تم» عليه.
+// تحفظ مع سياق الطلب حتى لا يفقد عدّاد التعدد بعد إعادة التشغيل.
+const voiceReplyCache = new Map();
 const lidToPhoneMap = new Map();
 
 const LID_MAP_PATH   = path.resolve(config.volumePath, 'lid-map.json');
@@ -696,8 +699,13 @@ function saveTamCache() {
         orderObj[k] = typeof v === 'string' ? { producer: v, ts } : v;
       }
     }
-    fs.writeFileSync(TAM_CACHE_PATH, JSON.stringify({ tamCache: tamObj, orderCache: orderObj, savedAt: new Date().toISOString() }, null, 2));
-    logger.debug(`💾 tamCache محفوظ (${Object.keys(tamObj).length} تم + ${Object.keys(orderObj).length} طلب)`);
+    const voiceObj = {};
+    for (const [voiceMessageId, entry] of voiceReplyCache.entries()) {
+      const ts = entry?.ts || now;
+      if (now - ts < TAM_CACHE_TTL_MS) voiceObj[voiceMessageId] = entry;
+    }
+    fs.writeFileSync(TAM_CACHE_PATH, JSON.stringify({ tamCache: tamObj, orderCache: orderObj, voiceReplyCache: voiceObj, savedAt: new Date().toISOString() }, null, 2));
+    logger.debug(`💾 tamCache محفوظ (${Object.keys(tamObj).length} تم + ${Object.keys(orderObj).length} طلب + ${Object.keys(voiceObj).length} تسجيل صوتي)`);
   } catch (e) {
     logger.warn('فشل حفظ tamCache', { error: e.message });
   }
@@ -711,7 +719,7 @@ function loadTamCache() {
     }
     const raw = JSON.parse(fs.readFileSync(TAM_CACHE_PATH, 'utf8'));
     const now = Date.now();
-    let tamCount = 0, orderCount = 0, skipped = 0;
+    let tamCount = 0, orderCount = 0, voiceCount = 0, skipped = 0;
     for (const [k, v] of Object.entries(raw.tamCache || {})) {
       const ts = v.ts || 0;
       if (now - ts < TAM_CACHE_TTL_MS) {
@@ -730,7 +738,19 @@ function loadTamCache() {
         skipped++;
       }
     }
-    logger.info(`📂 tamCache محمَّل: ${tamCount} تم + ${orderCount} طلب (تجاهل ${skipped} قديم)`);
+    for (const [voiceMessageId, entry] of Object.entries(raw.voiceReplyCache || {})) {
+      const ts = entry?.ts || 0;
+      if (now - ts < TAM_CACHE_TTL_MS) {
+        voiceReplyCache.set(voiceMessageId, {
+          ...entry,
+          replyMessageIds: Array.isArray(entry.replyMessageIds) ? entry.replyMessageIds : [],
+        });
+        voiceCount++;
+      } else {
+        skipped++;
+      }
+    }
+    logger.info(`📂 tamCache محمَّل: ${tamCount} تم + ${orderCount} طلب + ${voiceCount} تسجيل صوتي (تجاهل ${skipped} قديم)`);
   } catch (e) {
     logger.warn('فشل تحميل tamCache من القرص', { error: e.message });
   }
@@ -944,6 +964,10 @@ function setOrderForReply(replyMsgId, producerPhone, context = {}) {
     orderMessageId: context.orderMessageId || '',
     orderText: context.orderText || '',
     tamText: context.tamText || '',
+    isVoiceOrder: Boolean(context.isVoiceOrder),
+    voiceMessageId: context.voiceMessageId || '',
+    voiceReplyCount: Number(context.voiceReplyCount) || 0,
+    voiceReplyInvalidated: Boolean(context.voiceReplyInvalidated),
   });
   saveTamCacheDebounced();
 }
@@ -959,6 +983,48 @@ function getOrderContextByReplyId(replyMsgId) {
   const entry = orderCache.get(replyMsgId);
   if (!entry || typeof entry === 'string') return null;
   return { ...entry };
+}
+
+/**
+ * تسجيل رد «تم» على تسجيل صوتي أصلي. الإدخال الفريد هو معرف رسالة «تم»،
+ * لذلك لا يتضاعف العدّاد عند تكرار نفس الحدث عبر الاستعادة.
+ */
+function registerVoiceReply(voiceMessageId, replyMessageId, captainPhone = '') {
+  if (!voiceMessageId || !replyMessageId) return null;
+  const previous = voiceReplyCache.get(voiceMessageId) || { replyMessageIds: [] };
+  const replyMessageIds = Array.isArray(previous.replyMessageIds) ? [...previous.replyMessageIds] : [];
+  if (!replyMessageIds.includes(replyMessageId)) replyMessageIds.push(replyMessageId);
+  const entry = {
+    voiceMessageId,
+    replyMessageIds,
+    replyCount: replyMessageIds.length,
+    invalidated: replyMessageIds.length > 1,
+    firstCaptainPhone: previous.firstCaptainPhone || captainPhone || '',
+    lastCaptainPhone: captainPhone || previous.lastCaptainPhone || '',
+    ts: Date.now(),
+  };
+  voiceReplyCache.set(voiceMessageId, entry);
+  // هذه قاعدة محاسبية؛ نحفظها فوراً حتى لا يسمح restart بين الردود باعتماد حركة خاطئة.
+  saveTamCache();
+  return { ...entry, replyMessageIds: [...replyMessageIds] };
+}
+
+function getVoiceReplyStatus(voiceMessageId) {
+  const entry = voiceReplyCache.get(voiceMessageId);
+  if (!entry) return null;
+  return { ...entry, replyMessageIds: [...(entry.replyMessageIds || [])] };
+}
+
+function getVoiceReplyStatusByReplyId(replyMessageId) {
+  if (!replyMessageId) return null;
+  const orderContext = getOrderContextByReplyId(replyMessageId);
+  if (orderContext?.voiceMessageId) return getVoiceReplyStatus(orderContext.voiceMessageId);
+  for (const entry of voiceReplyCache.values()) {
+    if (entry?.replyMessageIds?.includes(replyMessageId)) {
+      return { ...entry, replyMessageIds: [...entry.replyMessageIds] };
+    }
+  }
+  return null;
 }
 
 function getCachedMessage(messageId) {
@@ -1343,6 +1409,9 @@ module.exports = {
   setOrderForReply,
   getOrderByReplyId,
   getOrderContextByReplyId,
+  registerVoiceReply,
+  getVoiceReplyStatus,
+  getVoiceReplyStatusByReplyId,
   getPushNameFromCachedMessage,
   resolvePhoneByPushName,
   syncGroupLids,

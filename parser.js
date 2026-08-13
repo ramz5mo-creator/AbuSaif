@@ -440,6 +440,8 @@ async function processMessage(msg, sock) {
     msgObj.listResponseMessage?.contextInfo ||
     msgObj.conversation && null; // conversation لا يحمل contextInfo
   const isReply = !!contextInfo?.quotedMessage;
+  const isVoiceReply = Boolean(contextInfo?.quotedMessage?.audioMessage);
+  const voiceMessageId = isVoiceReply ? (contextInfo?.stanzaId || '') : '';
 
   // حتى لو كان الرد نصاً مثل «تم»، لا نسمح بتحويل الرد على ملصق إلى استلام.
   if (contextInfo?.quotedMessage?.stickerMessage) {
@@ -648,6 +650,8 @@ async function processMessage(msg, sock) {
     text,
     quotedText: quotedText.substring(0, 200),
     quotedMessageId,
+    isVoiceReply,
+    voiceMessageId,
     timestamp: new Date().toISOString(),
     groupId: msg.key.remoteJid,
     source: 'reply',

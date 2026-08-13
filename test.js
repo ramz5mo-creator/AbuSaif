@@ -4,6 +4,7 @@
  */
 
 const parser = require('./parser');
+const whatsapp = require('./whatsapp');
 const config = require('./config');
 const fs = require('fs');
 const path = require('path');
@@ -230,6 +231,20 @@ const stickerIsBlockedEverywhere =
 console.log(`  ${stickerIsBlockedEverywhere ? '✅' : '❌'} الملصق والرد أو التفاعل عليه لا يصلان إلى الأرصدة`);
 if (!stickerIsBlockedEverywhere) process.exitCode = 1;
 
+// === اختبار قاعدة التسجيل الصوتي ===
+console.log('\n🎙️ اختبار قاعدة التسجيل الصوتي:');
+const voiceReplyRuleIsPersistent =
+  parserSource.includes('const isVoiceReply = Boolean(contextInfo?.quotedMessage?.audioMessage);') &&
+  parserSource.includes('voiceMessageId,') &&
+  whatsappSource.includes('const voiceReplyCache = new Map();') &&
+  whatsappSource.includes('function registerVoiceReply(voiceMessageId, replyMessageId') &&
+  whatsappSource.includes('voiceReplyCache: voiceObj') &&
+  serverSource.includes('getVoiceReplyStatusByReplyId') &&
+  serverSource.includes('invalidateVoiceReplyTransactions') &&
+  serverSource.includes('تجاهل تفاعل على تسجيل صوتي غير مؤهل');
+console.log(`  ${voiceReplyRuleIsPersistent ? '✅' : '❌'} عدّاد الردود الصوتية دائم ويمنع التفاعل عند تعدد ردود تم`);
+if (!voiceReplyRuleIsPersistent) process.exitCode = 1;
+
 // === اختبار تعطيل تقرير نهاية الأسبوع ===
 console.log('\n📊 اختبار تعطيل تقرير نهاية الأسبوع:');
 const weeklyReportIsDisabled = config.sheets.weeklyReport?.enabled === false &&
@@ -293,8 +308,49 @@ async function runStickerRuntimeTests() {
   if (!ignored) process.exitCode = 1;
 }
 
+async function runVoiceReplyRuntimeTest() {
+  console.log('\n🔬 اختبار تشغيل رد «تم» على تسجيل صوتي:');
+  const voiceReply = {
+    key: {
+      id: 'test-voice-tam-reply',
+      remoteJid: 'test-group@g.us',
+      participant: '962798765433@s.whatsapp.net',
+      fromMe: false,
+    },
+    message: {
+      extendedTextMessage: {
+        text: 'تم',
+        contextInfo: {
+          participant: '962798765432@s.whatsapp.net',
+          stanzaId: 'test-original-voice-order',
+          quotedMessage: { audioMessage: { ptt: true, seconds: 12 } },
+        },
+      },
+    },
+  };
+  const result = await parser.processMessage(voiceReply, null);
+  const tagged = result?.type === 'accept' && result.isVoiceReply === true && result.voiceMessageId === 'test-original-voice-order';
+  console.log(`  ${tagged ? '✅' : '❌'} رد تم على تسجيل صوتي يحمل معرف التسجيل الأصلي`);
+  if (!tagged) process.exitCode = 1;
+}
+
+async function runVoiceReplyStateTest() {
+  console.log('\n🔬 اختبار عدّاد ردود التسجيل الصوتي:');
+  const voiceMessageId = `test-voice-state-${Date.now()}`;
+  const first = whatsapp.registerVoiceReply(voiceMessageId, `${voiceMessageId}-tam-1`, '962798765433');
+  const second = whatsapp.registerVoiceReply(voiceMessageId, `${voiceMessageId}-tam-2`, '962798765434');
+  const byReply = whatsapp.getVoiceReplyStatusByReplyId(`${voiceMessageId}-tam-1`);
+  const invalidated = first?.replyCount === 1 && first.invalidated === false &&
+    second?.replyCount === 2 && second.invalidated === true &&
+    byReply?.replyMessageIds?.length === 2 && byReply.invalidated === true;
+  console.log(`  ${invalidated ? '✅' : '❌'} الرد الثاني يبطل التسجيل الصوتي ويظل قابلاً للاستعلام بمعرف رد تم`);
+  if (!invalidated) process.exitCode = 1;
+}
+
 runStandaloneAcceptRuntimeTest()
   .then(runStickerRuntimeTests)
+  .then(runVoiceReplyRuntimeTest)
+  .then(runVoiceReplyStateTest)
   .catch((error) => {
     console.error('❌ فشل اختبار رسالة تم المستقلة:', error.message);
     process.exitCode = 1;
