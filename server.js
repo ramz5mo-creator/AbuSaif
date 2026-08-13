@@ -1241,7 +1241,7 @@ function getQuotedContextText(contextInfo) {
 }
 
 /** يبني صف التدقيق دون الاعتماد على نجاحه في تسجيل الأرصدة اليومية. */
-function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone, captainPhone, reactorPhone }) {
+function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone, captainPhone, reactorPhone, identityIncomplete = false }) {
   const targetMessage = quotedMsgId ? whatsapp.getCachedMessage(quotedMsgId) : null;
   const targetContext = getCachedMessageContext(targetMessage);
   const persistedContext = quotedMsgId ? whatsapp.getOrderContextByReplyId(quotedMsgId) : null;
@@ -1259,6 +1259,12 @@ function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone
   const samePerson = normalizePhoneForComparison(producerPhone) &&
     normalizePhoneForComparison(producerPhone) === normalizePhoneForComparison(captainPhone);
 
+  const needsReview = samePerson || identityIncomplete;
+  const reviewNotes = [
+    samePerson ? 'تحذير: رقم المنتج والكابتن متطابقان' : '',
+    identityIncomplete ? 'هوية أحد الأطراف غير مكتملة؛ حُفظت العملية للمراجعة ولم تُسقط' : '',
+  ].filter(Boolean).join(' | ');
+
   return {
     transactionId: result.transactionId,
     timestamp: result.timestamp,
@@ -1273,11 +1279,11 @@ function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone
     orderText: persistedContext?.orderText || cachedOrderText || embeddedOrderText || result.quotedText || 'غير متوفر',
     tamText: persistedContext?.tamText || (targetContext ? (cachedTamText || result.quotedText || 'غير متوفر') : ''),
     emoji: result.text || '',
-    status: samePerson ? 'يحتاج مراجعة' : 'نشط',
+    status: needsReview ? 'يحتاج مراجعة' : 'نشط',
     tamMessageId: (targetContext || persistedContext) ? quotedMsgId : '',
     orderMessageId,
     source: (targetContext || persistedContext) ? 'تفاعل على رسالة تم' : 'تفاعل على الطلب',
-    notes: samePerson ? 'تحذير: رقم المنتج والكابتن متطابقان' : '',
+    notes: reviewNotes,
   };
 }
 
@@ -1540,12 +1546,15 @@ async function start() {
             // صاحب الطلب = صاحب الرسالة التي رد عليها الكابتن
             const originalOrderMsgId = targetContextInfo.stanzaId;
             const originalOrderMsg = originalOrderMsgId ? whatsapp.getCachedMessage(originalOrderMsgId) : null;
-            if (originalOrderMsg) {
-              const originalOwnerJid = whatsapp.getSenderJid(originalOrderMsg);
-              const originalOwnerPhone = originalOwnerJid ? originalOwnerJid.split('@')[0].replace(/\D/g, '') : null;
-              realProducerPhone = originalOwnerPhone || null;
+            // سياق الرسالة المستهدفة يحتفظ به واتساب داخل رد «تم» نفسه، حتى لو
+            // لم تعد رسالة الطلب الأصلية متاحة في messageCache بعد الانقطاع.
+            const originalOwnerJid = whatsapp.getSenderJid(originalOrderMsg) ||
+              targetContextInfo.senderPn ||
+              targetContextInfo.participantPn ||
+              targetContextInfo.participant || '';
+            if (originalOwnerJid) {
+              realProducerPhone = await resolveLidPhone(originalOwnerJid);
             } else {
-              // لا يمكن تحديد صاحب الطلب من الكاش؛ لا نستخدم واضع الإيموجي كبديل.
               realProducerPhone = null;
             }
             // حفظ في tamCache للمرات القادمة
@@ -1649,12 +1658,57 @@ async function start() {
           isSupervisor: await sheets.isSupervisor(producerPhone),
         });
         if (!authorization.allowed) {
-          logger.warn('⚠️ تجاهل تفاعل كمية غير مصرح به على رسالة تم', {
-            reason: authorization.reason,
-            reactor: producerPhone || 'unknown',
-            orderOwner: realProducerPhone || 'unknown',
-            msgId: quotedMsgId?.substring(0, 8),
-          });
+          // لا نسمح بأثر مالي عندما لا يمكن إثبات صاحب الطلب، لكن لا نرمي
+          // الرسالة: نحفظها في سجل الحركات وتفاصيل الطلبات والمراجعة اليدوية.
+          if (authorization.reason === 'unknown-order-owner') {
+            const unresolvedProducer = realProducerPhone || orderOwnerPhone || '';
+            const unresolvedCaptain = captainPhone || '';
+            const unresolvedReason = 'تعذر استخراج رقم صاحب الطلب من سياق واتساب؛ حُفظت العملية للمراجعة';
+            await sheets.recordTransaction({
+              transactionId: result.transactionId,
+              timestamp: result.timestamp,
+              producerPhone: unresolvedProducer,
+              captainPhone: unresolvedCaptain,
+              quantity,
+              type: 'تفاعل كمية (هوية غير مكتملة)',
+              emoji: result.text || '',
+              groupPrefix,
+              messageId: quotedMsgId || '',
+              status: '⏳ هوية غير مكتملة',
+              notes: unresolvedReason,
+            });
+            const unresolvedDetail = buildOrderDetail({
+              result, msg, quotedMsgId, groupPrefix,
+              producerPhone: unresolvedProducer,
+              captainPhone: unresolvedCaptain,
+              reactorPhone: producerPhone,
+              identityIncomplete: true,
+            });
+            await sheets.upsertOrderDetails(unresolvedDetail);
+            await sheets.upsertOperationReview({
+              reviewId: `REVIEW_${result.transactionId}`,
+              timestamp: result.timestamp,
+              groupPrefix,
+              alertType: 'هوية غير مكتملة',
+              referenceId: quotedMsgId || result.messageId || '',
+              reason: unresolvedReason,
+              notes: `المعرّف المتاح للمنتج: ${String(unresolvedProducer || 'غير متوفر').substring(0, 40)}`,
+              producerPhone: unresolvedProducer,
+              captainPhone: unresolvedCaptain,
+            });
+            logger.warn('⏳ تفاعل كمية حُفظ للمراجعة بسبب هوية صاحب طلب غير مكتملة', {
+              reactor: producerPhone || 'unknown',
+              captain: unresolvedCaptain || 'unknown',
+              msgId: quotedMsgId?.substring(0, 8),
+            });
+          } else {
+            logger.warn('⚠️ تجاهل تفاعل كمية غير مصرح به على رسالة تم', {
+              reason: authorization.reason,
+              reactor: producerPhone || 'unknown',
+              orderOwner: realProducerPhone || 'unknown',
+              msgId: quotedMsgId?.substring(0, 8),
+            });
+          }
           return;
         }
         logger.info('✅ تفاعل كمية مصرح به', {
@@ -1731,6 +1785,7 @@ async function start() {
           group: groupInfo ? groupInfo.name : 'Unknown'
         });
 
+        const identityIncomplete = !producerParty.recordable || !captainParty.recordable;
         if (producerParty.recordable) {
           try {
           const producerName = getSafePartyName(finalProducerPhone);
@@ -1764,8 +1819,10 @@ async function start() {
           emoji: result.text,
           groupPrefix,
           messageId: quotedMsgId || '',
-          status: 'نشط',
-          notes: 'reaction'
+          status: identityIncomplete ? '⏳ هوية غير مكتملة' : 'نشط',
+          notes: identityIncomplete
+            ? 'حُفظت العملية؛ هوية أحد الأطراف غير مكتملة ويستلزم الرقم الحقيقي للمطابقة'
+            : 'reaction'
         }).catch(() => {});
 
         const orderDetail = buildOrderDetail({
@@ -1776,6 +1833,7 @@ async function start() {
           producerPhone: finalProducerPhone,
           captainPhone: resolvedCaptainForSheet || '',
           reactorPhone: producerPhone,
+          identityIncomplete,
         });
         sheets.upsertOrderDetails(orderDetail).catch(() => {});
         if (orderDetail.status === 'يحتاج مراجعة') {
@@ -1783,7 +1841,7 @@ async function start() {
             reviewId: `REVIEW_${result.transactionId}`,
             timestamp: result.timestamp,
             groupPrefix,
-            alertType: 'تطابق المنتج والكابتن',
+            alertType: identityIncomplete ? 'هوية غير مكتملة' : 'تطابق المنتج والكابتن',
             referenceId: quotedMsgId || result.messageId || '',
             reason: orderDetail.notes || 'رقم المنتج والكابتن متطابقان',
             notes: 'لا يتم تعديل أي رصيد عند اختيار نعم أو لا',

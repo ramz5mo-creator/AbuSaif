@@ -216,6 +216,15 @@ const unknownPartyFallbackIsSafe = serverSource.includes('async function queueUn
 console.log(`  ${unknownPartyFallbackIsSafe ? '✅' : '❌'} الرقم غير المسجل يُحفظ باسم مجهول في السجل والتفاصيل والمراجعة`);
 if (!unknownPartyFallbackIsSafe) process.exitCode = 1;
 
+const unresolvedOwnerIsSavedForReview =
+  serverSource.includes('targetContextInfo.senderPn') &&
+  serverSource.includes('targetContextInfo.participantPn') &&
+  serverSource.includes("type: 'تفاعل كمية (هوية غير مكتملة)'") &&
+  serverSource.includes('حُفظت العملية للمراجعة ولم تُسقط') &&
+  serverSource.includes("status: '⏳ هوية غير مكتملة'");
+console.log(`  ${unresolvedOwnerIsSavedForReview ? '✅' : '❌'} غياب رقم صاحب الطلب يُحفظ للمراجعة بدلاً من إسقاط التفاعل`);
+if (!unresolvedOwnerIsSavedForReview) process.exitCode = 1;
+
 // === اختبار حماية التفاعل على «تم» مستقلة ===
 console.log('\n🛑 اختبار حارس التفاعل الذاتي:');
 const standaloneAcceptReactionIsIgnored =
