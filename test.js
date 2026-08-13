@@ -7,6 +7,7 @@ const parser = require('./parser');
 const config = require('./config');
 const fs = require('fs');
 const path = require('path');
+const { authorizeQuantityReaction } = require('./reaction-authorization');
 
 console.log('═══════════════════════════════════════');
 console.log('   اختبار نظام AbuSaif');
@@ -79,6 +80,37 @@ standaloneAcceptTests.forEach(({ text, isReply, expected, label }) => {
   const status = result === expected ? '✅' : '❌';
   console.log(`  ${status} ${label}`);
   if (result !== expected) process.exitCode = 1;
+});
+
+// === اختبار صلاحية تفاعل الكمية على رسالة «تم» ===
+console.log('\n🔐 اختبار صلاحية صاحب التفاعل:');
+const reactionAuthorizationTests = [
+  {
+    input: { reactorPhone: '962785891255', orderOwnerPhone: '785891255', isSupervisor: false },
+    expected: true,
+    label: 'صاحب الطلب يضع التفاعل',
+  },
+  {
+    input: { reactorPhone: '962799999999', orderOwnerPhone: '785891255', isSupervisor: true },
+    expected: true,
+    label: 'المشرف المعتمد يضع التفاعل',
+  },
+  {
+    input: { reactorPhone: '962788888888', orderOwnerPhone: '785891255', isSupervisor: false },
+    expected: false,
+    label: 'طرف ثالث لا يعتمد تفاعله',
+  },
+  {
+    input: { reactorPhone: '962788888888', orderOwnerPhone: '', isSupervisor: false },
+    expected: false,
+    label: 'لا يعتمد التفاعل عند غياب صاحب الطلب',
+  },
+];
+reactionAuthorizationTests.forEach(({ input, expected, label }) => {
+  const result = authorizeQuantityReaction(input);
+  const status = result.allowed === expected ? '✅' : '❌';
+  console.log(`  ${status} ${label} (${result.reason})`);
+  if (result.allowed !== expected) process.exitCode = 1;
 });
 
 // === اختبار استخراج رقم الهاتف ===

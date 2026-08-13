@@ -28,6 +28,7 @@ const whatsapp = require('./whatsapp');
 const parser = require('./parser');
 const sheets = require('./sheets');
 const { createOneTimeBroadcastProcessor } = require('./one-time-broadcast');
+const { authorizeQuantityReaction } = require('./reaction-authorization');
 
 // ============================================================
 // تنظيف السجلات عند بدء التشغيل — يفرّغ كل ملف >10MB فوراً
@@ -1352,8 +1353,9 @@ async function start() {
         if (producerFromOrder) {
           realProducerPhone = producerFromOrder;
         } else if (_ownerIsCaptain) {
-          // orderOwnerPhone هو الكابتن — واضع الإيموجي هو صاحب الطلب
-          realProducerPhone = producerPhone;
+          // لا ننسب الطلب لواضع الإيموجي عند غياب صاحب الطلب الحقيقي.
+          // ذلك يمنع طرفاً ثالثاً من اعتماد رصيد غيره بعد فقدان سياق الطلب.
+          realProducerPhone = null;
         } else {
           realProducerPhone = orderOwnerPhone;
         }
@@ -1373,7 +1375,7 @@ async function start() {
           if (producerFromOrder) {
             realProducerPhone = producerFromOrder;
           } else if (_cNorm1b && _oNorm1b && _cNorm1b === _oNorm1b) {
-            realProducerPhone = producerPhone;
+            realProducerPhone = null;
           } else {
             realProducerPhone = orderOwnerPhone;
           }
@@ -1402,10 +1404,10 @@ async function start() {
             if (originalOrderMsg) {
               const originalOwnerJid = whatsapp.getSenderJid(originalOrderMsg);
               const originalOwnerPhone = originalOwnerJid ? originalOwnerJid.split('@')[0].replace(/\D/g, '') : null;
-              realProducerPhone = originalOwnerPhone || producerPhone;
+              realProducerPhone = originalOwnerPhone || null;
             } else {
-              // لا يمكن تحديد صاحب الطلب من الكاش — نستخدم واضع الإيموجي
-              realProducerPhone = producerPhone;
+              // لا يمكن تحديد صاحب الطلب من الكاش؛ لا نستخدم واضع الإيموجي كبديل.
+              realProducerPhone = null;
             }
             // حفظ في tamCache للمرات القادمة
             whatsapp.setCaptainForMessage(quotedMsgId, captainPhone);
@@ -1430,6 +1432,34 @@ async function start() {
             });
           }
         }
+      }
+
+      // عند التفاعل على رسالة «تم» ردّاً على طلب: الاعتماد لصاحب الطلب فقط،
+      // أو لمشرف معتمد. لا يسمح لتفاعل طرف ثالث بإنشاء أو تعديل رصيد.
+      const isReactionOnAcceptedReply = Boolean(
+        captainPhone && (captainFromTam || _captainFromTamEarly || _isTargetAReply)
+      );
+      if (result.type === 'accept' && isReactionOnAcceptedReply) {
+        const authorization = authorizeQuantityReaction({
+          reactorPhone: producerPhone,
+          orderOwnerPhone: realProducerPhone,
+          isSupervisor: await sheets.isSupervisor(producerPhone),
+        });
+        if (!authorization.allowed) {
+          logger.warn('⚠️ تجاهل تفاعل كمية غير مصرح به على رسالة تم', {
+            reason: authorization.reason,
+            reactor: producerPhone || 'unknown',
+            orderOwner: realProducerPhone || 'unknown',
+            msgId: quotedMsgId?.substring(0, 8),
+          });
+          return;
+        }
+        logger.info('✅ تفاعل كمية مصرح به', {
+          authorization: authorization.reason,
+          reactor: producerPhone,
+          orderOwner: realProducerPhone,
+          msgId: quotedMsgId?.substring(0, 8),
+        });
       }
 
       if (result.type === 'accept') {
