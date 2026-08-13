@@ -744,6 +744,10 @@ function loadTamCache() {
         voiceReplyCache.set(voiceMessageId, {
           ...entry,
           replyMessageIds: Array.isArray(entry.replyMessageIds) ? entry.replyMessageIds : [],
+          // البنية القديمة لا تتضمن سجل الإيموجيات؛ نعيدها فارغة للتوافق.
+          emojiReactions: entry?.emojiReactions && typeof entry.emojiReactions === 'object'
+            ? entry.emojiReactions
+            : {},
         });
         voiceCount++;
       } else {
@@ -1001,6 +1005,10 @@ function registerVoiceReply(voiceMessageId, replyMessageId, captainPhone = '') {
     invalidated: replyMessageIds.length > 1,
     firstCaptainPhone: previous.firstCaptainPhone || captainPhone || '',
     lastCaptainPhone: captainPhone || previous.lastCaptainPhone || '',
+    // { replyMessageId: { senderKey: { senderPhone, emoji, ts } } }
+    emojiReactions: previous.emojiReactions && typeof previous.emojiReactions === 'object'
+      ? previous.emojiReactions
+      : {},
     ts: Date.now(),
   };
   voiceReplyCache.set(voiceMessageId, entry);
@@ -1023,6 +1031,80 @@ function getVoiceReplyStatusByReplyId(replyMessageId) {
     if (entry?.replyMessageIds?.includes(replyMessageId)) {
       return { ...entry, replyMessageIds: [...entry.replyMessageIds] };
     }
+  }
+  return null;
+}
+
+function normalizeVoiceEmojiSender(senderPhone) {
+  const digits = String(senderPhone || '').replace(/\D/g, '');
+  return digits || String(senderPhone || '').trim();
+}
+
+function cloneVoiceReplyEntry(entry) {
+  if (!entry) return null;
+  const emojiReactions = {};
+  for (const [replyMessageId, reactions] of Object.entries(entry.emojiReactions || {})) {
+    emojiReactions[replyMessageId] = { ...(reactions || {}) };
+  }
+  return {
+    ...entry,
+    replyMessageIds: [...(entry.replyMessageIds || [])],
+    emojiReactions,
+  };
+}
+
+/**
+ * يحفظ إيموجي نشطاً على رد «تم» صوتي. استبدال الشخص لإيموجه يحدّث مفتاحه
+ * بدلاً من زيادة العدد، وبالتالي العدد يساوي الإيموجيات النشطة فعلياً.
+ */
+function addVoiceEmoji(replyMessageId, senderPhone, emoji) {
+  if (!replyMessageId || !senderPhone || emoji === undefined || emoji === null) return null;
+  for (const [voiceMessageId, previous] of voiceReplyCache.entries()) {
+    if (!previous?.replyMessageIds?.includes(replyMessageId)) continue;
+    const senderKey = normalizeVoiceEmojiSender(senderPhone);
+    if (!senderKey) return null;
+    const emojiReactions = { ...(previous.emojiReactions || {}) };
+    const reactionsForReply = { ...(emojiReactions[replyMessageId] || {}) };
+    reactionsForReply[senderKey] = { senderPhone, emoji: String(emoji), ts: Date.now() };
+    emojiReactions[replyMessageId] = reactionsForReply;
+    const entry = { ...previous, emojiReactions, ts: Date.now() };
+    voiceReplyCache.set(voiceMessageId, entry);
+    saveTamCache();
+    const activeReactions = Object.values(reactionsForReply);
+    return {
+      voiceMessageId,
+      replyMessageId,
+      activeEmojiCount: activeReactions.length,
+      singleEmoji: activeReactions.length === 1 ? activeReactions[0].emoji : '',
+      reactions: activeReactions.map(reaction => ({ ...reaction })),
+      voiceStatus: cloneVoiceReplyEntry(entry),
+    };
+  }
+  return null;
+}
+
+/** يزيل إيموجي الشخص من حالة رد «تم» الصوتي ويعيد عدد الإيموجيات المتبقية. */
+function removeVoiceEmoji(replyMessageId, senderPhone) {
+  if (!replyMessageId || !senderPhone) return null;
+  for (const [voiceMessageId, previous] of voiceReplyCache.entries()) {
+    if (!previous?.replyMessageIds?.includes(replyMessageId)) continue;
+    const senderKey = normalizeVoiceEmojiSender(senderPhone);
+    const emojiReactions = { ...(previous.emojiReactions || {}) };
+    const reactionsForReply = { ...(emojiReactions[replyMessageId] || {}) };
+    delete reactionsForReply[senderKey];
+    emojiReactions[replyMessageId] = reactionsForReply;
+    const entry = { ...previous, emojiReactions, ts: Date.now() };
+    voiceReplyCache.set(voiceMessageId, entry);
+    saveTamCache();
+    const activeReactions = Object.values(reactionsForReply);
+    return {
+      voiceMessageId,
+      replyMessageId,
+      activeEmojiCount: activeReactions.length,
+      singleEmoji: activeReactions.length === 1 ? activeReactions[0].emoji : '',
+      reactions: activeReactions.map(reaction => ({ ...reaction })),
+      voiceStatus: cloneVoiceReplyEntry(entry),
+    };
   }
   return null;
 }
@@ -1412,6 +1494,8 @@ module.exports = {
   registerVoiceReply,
   getVoiceReplyStatus,
   getVoiceReplyStatusByReplyId,
+  addVoiceEmoji,
+  removeVoiceEmoji,
   getPushNameFromCachedMessage,
   resolvePhoneByPushName,
   syncGroupLids,

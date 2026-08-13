@@ -135,6 +135,97 @@ async function invalidateVoiceReplyTransactions(voiceStatus) {
   }
 }
 
+/**
+ * قاعدة التسجيل الصوتي: لا يقبل رد «تم» سوى إيموجي كمية نشط واحد. عند وجود
+ * أكثر من إيموجي، أو عدم بقاء إيموجي كمية، نعكس الحركة ونوثّق السبب.
+ */
+async function invalidateVoiceEmojiTransaction(voiceEmojiStatus, reason) {
+  if (!voiceEmojiStatus?.replyMessageId) return;
+  const transaction = await sheets.findTransactionByMessageId(voiceEmojiStatus.replyMessageId, null);
+  if (!transaction || !(transaction.quantity > 0)) return;
+
+  const quantity = transaction.quantity;
+  const groupPrefix = transaction.groupPrefix || '';
+  try {
+    if (transaction.producerPhone) {
+      await sheets.updateTotalsProduction(transaction.producerPhone, -quantity, groupPrefix, 'نظام حماية إيموجي التسجيل الصوتي');
+    }
+    if (transaction.captainPhone) {
+      await sheets.updateTotalsReception(transaction.captainPhone, -quantity, groupPrefix, 'نظام حماية إيموجي التسجيل الصوتي');
+    }
+    await sheets.updateTransactionStatus(transaction.rowIndex, {
+      status: 'ملغى - إيموجي صوتي متعدد',
+      quantity: 0,
+      notes: `إلغاء تلقائي: ${reason} | التسجيل:${voiceEmojiStatus.voiceMessageId} | رد تم:${voiceEmojiStatus.replyMessageId} | الإيموجيات النشطة:${voiceEmojiStatus.activeEmojiCount} | الكمية الأصلية: ${quantity}`,
+    });
+    await sheets.logEdit({
+      editorPhone: 'SYSTEM_VOICE_EMOJI_GUARD',
+      editorName: 'نظام حماية إيموجي التسجيل الصوتي',
+      producerPhone: transaction.producerPhone || '',
+      captainPhone: transaction.captainPhone || '',
+      oldQuantity: quantity,
+      newQuantity: 0,
+      notes: `${reason} على التسجيل ${voiceEmojiStatus.voiceMessageId}`,
+    });
+    logger.warn('↩️ عكس حركة تسجيل صوتي بسبب قاعدة الإيموجي الواحد', {
+      voiceMessageId: voiceEmojiStatus.voiceMessageId?.substring(0, 8),
+      replyMessageId: voiceEmojiStatus.replyMessageId?.substring(0, 8),
+      activeEmojiCount: voiceEmojiStatus.activeEmojiCount,
+      quantity,
+    });
+  } catch (error) {
+    logger.error('❌ فشل عكس حركة التسجيل الصوتي بسبب الإيموجيات', {
+      replyMessageId: voiceEmojiStatus.replyMessageId?.substring(0, 8),
+      error: error.message,
+    });
+  }
+}
+
+/** يعيد الحركة في الصف نفسه عندما يبقى إيموجي كمية واحد بعد حذف الإضافي. */
+async function restoreVoiceEmojiTransaction(voiceEmojiStatus) {
+  if (!voiceEmojiStatus?.replyMessageId || voiceEmojiStatus.activeEmojiCount !== 1 || !voiceEmojiStatus.singleEmoji) return false;
+  const transaction = await sheets.findTransactionByMessageIdIncludingCancelled(voiceEmojiStatus.replyMessageId, null);
+  if (!transaction || transaction.quantity > 0) return Boolean(transaction);
+
+  const quantity = parser.extractQuantity(voiceEmojiStatus.singleEmoji);
+  if (!(quantity > 0)) return false;
+  const groupPrefix = transaction.groupPrefix || '';
+  try {
+    if (transaction.producerPhone) {
+      await sheets.updateTotalsProduction(transaction.producerPhone, quantity, groupPrefix, 'استرجاع إيموجي تسجيل صوتي');
+    }
+    if (transaction.captainPhone) {
+      await sheets.updateTotalsReception(transaction.captainPhone, quantity, groupPrefix, 'استرجاع إيموجي تسجيل صوتي');
+    }
+    await sheets.updateTransactionStatus(transaction.rowIndex, {
+      status: 'نشط',
+      quantity,
+      notes: `استرجاع تلقائي: بقي إيموجي كمية واحد (${voiceEmojiStatus.singleEmoji}) على التسجيل ${voiceEmojiStatus.voiceMessageId} | msgId:${voiceEmojiStatus.replyMessageId}`,
+    });
+    await sheets.logEdit({
+      editorPhone: 'SYSTEM_VOICE_EMOJI_GUARD',
+      editorName: 'نظام حماية إيموجي التسجيل الصوتي',
+      producerPhone: transaction.producerPhone || '',
+      captainPhone: transaction.captainPhone || '',
+      oldQuantity: 0,
+      newQuantity: quantity,
+      notes: `استرجاع تلقائي بعد حذف الإيموجي الإضافي على التسجيل ${voiceEmojiStatus.voiceMessageId}`,
+    });
+    logger.info('🔄 استرجاع حركة تسجيل صوتي بعد عودة إيموجي واحد', {
+      voiceMessageId: voiceEmojiStatus.voiceMessageId?.substring(0, 8),
+      replyMessageId: voiceEmojiStatus.replyMessageId?.substring(0, 8),
+      quantity,
+    });
+    return true;
+  } catch (error) {
+    logger.error('❌ فشل استرجاع حركة التسجيل الصوتي', {
+      replyMessageId: voiceEmojiStatus.replyMessageId?.substring(0, 8),
+      error: error.message,
+    });
+    return false;
+  }
+}
+
 // ====================================================
 // خادم ويب لعرض QR + حالة البوت
 // ====================================================
@@ -1242,7 +1333,8 @@ async function start() {
 
       const producerPhone = result.phone;
       const quantity = result.quantity;
-      const quotedMsgId = result.quotedMessageId;
+      // unknown_emoji يعيد targetMessageId مباشرة، أما الأنواع الأخرى فتستخدم quotedMessageId.
+      const quotedMsgId = result.quotedMessageId || result.targetMessageId;
       const remoteJid = msg.key.remoteJid;
       const orderOwnerPhone = result.orderOwnerPhone || result.quotedPhone || null;
 
@@ -1495,6 +1587,60 @@ async function start() {
           replyCount: voiceReplyStatus?.replyCount || 0,
         });
         return;
+      }
+
+      // التسجيل الصوتي صالح فقط مع إيموجي كمية واحد نشط على رد «تم» الوحيد.
+      // نسجّل الحالة قبل أي أثر مالي ليبقى القرار سليماً بعد إعادة التشغيل.
+      if (voiceOrderContext?.isVoiceOrder && isReactionOnAcceptedReply) {
+        if (result.type === 'accept' || result.type === 'unknown_emoji') {
+          const authorization = authorizeQuantityReaction({
+            reactorPhone: producerPhone,
+            orderOwnerPhone: realProducerPhone,
+            isSupervisor: await sheets.isSupervisor(producerPhone),
+          });
+          if (!authorization.allowed) {
+            logger.warn('⚠️ تجاهل إيموجي غير مصرح به على رد تسجيل صوتي', {
+              reason: authorization.reason,
+              reactor: producerPhone || 'unknown',
+              orderOwner: realProducerPhone || 'unknown',
+              msgId: quotedMsgId?.substring(0, 8),
+            });
+            return;
+          }
+          const voiceEmojiStatus = whatsapp.addVoiceEmoji(quotedMsgId, producerPhone, result.reactionText || result.text || '');
+          const isSingleQuantityEmoji = result.type === 'accept' && voiceEmojiStatus?.activeEmojiCount === 1;
+          if (!isSingleQuantityEmoji) {
+            await invalidateVoiceEmojiTransaction(
+              voiceEmojiStatus,
+              result.type === 'unknown_emoji'
+                ? 'وُضع إيموجي غير كمي على رد التسجيل الصوتي'
+                : 'وُجد إيموجيان أو أكثر على رد التسجيل الصوتي'
+            );
+            logger.warn('⛔ إلغاء اعتماد تسجيل صوتي: يجب وجود إيموجي كمية واحد فقط', {
+              voiceMessageId: voiceEmojiStatus?.voiceMessageId?.substring(0, 8),
+              replyMessageId: quotedMsgId?.substring(0, 8),
+              activeEmojiCount: voiceEmojiStatus?.activeEmojiCount || 0,
+              type: result.type,
+            });
+            return;
+          }
+        } else if (result.type === 'remove') {
+          const voiceEmojiStatus = whatsapp.removeVoiceEmoji(quotedMsgId, producerPhone);
+          if (voiceEmojiStatus) {
+            if (voiceEmojiStatus.activeEmojiCount === 1) {
+              await restoreVoiceEmojiTransaction(voiceEmojiStatus);
+            } else {
+              await invalidateVoiceEmojiTransaction(
+                voiceEmojiStatus,
+                voiceEmojiStatus.activeEmojiCount === 0
+                  ? 'حُذف إيموجي الكمية من رد التسجيل الصوتي'
+                  : 'لا يزال على رد التسجيل الصوتي أكثر من إيموجي'
+              );
+            }
+            // لا يمر حذف إيموجي التسجيل الصوتي لمسار الحذف العام.
+            return;
+          }
+        }
       }
       if (result.type === 'accept' && isReactionOnAcceptedReply) {
         const authorization = authorizeQuantityReaction({

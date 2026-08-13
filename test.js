@@ -249,6 +249,16 @@ const voiceReplyRuleIsPersistent =
 console.log(`  ${voiceReplyRuleIsPersistent ? '✅' : '❌'} عدّاد الردود الصوتية دائم ويمنع التفاعل عند تعدد ردود تم`);
 if (!voiceReplyRuleIsPersistent) process.exitCode = 1;
 
+const voiceSingleEmojiGuardIsPresent =
+  whatsappSource.includes('function addVoiceEmoji(replyMessageId, senderPhone, emoji)') &&
+  whatsappSource.includes('function removeVoiceEmoji(replyMessageId, senderPhone)') &&
+  whatsappSource.includes('emojiReactions:') &&
+  serverSource.includes('invalidateVoiceEmojiTransaction') &&
+  serverSource.includes('restoreVoiceEmojiTransaction') &&
+  serverSource.includes('يجب وجود إيموجي كمية واحد فقط');
+console.log(`  ${voiceSingleEmojiGuardIsPresent ? '✅' : '❌'} قاعدة إيموجي كمية واحد محفوظة وتبطل الحركة عند التعدد`);
+if (!voiceSingleEmojiGuardIsPresent) process.exitCode = 1;
+
 // === اختبار تعطيل تقرير نهاية الأسبوع ===
 console.log('\n📊 اختبار تعطيل تقرير نهاية الأسبوع:');
 const weeklyReportIsDisabled = config.sheets.weeklyReport?.enabled === false &&
@@ -387,11 +397,47 @@ async function runVoiceReplyStateTest() {
   if (!invalidated) process.exitCode = 1;
 }
 
+async function runVoiceEmojiStateTest() {
+  console.log('\n🔬 اختبار إيموجي الكمية الواحد على التسجيل الصوتي:');
+  const voiceMessageId = `test-voice-emoji-${Date.now()}`;
+  const replyMessageId = `${voiceMessageId}-tam-1`;
+  whatsapp.registerVoiceReply(voiceMessageId, replyMessageId, '962798765433');
+
+  const singleEmojiCases = [
+    { emoji: '👍', quantity: 1 },
+    { emoji: '1️⃣', quantity: 1 },
+    { emoji: '2️⃣', quantity: 2 },
+    { emoji: '6️⃣', quantity: 6 },
+  ];
+  const singlesValid = singleEmojiCases.every(({ emoji, quantity }, index) => {
+    const voiceId = `${voiceMessageId}-single-${index}`;
+    const replyId = `${voiceId}-tam`;
+    whatsapp.registerVoiceReply(voiceId, replyId, '962798765433');
+    const state = whatsapp.addVoiceEmoji(replyId, `9627987654${index}`, emoji);
+    return state?.activeEmojiCount === 1 && state.singleEmoji === emoji && parser.extractQuantity(emoji) === quantity;
+  });
+
+  const one = whatsapp.addVoiceEmoji(replyMessageId, '962798765432', '6️⃣');
+  const two = whatsapp.addVoiceEmoji(replyMessageId, '962798765431', '👍');
+  const afterRemovingSecond = whatsapp.removeVoiceEmoji(replyMessageId, '962798765431');
+  const replacingSamePerson = whatsapp.addVoiceEmoji(replyMessageId, '962798765432', '2️⃣');
+
+  const correct =
+    singlesValid &&
+    one?.activeEmojiCount === 1 && one.singleEmoji === '6️⃣' &&
+    two?.activeEmojiCount === 2 && two.singleEmoji === '' &&
+    afterRemovingSecond?.activeEmojiCount === 1 && afterRemovingSecond.singleEmoji === '6️⃣' &&
+    replacingSamePerson?.activeEmojiCount === 1 && replacingSamePerson.singleEmoji === '2️⃣';
+  console.log(`  ${correct ? '✅' : '❌'} 👍 و1️⃣ و2️⃣ و6️⃣ منفردة تُقبل، والثاني يُبطل، وحذفه يعيد الإيموجي المتبقي`);
+  if (!correct) process.exitCode = 1;
+}
+
 runStandaloneAcceptRuntimeTest()
   .then(runStickerRuntimeTests)
   .then(runQuotedTextReplyRuntimeTests)
   .then(runVoiceReplyRuntimeTest)
   .then(runVoiceReplyStateTest)
+  .then(runVoiceEmojiStateTest)
   .catch((error) => {
     console.error('❌ فشل اختبار رسالة تم المستقلة:', error.message);
     process.exitCode = 1;
