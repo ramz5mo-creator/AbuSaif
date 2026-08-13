@@ -52,6 +52,10 @@ quantityTests.forEach(({ input, expected }) => {
 console.log('\n📝 اختبار كلمات الاستلام:');
 const acceptTests = [
   { input: 'تم', expected: true },
+  { input: 'تا', expected: true },
+  { input: 'ت', expected: true },
+  { input: 'tam', expected: true },
+  { input: 'tm', expected: true },
   { input: 'هات', expected: true },
   { input: 'تن', expected: true },
   { input: 'اوك', expected: true },
@@ -308,6 +312,34 @@ async function runStickerRuntimeTests() {
   if (!ignored) process.exitCode = 1;
 }
 
+async function runQuotedTextReplyRuntimeTests() {
+  console.log('\n🔬 اختبار قبول أي رد نصي مقتبس على طلب نصي:');
+  const replies = ['تم', 'تا', 'ت', 'تم ٢٠', 'تم رابية', 'tam', 'tm', 'باصي'];
+  const results = await Promise.all(replies.map((text, index) => parser.processMessage({
+    key: {
+      id: `test-general-text-reply-${index}`,
+      remoteJid: 'test-group@g.us',
+      participant: '962798765433@s.whatsapp.net',
+      fromMe: false,
+    },
+    message: {
+      extendedTextMessage: {
+        text,
+        contextInfo: {
+          participant: '962798765432@s.whatsapp.net',
+          stanzaId: 'test-original-text-order',
+          quotedMessage: { conversation: 'طلب الدوار الثاني' },
+        },
+      },
+    },
+  }, null)));
+  const accepted = results.every((result, index) =>
+    result?.type === 'accept' && result.text === replies[index] && result.isVoiceReply === false
+  );
+  console.log(`  ${accepted ? '✅' : '❌'} تم، تا، ت، تم ٢٠، تم رابية، tam، tm وأي نص مقتبس تصل كتأكيد مبدئي`);
+  if (!accepted) process.exitCode = 1;
+}
+
 async function runVoiceReplyRuntimeTest() {
   console.log('\n🔬 اختبار تشغيل رد «تم» على تسجيل صوتي:');
   const voiceReply = {
@@ -334,6 +366,14 @@ async function runVoiceReplyRuntimeTest() {
   if (!tagged) process.exitCode = 1;
 }
 
+// الرد النصي الواحد على تسجيل صوتي لا يرتبط بكلمة قبول محددة، لكنه يبقى
+// خاضعاً لشرط الرد الوحيد والتفاعل الكمي المصرح به في server.js.
+const voiceReplyAcceptsAnyText =
+  serverSource.includes("String(result.text || '').trim().length > 0") &&
+  !serverSource.includes('result.isVoiceReply && result.voiceMessageId && parser.isAcceptMessage(result.text)');
+console.log(`  ${voiceReplyAcceptsAnyText ? '✅' : '❌'} رد التسجيل الصوتي يقبل أي نص مع بقاء شرط الرد الوحيد`);
+if (!voiceReplyAcceptsAnyText) process.exitCode = 1;
+
 async function runVoiceReplyStateTest() {
   console.log('\n🔬 اختبار عدّاد ردود التسجيل الصوتي:');
   const voiceMessageId = `test-voice-state-${Date.now()}`;
@@ -349,6 +389,7 @@ async function runVoiceReplyStateTest() {
 
 runStandaloneAcceptRuntimeTest()
   .then(runStickerRuntimeTests)
+  .then(runQuotedTextReplyRuntimeTests)
   .then(runVoiceReplyRuntimeTest)
   .then(runVoiceReplyStateTest)
   .catch((error) => {

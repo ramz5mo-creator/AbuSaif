@@ -23,12 +23,18 @@ function getSheets() {
 // مجموعة المعرفات المعالجة لمنع التكرار
 const processedIds = new Set();
 
-// كلمات الاستلام (تُحدّث من Google Sheets)
-let acceptWords = [...config.defaultAcceptWords];
+// كلمات الاستلام المستقلة فقط (تُحدّث من Google Sheets).
+// الرد المقتبس على طلب نصي يقبل بأي نص؛ أما هذه الكلمات فتمنع رسائل التأكيد
+// الشائعة إذا أُرسلت بلا رد من التحول إلى طلب أصلي بالخطأ.
+const standaloneConfirmationWords = ['تم', 'تا', 'ت', 'tam', 'tm'];
+let acceptWords = [...new Set([...config.defaultAcceptWords, ...standaloneConfirmationWords])];
 
 function updateAcceptWords(words) {
   if (Array.isArray(words) && words.length > 0) {
-    acceptWords = words.map((w) => w.trim().toLowerCase());
+    acceptWords = [...new Set([
+      ...words.map((w) => w.trim().toLowerCase()),
+      ...standaloneConfirmationWords,
+    ])];
     logger.info('تم تحديث كلمات الاستلام', { words: acceptWords });
   }
 }

@@ -1996,8 +1996,10 @@ async function start() {
     if (result.type === 'accept') {
       let captainPhone = result.phone;
       const tamMessageId = result.messageId;
+      // التسجيل الصوتي يحافظ على شرط رد واحد فقط، لكن لا نقيد نص الرد
+      // بكلمة بعينها: أي رد نصي مقتبس وغير كمي هو تأكيد مبدئي.
       const isVoiceAcceptance = Boolean(
-        result.isVoiceReply && result.voiceMessageId && parser.isAcceptMessage(result.text) && !parser.isQuantityEmoji(result.text)
+        result.isVoiceReply && result.voiceMessageId && String(result.text || '').trim().length > 0 && !parser.isQuantityEmoji(result.text)
       );
       // إذا كان captainPhone هو LID غير محلول، نحاول حله الآن
       if (captainPhone && captainPhone.includes('@lid')) {
