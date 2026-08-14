@@ -29,6 +29,7 @@ const parser = require('./parser');
 const sheets = require('./sheets');
 const { createOneTimeBroadcastProcessor } = require('./one-time-broadcast');
 const { authorizeQuantityReaction } = require('./reaction-authorization');
+const { validateQuantityReactionTarget } = require('./reaction-target-validation');
 
 // ============================================================
 // تنظيف السجلات عند بدء التشغيل — يفرّغ كل ملف >10MB فوراً
@@ -1348,6 +1349,24 @@ async function start() {
       // لكن هذه القاعدة لا تنطبق إذا كان الإيموجي على رسالة "تم" لكابتن آخر
       // لأن صاحب الطلب (أمجد) يضع إيموجي على رد الكابتن (يعقوب) لتحديد الكمية
       const _captainFromTamEarly = quotedMsgId ? whatsapp.getCaptainByMessageId(quotedMsgId) : null;
+      // لا يجوز أن ينشئ الإيموجي قيداً مباشرة على منشور أو تحذير. لا يقبل
+      // البوت التفاعل المالي إلا على رد تأكيد سُجّل أولاً في tamCache أو
+      // في سجل_تم الدائم، حتى تبقى القاعدة سليمة بعد إعادة التشغيل أيضاً.
+      const _captainFromSheetEarly = !_captainFromTamEarly && quotedMsgId
+        ? await sheets.getCaptainFromTamSheet(quotedMsgId)
+        : null;
+      const _targetValidation = validateQuantityReactionTarget({
+        captainFromTam: _captainFromTamEarly,
+        captainFromSheet: _captainFromSheetEarly,
+      });
+      if (!_targetValidation.allowed) {
+        logger.info('⚠️ تجاهل تفاعل ليس على رد تأكيد موثق', {
+          reason: _targetValidation.reason,
+          msgId: quotedMsgId?.substring(0, 8),
+          reaction: result.text || result.reactionText || '',
+        });
+        return;
+      }
       // فحص إضافي: هل الرسالة المستهدفة هي reply (تم) من messageCache
       let _isTargetAReply = !!_captainFromTamEarly;
       let _targetTextEarly = '';
@@ -2198,6 +2217,37 @@ async function start() {
     if (!result) return;
 
     if (result.type === 'accept') {
+      // لا يدخل رد على تحذير/إعلان/رسالة عامة إلى tamCache أو سجل «تم»،
+      // وبالتالي لا يمكن أن ينشئ لاحقاً تفاعل الكمية رصيداً خاطئاً.
+      if (result.orderClassification === 'invalid') {
+        logger.info('⚠️ تجاهل رد على منشور عام غير مؤهل كطلب', {
+          reason: result.orderClassificationReason,
+          replyId: (result.messageId || '').substring(0, 8),
+          orderId: (result.quotedMessageId || '').substring(0, 8),
+        });
+        return;
+      }
+      // الصيغة غير الواضحة لا تسقط: تُحفظ للمراجعة فقط بلا tamCache وبلا حركة مالية.
+      if (result.orderClassification === 'review') {
+        const reviewGroup = (config.whatsapp.targetGroups || []).find(group => group.id === result.groupId);
+        const reviewReason = 'الرسالة الأصلية لا تحمل مؤشرات كافية لطلب؛ لم يُنشأ قيد تلقائي';
+        await sheets.upsertOperationReview({
+          reviewId: `NON_ORDER_${result.messageId}`,
+          timestamp: result.timestamp,
+          groupPrefix: reviewGroup?.prefix || '',
+          alertType: 'طلب غير واضح',
+          referenceId: result.quotedMessageId || result.messageId || '',
+          reason: reviewReason,
+          notes: `سبب التصنيف: ${result.orderClassificationReason || 'غير محدد'} | النص: ${(result.quotedText || '').substring(0, 160)}`,
+          producerPhone: result.orderOwnerPhone || '',
+          captainPhone: result.phone || '',
+        });
+        logger.warn('🔎 رد على طلب غير واضح حُفظ للمراجعة بلا رصيد', {
+          reason: result.orderClassificationReason,
+          replyId: (result.messageId || '').substring(0, 8),
+        });
+        return;
+      }
       let captainPhone = result.phone;
       const tamMessageId = result.messageId;
       // التسجيل الصوتي يحافظ على شرط رد واحد فقط، لكن لا نقيد نص الرد
@@ -2302,6 +2352,7 @@ async function start() {
             orderMessageId: result.quotedMessageId || '',
             orderText: whatsapp.extractText(originalOrderMessage) || result.quotedText || '',
             tamText: whatsapp.extractText(msg) || '',
+            orderClassification: result.orderClassification || 'valid',
             isVoiceOrder: isVoiceAcceptance,
             voiceMessageId: isVoiceAcceptance ? result.voiceMessageId : '',
             voiceReplyCount: voiceReplyStatus?.replyCount || 0,

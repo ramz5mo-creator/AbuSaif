@@ -15,6 +15,7 @@ const { v4: uuidv4 } = require('uuid');
 const config = require('./config');
 const logger = require('./logger');
 const whatsapp = require('./whatsapp');
+const { classifyOriginalOrder } = require('./order-classification');
 let _sheets = null;
 function getSheets() {
   if (!_sheets) _sheets = require('./sheets');
@@ -482,12 +483,15 @@ async function processMessage(msg, sock) {
       return null;
     }
 
+    const orderClassification = classifyOriginalOrder({ text, messageType: msgType });
     addProcessedId(messageId);
     return {
       type: 'order',
       messageId,
       phone: effectiveSenderPhone,
       text: text ? text.substring(0, 500) : `[رسالة ${msgType}]`,
+      orderClassification: orderClassification.classification,
+      orderClassificationReason: orderClassification.reason,
       timestamp: new Date().toISOString(),
       groupId: msg.key.remoteJid,
     };
@@ -594,6 +598,13 @@ async function processMessage(msg, sock) {
     contextInfo?.quotedMessage?.imageMessage?.caption ||
     '';
   const quotedMessageId = contextInfo?.stanzaId || '';
+  // ردٌ مقتبس لا يصبح تأكيداً مالياً إلا إذا كانت الرسالة الأصلية طلباً فعلياً.
+  // الصوت يبقى مؤهلاً وفق قواعد التسجيلات الصوتية المعتمدة.
+  const orderClassification = classifyOriginalOrder({
+    text: quotedText,
+    messageType: isVoiceReply ? 'audio' : 'text',
+    isVoiceOrder: isVoiceReply,
+  });
 
   // معالجة خاصة: إذا لم يُحل صاحب الطلب بعد، نحاول من messageCache
   if (!resolvedOrderOwnerPhone && quotedMessageId) {
@@ -656,6 +667,8 @@ async function processMessage(msg, sock) {
     text,
     quotedText: quotedText.substring(0, 200),
     quotedMessageId,
+    orderClassification: orderClassification.classification,
+    orderClassificationReason: orderClassification.reason,
     isVoiceReply,
     voiceMessageId,
     timestamp: new Date().toISOString(),
@@ -674,4 +687,5 @@ module.exports = {
   isStandaloneAcceptWithoutOrder,
   isQuantityEmoji,
   cleanPhone,
+  classifyOriginalOrder,
 };

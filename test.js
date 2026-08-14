@@ -9,6 +9,9 @@ const config = require('./config');
 const fs = require('fs');
 const path = require('path');
 const { authorizeQuantityReaction } = require('./reaction-authorization');
+const { validateQuantityReactionTarget } = require('./reaction-target-validation');
+const { classifyOriginalOrder } = require('./order-classification');
+const serverSource = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
 
 console.log('═══════════════════════════════════════');
 console.log('   اختبار نظام AbuSaif');
@@ -88,6 +91,79 @@ standaloneAcceptTests.forEach(({ text, isReply, expected, label }) => {
   if (result !== expected) process.exitCode = 1;
 });
 
+// === اختبار منع التفاعل المباشر على منشور تحذيري أو إعلان ===
+console.log('\n🛡️ اختبار إلزام رد التأكيد الموثق قبل تفاعل الكمية:');
+const directWarningReaction = validateQuantityReactionTarget({
+  captainFromTam: null,
+  captainFromSheet: null,
+});
+const cachedConfirmationReaction = validateQuantityReactionTarget({
+  captainFromTam: '962798765432',
+  captainFromSheet: null,
+});
+const recoveredConfirmationReaction = validateQuantityReactionTarget({
+  captainFromTam: null,
+  captainFromSheet: '962798765432',
+});
+const reactionTargetGuardIsApplied =
+  serverSource.includes('validateQuantityReactionTarget') &&
+  serverSource.includes('تجاهل تفاعل ليس على رد تأكيد موثق');
+const confirmedReactionTargetRule =
+  directWarningReaction.allowed === false &&
+  directWarningReaction.reason === 'confirmation-not-recorded' &&
+  cachedConfirmationReaction.allowed === true &&
+  recoveredConfirmationReaction.allowed === true &&
+  reactionTargetGuardIsApplied;
+console.log(`  ${confirmedReactionTargetRule ? '✅' : '❌'} لا يُحتسب إيموجي مباشر على تحذير؛ ويُقبل فقط رد تأكيد موثق في الذاكرة أو السجل الدائم`);
+if (!confirmedReactionTargetRule) process.exitCode = 1;
+
+// === اختبار أن التحذيرات والإعلانات لا تصبح طلبات عبر الرد المقتبس ===
+console.log('\n🧾 اختبار تصنيف الطلب الأصلي قبل حفظ رد التأكيد:');
+const originalOrderClassificationTests = [
+  {
+    input: { text: 'تحذير: ممنوع تأكيد أي طلب وأنت بعيد عن منطقة الاستلام' },
+    expected: 'invalid',
+    label: 'منشور تحذيري لا يصبح طلباً',
+  },
+  {
+    input: { text: 'ادخل على كشفك من هنا https://example.com ثم اتبع الخطوات' },
+    expected: 'invalid',
+    label: 'إعلان يحتوي رابطاً لا يصبح طلباً',
+  },
+  {
+    input: { text: 'من دوار الاول لصوفيه\nتوصيل 3' },
+    expected: 'valid',
+    label: 'طلب مسار وتسعيرة يبقى مؤهلاً',
+  },
+  {
+    input: { text: '@49560130949346 معك طلب باشا' },
+    expected: 'valid',
+    label: 'إسناد صريح بطلب يبقى مؤهلاً',
+  },
+  {
+    input: { text: 'شباب عند البوابة' },
+    expected: 'review',
+    label: 'صيغة غير واضحة تذهب للمراجعة بلا رصيد',
+  },
+  {
+    input: { text: '', messageType: 'audio', isVoiceOrder: true },
+    expected: 'valid',
+    label: 'التسجيل الصوتي يبقى مؤهلاً وفق قاعدته الخاصة',
+  },
+];
+originalOrderClassificationTests.forEach(({ input, expected, label }) => {
+  const result = classifyOriginalOrder(input);
+  const status = result.classification === expected ? '✅' : '❌';
+  console.log(`  ${status} ${label} (${result.classification})`);
+  if (result.classification !== expected) process.exitCode = 1;
+});
+const replyClassificationGuardIsApplied =
+  serverSource.includes("result.orderClassification === 'invalid'") &&
+  serverSource.includes("result.orderClassification === 'review'") &&
+  serverSource.includes('رد على طلب غير واضح حُفظ للمراجعة بلا رصيد');
+console.log(`  ${replyClassificationGuardIsApplied ? '✅' : '❌'} رد التحذير أو الطلب غير الواضح لا يدخل سجل تم ولا ينشئ رصيداً`);
+if (!replyClassificationGuardIsApplied) process.exitCode = 1;
+
 // === اختبار صلاحية تفاعل الكمية على رسالة «تم» ===
 console.log('\n🔐 اختبار صلاحية صاحب التفاعل:');
 const reactionAuthorizationTests = [
@@ -146,7 +222,6 @@ if (!initialConnectionRunsRecovery) process.exitCode = 1;
 
 // === اختبار منع تكرار عملية مسجلة في Google Sheets ===
 console.log('\n🛡️ اختبار منع التكرار الدائم:');
-const serverSource = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
 const persistentDuplicateIsIgnored = serverSource.includes('تفاعل مسترجع مكرر — العملية موجودة بالكمية نفسها');
 console.log(`  ${persistentDuplicateIsIgnored ? '✅' : '❌'} العملية المطابقة في Google Sheets لا تعيد الأرصدة`);
 if (!persistentDuplicateIsIgnored) process.exitCode = 1;
@@ -348,16 +423,44 @@ async function runQuotedTextReplyRuntimeTests() {
         contextInfo: {
           participant: '962798765432@s.whatsapp.net',
           stanzaId: 'test-original-text-order',
-          quotedMessage: { conversation: 'طلب الدوار الثاني' },
+          quotedMessage: { conversation: 'من دوار الثاني للشميساني، توصيل 3' },
         },
       },
     },
   }, null)));
   const accepted = results.every((result, index) =>
-    result?.type === 'accept' && result.text === replies[index] && result.isVoiceReply === false
+    result?.type === 'accept' &&
+    result.text === replies[index] &&
+    result.isVoiceReply === false &&
+    result.orderClassification === 'valid'
   );
   console.log(`  ${accepted ? '✅' : '❌'} تم، تم 👇، تا، ت، تم ٢٠، تم رابية، tam، tm وأي نص مقتبس تصل كتأكيد مبدئي`);
   if (!accepted) process.exitCode = 1;
+
+  const warningReply = await parser.processMessage({
+    key: {
+      id: 'test-reply-to-warning-no-ledger',
+      remoteJid: 'test-group@g.us',
+      participant: '962798765433@s.whatsapp.net',
+      fromMe: false,
+    },
+    message: {
+      extendedTextMessage: {
+        text: 'تم',
+        contextInfo: {
+          participant: '962798765432@s.whatsapp.net',
+          stanzaId: 'test-warning-post',
+          quotedMessage: { conversation: 'تحذير: ممنوع التأكيد قبل الوصول إلى الاستلام' },
+        },
+      },
+    },
+  }, null);
+  const warningIsClassifiedForRejection =
+    warningReply?.type === 'accept' &&
+    warningReply.orderClassification === 'invalid' &&
+    warningReply.orderClassificationReason === 'general-post-or-announcement';
+  console.log(`  ${warningIsClassifiedForRejection ? '✅' : '❌'} الرد المقتبس على تحذير يحمل وسم الرفض قبل سجل تم والأرصدة`);
+  if (!warningIsClassifiedForRejection) process.exitCode = 1;
 }
 
 async function runVoiceReplyRuntimeTest() {

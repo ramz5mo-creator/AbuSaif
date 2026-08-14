@@ -968,6 +968,7 @@ function setOrderForReply(replyMsgId, producerPhone, context = {}) {
     orderMessageId: context.orderMessageId || '',
     orderText: context.orderText || '',
     tamText: context.tamText || '',
+    orderClassification: context.orderClassification || 'legacy',
     isVoiceOrder: Boolean(context.isVoiceOrder),
     voiceMessageId: context.voiceMessageId || '',
     voiceReplyCount: Number(context.voiceReplyCount) || 0,
