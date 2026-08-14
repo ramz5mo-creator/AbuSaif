@@ -52,6 +52,7 @@ quantityTests.forEach(({ input, expected }) => {
 console.log('\n📝 اختبار كلمات الاستلام:');
 const acceptTests = [
   { input: 'تم', expected: true },
+  { input: 'تم 👇', expected: true },
   { input: 'تا', expected: true },
   { input: 'ت', expected: true },
   { input: 'tam', expected: true },
@@ -333,7 +334,7 @@ async function runStickerRuntimeTests() {
 
 async function runQuotedTextReplyRuntimeTests() {
   console.log('\n🔬 اختبار قبول أي رد نصي مقتبس على طلب نصي:');
-  const replies = ['تم', 'تا', 'ت', 'تم ٢٠', 'تم رابية', 'tam', 'tm', 'باصي'];
+  const replies = ['تم', 'تم 👇', 'تا', 'ت', 'تم ٢٠', 'تم رابية', 'tam', 'tm', 'باصي'];
   const results = await Promise.all(replies.map((text, index) => parser.processMessage({
     key: {
       id: `test-general-text-reply-${index}`,
@@ -355,7 +356,7 @@ async function runQuotedTextReplyRuntimeTests() {
   const accepted = results.every((result, index) =>
     result?.type === 'accept' && result.text === replies[index] && result.isVoiceReply === false
   );
-  console.log(`  ${accepted ? '✅' : '❌'} تم، تا، ت، تم ٢٠، تم رابية، tam، tm وأي نص مقتبس تصل كتأكيد مبدئي`);
+  console.log(`  ${accepted ? '✅' : '❌'} تم، تم 👇، تا، ت، تم ٢٠، تم رابية، tam، tm وأي نص مقتبس تصل كتأكيد مبدئي`);
   if (!accepted) process.exitCode = 1;
 }
 
