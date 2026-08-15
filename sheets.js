@@ -1645,6 +1645,9 @@ async function applyOperationReviewDecision(reviewId, resolution) {
       quantity: transaction.quantity,
       notes: `${transaction.notes} | اعتماد مراجعة رقم 1`,
     });
+    // سجلات «يحتاج مراجعة» تكون حُسبت في الحركة الأصلية، لكن تبقى مخفية
+    // بصرياً في تفاصيل الطلبات إلى أن يعتمدها المستخدم. لا نضيف رصيداً جديداً هنا.
+    await updateOrderDetailStatus(transactionId, { status: 'أضيف للطلبات' });
     return { success: true, note: resolution.note };
   }
 
@@ -1662,6 +1665,7 @@ async function applyOperationReviewDecision(reviewId, resolution) {
     quantity: 0,
     notes: `${transaction.notes} | رفض مراجعة رقم 2 — عُكس الأثر`,
   });
+  await updateOrderDetailStatus(transactionId, { status: 'لا يضاف' });
   await logEdit({
     editorPhone: 'مراجعة يدوية', editorName: 'قرار 2',
     producerPhone: transaction.producerPhone, captainPhone: transaction.captainPhone,
