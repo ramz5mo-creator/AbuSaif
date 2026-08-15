@@ -33,6 +33,9 @@ const healthMonitor     = require('./health-monitor');
 const messageCache = new Map();
 const tamCache     = new Map();
 const orderCache   = new Map();
+// آخر إيموجي كمية مباشر على الطلب الأصلي. لا يمثل حركة مالية بذاته؛
+// لا يُطبّق إلا عبر رد كابتن مقتبس يحدد المستلم.
+const directOrderEmojiMap = new Map();
 // مفتاحها معرف التسجيل الصوتي الأصلي، وقيمتها قائمة ردود «تم» عليه.
 // تحفظ مع سياق الطلب حتى لا يفقد عدّاد التعدد بعد إعادة التشغيل.
 const voiceReplyCache = new Map();
@@ -699,13 +702,18 @@ function saveTamCache() {
         orderObj[k] = typeof v === 'string' ? { producer: v, ts } : v;
       }
     }
+    const directOrderEmojiObj = {};
+    for (const [orderMessageId, entry] of directOrderEmojiMap.entries()) {
+      const ts = entry?.ts || entry?.timestamp || now;
+      if (now - ts < TAM_CACHE_TTL_MS) directOrderEmojiObj[orderMessageId] = entry;
+    }
     const voiceObj = {};
     for (const [voiceMessageId, entry] of voiceReplyCache.entries()) {
       const ts = entry?.ts || now;
       if (now - ts < TAM_CACHE_TTL_MS) voiceObj[voiceMessageId] = entry;
     }
-    fs.writeFileSync(TAM_CACHE_PATH, JSON.stringify({ tamCache: tamObj, orderCache: orderObj, voiceReplyCache: voiceObj, savedAt: new Date().toISOString() }, null, 2));
-    logger.debug(`💾 tamCache محفوظ (${Object.keys(tamObj).length} تم + ${Object.keys(orderObj).length} طلب + ${Object.keys(voiceObj).length} تسجيل صوتي)`);
+    fs.writeFileSync(TAM_CACHE_PATH, JSON.stringify({ tamCache: tamObj, orderCache: orderObj, directOrderEmojiMap: directOrderEmojiObj, voiceReplyCache: voiceObj, savedAt: new Date().toISOString() }, null, 2));
+    logger.debug(`💾 tamCache محفوظ (${Object.keys(tamObj).length} تم + ${Object.keys(orderObj).length} طلب + ${Object.keys(directOrderEmojiObj).length} كمية مباشرة + ${Object.keys(voiceObj).length} تسجيل صوتي)`);
   } catch (e) {
     logger.warn('فشل حفظ tamCache', { error: e.message });
   }
@@ -719,7 +727,7 @@ function loadTamCache() {
     }
     const raw = JSON.parse(fs.readFileSync(TAM_CACHE_PATH, 'utf8'));
     const now = Date.now();
-    let tamCount = 0, orderCount = 0, voiceCount = 0, skipped = 0;
+    let tamCount = 0, orderCount = 0, directEmojiCount = 0, voiceCount = 0, skipped = 0;
     for (const [k, v] of Object.entries(raw.tamCache || {})) {
       const ts = v.ts || 0;
       if (now - ts < TAM_CACHE_TTL_MS) {
@@ -734,6 +742,15 @@ function loadTamCache() {
       if (now - ts < TAM_CACHE_TTL_MS) {
         orderCache.set(k, v);
         orderCount++;
+      } else {
+        skipped++;
+      }
+    }
+    for (const [orderMessageId, entry] of Object.entries(raw.directOrderEmojiMap || {})) {
+      const ts = entry?.ts || entry?.timestamp || 0;
+      if (now - ts < TAM_CACHE_TTL_MS) {
+        directOrderEmojiMap.set(orderMessageId, entry);
+        directEmojiCount++;
       } else {
         skipped++;
       }
@@ -754,7 +771,7 @@ function loadTamCache() {
         skipped++;
       }
     }
-    logger.info(`📂 tamCache محمَّل: ${tamCount} تم + ${orderCount} طلب + ${voiceCount} تسجيل صوتي (تجاهل ${skipped} قديم)`);
+    logger.info(`📂 tamCache محمَّل: ${tamCount} تم + ${orderCount} طلب + ${directEmojiCount} كمية مباشرة + ${voiceCount} تسجيل صوتي (تجاهل ${skipped} قديم)`);
   } catch (e) {
     logger.warn('فشل تحميل tamCache من القرص', { error: e.message });
   }
@@ -989,6 +1006,58 @@ function getOrderContextByReplyId(replyMsgId) {
   const entry = orderCache.get(replyMsgId);
   if (!entry || typeof entry === 'string') return null;
   return { ...entry };
+}
+
+/** يستبدل آخر إيموجي كمية مباشر للطلب ولا يجمعه مع أي كمية أقدم. */
+function setDirectOrderEmoji(orderMessageId, senderPhone, emoji, quantity) {
+  const numericQuantity = Number(quantity);
+  if (!orderMessageId || !senderPhone || !Number.isFinite(numericQuantity) || numericQuantity <= 0) return null;
+  const now = Date.now();
+  const entry = {
+    emoji: String(emoji || ''),
+    quantity: numericQuantity,
+    senderPhone: String(senderPhone),
+    timestamp: now,
+    ts: now,
+  };
+  directOrderEmojiMap.set(orderMessageId, entry);
+  // كمية مالية مؤجلة؛ تحفظ فوراً حتى لا تضيع قبل وصول رد الكابتن.
+  saveTamCache();
+  return { ...entry };
+}
+
+function getDirectOrderEmoji(orderMessageId) {
+  const entry = directOrderEmojiMap.get(orderMessageId);
+  return entry ? { ...entry } : null;
+}
+
+function clearDirectOrderEmoji(orderMessageId) {
+  if (!orderMessageId) return false;
+  const removed = directOrderEmojiMap.delete(orderMessageId);
+  if (removed) saveTamCache();
+  return removed;
+}
+
+function markDirectOrderEmojiApplied(orderMessageId, replyMessageId) {
+  const previous = directOrderEmojiMap.get(orderMessageId);
+  if (!previous || !replyMessageId) return null;
+  const entry = { ...previous, appliedReplyMessageId: replyMessageId, appliedAt: Date.now(), ts: Date.now() };
+  directOrderEmojiMap.set(orderMessageId, entry);
+  saveTamCache();
+  return { ...entry };
+}
+
+/** يعيد أحدث رد كابتن محفوظ على الطلب الأصلي؛ الحركة تُفهرس بمعرف هذا الرد. */
+function getLatestReplyForOrder(orderMessageId) {
+  if (!orderMessageId) return null;
+  let latest = null;
+  for (const [replyMessageId, entry] of orderCache.entries()) {
+    if (!entry || typeof entry === 'string' || entry.orderMessageId !== orderMessageId) continue;
+    if (!latest || (entry.ts || 0) > (latest.context.ts || 0)) {
+      latest = { replyMessageId, producer: entry.producer || '', context: { ...entry } };
+    }
+  }
+  return latest;
 }
 
 /**
@@ -1493,6 +1562,11 @@ module.exports = {
   setOrderForReply,
   getOrderByReplyId,
   getOrderContextByReplyId,
+  setDirectOrderEmoji,
+  getDirectOrderEmoji,
+  clearDirectOrderEmoji,
+  markDirectOrderEmojiApplied,
+  getLatestReplyForOrder,
   registerVoiceReply,
   getVoiceReplyStatus,
   getVoiceReplyStatusByReplyId,

@@ -30,6 +30,7 @@ const sheets = require('./sheets');
 const { createOneTimeBroadcastProcessor } = require('./one-time-broadcast');
 const { authorizeQuantityReaction } = require('./reaction-authorization');
 const { validateQuantityReactionTarget } = require('./reaction-target-validation');
+const { classifyOriginalOrder } = require('./order-classification');
 
 // ============================================================
 // تنظيف السجلات عند بدء التشغيل — يفرّغ كل ملف >10MB فوراً
@@ -1297,6 +1298,77 @@ function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone
   };
 }
 
+/**
+ * يطبق آخر كمية كانت معلقة على الطلب الأصلي بعد وصول رد كابتن مقتبس.
+ * المفتاح المحاسبي يبقى دائماً معرف رد الكابتن حتى تستمر تعديلات الكمية
+ * اللاحقة في استعمال مسار processEdit نفسه.
+ */
+async function applyPendingDirectOrderEmoji({ pending, replyMessageId, orderMessageId, producerPhone, captainPhone, groupPrefix, msg, timestamp }) {
+  if (!pending || !replyMessageId || !producerPhone || !captainPhone) return false;
+  if (pending.appliedReplyMessageId === replyMessageId) return false;
+
+  const quantity = Number(pending.quantity);
+  if (!Number.isFinite(quantity) || quantity <= 0) return false;
+  const existingTransaction = await sheets.findTransactionByMessageId(replyMessageId, producerPhone);
+  if (existingTransaction) {
+    if (existingTransaction.quantity !== quantity) {
+      const editResult = await sheets.processEdit({
+        messageId: replyMessageId,
+        editorPhone: pending.senderPhone,
+        editorName: sheets.getRegisteredName(pending.senderPhone) || '',
+        newQuantity: quantity,
+        groupPrefix,
+      });
+      if (!editResult.success) return false;
+    }
+    whatsapp.markDirectOrderEmojiApplied(orderMessageId, replyMessageId);
+    return true;
+  }
+
+  const producerParty = await queueUnknownParty(producerPhone, 'المنتج');
+  const captainParty = await queueUnknownParty(captainPhone, 'الكابتن');
+  const identityIncomplete = !producerParty.recordable || !captainParty.recordable;
+  if (producerParty.recordable) await sheets.updateTotalsProduction(producerPhone, quantity, groupPrefix, getSafePartyName(producerPhone));
+  if (captainParty.recordable) await sheets.updateTotalsReception(captainPhone, quantity, groupPrefix, getSafePartyName(captainPhone));
+
+  const syntheticResult = {
+    transactionId: crypto.randomUUID(),
+    timestamp: timestamp || new Date().toISOString(),
+    quantity,
+    text: pending.emoji,
+    quotedText: '',
+  };
+  await sheets.recordTransaction({
+    transactionId: syntheticResult.transactionId,
+    timestamp: syntheticResult.timestamp,
+    producerPhone,
+    captainPhone,
+    quantity,
+    type: 'انتاج',
+    emoji: pending.emoji,
+    groupPrefix,
+    messageId: replyMessageId,
+    status: identityIncomplete ? '⏳ هوية غير مكتملة' : 'نشط',
+    notes: identityIncomplete ? 'كمية مباشرة مؤجلة؛ هوية أحد الأطراف غير مكتملة' : 'direct-order-reaction-last-emoji',
+  });
+  const orderDetail = buildOrderDetail({
+    result: syntheticResult,
+    msg,
+    quotedMsgId: replyMessageId,
+    groupPrefix,
+    producerPhone,
+    captainPhone,
+    reactorPhone: pending.senderPhone,
+    identityIncomplete,
+  });
+  await sheets.upsertOrderDetails(orderDetail);
+  whatsapp.markDirectOrderEmojiApplied(orderMessageId, replyMessageId);
+  logger.info('✅ طُبقت كمية مباشرة مؤجلة بعد رد الكابتن', {
+    orderId: orderMessageId.substring(0, 8), replyId: replyMessageId.substring(0, 8), quantity,
+  });
+  return true;
+}
+
 // ====================================================
 // بدء التشغيل
 // ====================================================
@@ -1350,9 +1422,11 @@ async function start() {
       const producerPhone = result.phone;
       const quantity = result.quantity;
       // unknown_emoji يعيد targetMessageId مباشرة، أما الأنواع الأخرى فتستخدم quotedMessageId.
-      const quotedMsgId = result.quotedMessageId || result.targetMessageId;
+      let quotedMsgId = result.quotedMessageId || result.targetMessageId;
       const remoteJid = msg.key.remoteJid;
-      const orderOwnerPhone = result.orderOwnerPhone || result.quotedPhone || null;
+      let orderOwnerPhone = result.orderOwnerPhone || result.quotedPhone || null;
+      let directOrderMessageId = '';
+      let directOrderMode = false;
 
       // === قاعدة: إذا وضع شخص إيموجي على رسالته هو نفسه → تجاهل
       // لكن هذه القاعدة لا تنطبق إذا كان الإيموجي على رسالة "تم" لكابتن آخر
@@ -1364,9 +1438,20 @@ async function start() {
       const _captainFromSheetEarly = !_captainFromTamEarly && quotedMsgId
         ? await sheets.getCaptainFromTamSheet(quotedMsgId)
         : null;
+      const _directTargetMsg = quotedMsgId ? whatsapp.getCachedMessage(quotedMsgId) : null;
+      const _directTargetText = whatsapp.extractText(_directTargetMsg) || result.quotedText || '';
+      const _directClassification = (!_captainFromTamEarly && !_captainFromSheetEarly && quotedMsgId)
+        ? classifyOriginalOrder({ text: _directTargetText, messageType: whatsapp.getMessageType(_directTargetMsg) })
+        : null;
+      const _isQualifiedDirectOrder = result.type === 'accept' && _directClassification?.classification === 'valid';
+      const _existingReplyForDirectOrder = _isQualifiedDirectOrder
+        ? whatsapp.getLatestReplyForOrder(quotedMsgId)
+        : null;
       const _targetValidation = validateQuantityReactionTarget({
         captainFromTam: _captainFromTamEarly,
         captainFromSheet: _captainFromSheetEarly,
+        isQualifiedOrder: _isQualifiedDirectOrder,
+        hasCaptainReply: Boolean(_existingReplyForDirectOrder),
       });
       if (!_targetValidation.allowed) {
         logger.info('⚠️ تجاهل تفاعل ليس على رد تأكيد موثق', {
@@ -1376,8 +1461,34 @@ async function start() {
         });
         return;
       }
+
+      if (_isQualifiedDirectOrder) {
+        const authorization = authorizeQuantityReaction({
+          reactorPhone: producerPhone,
+          orderOwnerPhone,
+          isSupervisor: await sheets.isSupervisor(producerPhone),
+        });
+        if (!authorization.allowed) {
+          logger.warn('⚠️ تجاهل تفاعل مباشر غير مصرح به على طلب مؤهل', {
+            reason: authorization.reason, reactor: producerPhone || 'unknown', orderId: quotedMsgId?.substring(0, 8),
+          });
+          return;
+        }
+        directOrderMessageId = quotedMsgId;
+        directOrderMode = true;
+        whatsapp.setDirectOrderEmoji(directOrderMessageId, producerPhone, result.text || result.reactionText || '', quantity);
+        if (!_existingReplyForDirectOrder) {
+          logger.info('⏳ حُفظت آخر كمية مباشرة بانتظار رد كابتن مقتبس', {
+            orderId: directOrderMessageId.substring(0, 8), quantity, reactor: producerPhone,
+          });
+          return;
+        }
+        // نوجّه المعالجة إلى رد الكابتن ليبقى مفتاح الحركة ثابتاً ولا ينشأ قيد جديد على الطلب الأصلي.
+        quotedMsgId = _existingReplyForDirectOrder.replyMessageId;
+        orderOwnerPhone = _existingReplyForDirectOrder.producer || orderOwnerPhone;
+      }
       // فحص إضافي: هل الرسالة المستهدفة هي reply (تم) من messageCache
-      let _isTargetAReply = !!_captainFromTamEarly;
+      let _isTargetAReply = !!_captainFromTamEarly || directOrderMode;
       let _targetTextEarly = '';
       if (!_isTargetAReply && quotedMsgId) {
         const _targetMsgEarly = whatsapp.getCachedMessage(quotedMsgId);
@@ -1408,7 +1519,7 @@ async function start() {
         }
       }
 
-      if (!_isTargetAReply) {
+      if (!_isTargetAReply && !directOrderMode) {
         // فقط إذا لم يكن الإيموجي على رسالة "تم" — نطبق قاعدة التجاهل الذاتي
         const _producerFromOrderEarly = quotedMsgId ? whatsapp.getOrderByReplyId(quotedMsgId) : null;
         const _realOwner = _producerFromOrderEarly || orderOwnerPhone;
@@ -1773,6 +1884,7 @@ async function start() {
 
           if (editResult.success) {
             logger.info(`✏️ تعديل ناجح: ${editResult.message}`);
+            if (directOrderMessageId) whatsapp.markDirectOrderEmojiApplied(directOrderMessageId, quotedMsgId);
           } else {
             logger.warn(`⚠️ فشل التعديل: ${editResult.message} - سيتم تسجيل كعملية جديدة`);
             // إذا فشل التعديل (انتهت المهلة)، لا نسجل عملية جديدة لنفس الرسالة
@@ -1785,6 +1897,7 @@ async function start() {
             msgId: quotedMsgId?.substring(0, 8),
             quantity,
           });
+          if (directOrderMessageId) whatsapp.markDirectOrderEmojiApplied(directOrderMessageId, quotedMsgId);
           return;
         }
 
@@ -1865,6 +1978,7 @@ async function start() {
           identityIncomplete,
         });
         sheets.upsertOrderDetails(orderDetail).catch(() => {});
+        if (directOrderMessageId) whatsapp.markDirectOrderEmojiApplied(directOrderMessageId, quotedMsgId);
         if (orderDetail.status === 'يحتاج مراجعة') {
           sheets.upsertOperationReview({
             reviewId: `REVIEW_${result.transactionId}`,
@@ -2369,6 +2483,31 @@ async function start() {
             voiceReplyCount: voiceReplyStatus?.replyCount || 0,
             voiceReplyInvalidated: Boolean(voiceReplyStatus?.invalidated),
           });
+
+          // قد يضع صاحب الطلب أو المشرف آخر إيموجي كمية قبل وصول رد الكابتن.
+          // بعد أن ثبتنا الرد وصاحبه، نطبّق هذه الكمية مرة واحدة على مفتاح الرد نفسه.
+          if (!isVoiceAcceptance && result.quotedMessageId) {
+            const pendingDirectEmoji = whatsapp.getDirectOrderEmoji(result.quotedMessageId);
+            const pendingGroup = (config.whatsapp.targetGroups || []).find(group => group.id === result.groupId);
+            if (pendingDirectEmoji && pendingDirectEmoji.appliedReplyMessageId !== tamMessageId) {
+              try {
+                await applyPendingDirectOrderEmoji({
+                  pending: pendingDirectEmoji,
+                  replyMessageId: tamMessageId,
+                  orderMessageId: result.quotedMessageId,
+                  producerPhone: resolvedOwner,
+                  captainPhone,
+                  groupPrefix: pendingGroup?.prefix || '',
+                  msg,
+                  timestamp: result.timestamp,
+                });
+              } catch (error) {
+                logger.error('❌ فشل تطبيق كمية مباشرة مؤجلة بعد رد الكابتن', {
+                  orderId: result.quotedMessageId.substring(0, 8), error: error.message,
+                });
+              }
+            }
+          }
         }
         
         logger.info('💾 حفظ "تم"', { 

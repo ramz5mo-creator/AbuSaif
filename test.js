@@ -105,16 +105,34 @@ const recoveredConfirmationReaction = validateQuantityReactionTarget({
   captainFromTam: null,
   captainFromSheet: '962798765432',
 });
+const qualifiedOrderPendingReaction = validateQuantityReactionTarget({
+  captainFromTam: null,
+  captainFromSheet: null,
+  isQualifiedOrder: true,
+  hasCaptainReply: false,
+});
+const qualifiedOrderConfirmedReaction = validateQuantityReactionTarget({
+  captainFromTam: null,
+  captainFromSheet: null,
+  isQualifiedOrder: true,
+  hasCaptainReply: true,
+});
 const reactionTargetGuardIsApplied =
   serverSource.includes('validateQuantityReactionTarget') &&
-  serverSource.includes('تجاهل تفاعل ليس على رد تأكيد موثق');
+  serverSource.includes('تجاهل تفاعل ليس على رد تأكيد موثق') &&
+  serverSource.includes('setDirectOrderEmoji') &&
+  serverSource.includes('getLatestReplyForOrder');
 const confirmedReactionTargetRule =
   directWarningReaction.allowed === false &&
   directWarningReaction.reason === 'confirmation-not-recorded' &&
   cachedConfirmationReaction.allowed === true &&
   recoveredConfirmationReaction.allowed === true &&
+  qualifiedOrderPendingReaction.allowed === true &&
+  qualifiedOrderPendingReaction.pendingConfirmation === true &&
+  qualifiedOrderConfirmedReaction.allowed === true &&
+  qualifiedOrderConfirmedReaction.pendingConfirmation === false &&
   reactionTargetGuardIsApplied;
-console.log(`  ${confirmedReactionTargetRule ? '✅' : '❌'} لا يُحتسب إيموجي مباشر على تحذير؛ ويُقبل فقط رد تأكيد موثق في الذاكرة أو السجل الدائم`);
+console.log(`  ${confirmedReactionTargetRule ? '✅' : '❌'} التحذير مرفوض؛ الطلب المؤهل يحتفظ بآخر كمية فقط إلى أن يثبت رد الكابتن`);
 if (!confirmedReactionTargetRule) process.exitCode = 1;
 
 // === اختبار أن التحذيرات والإعلانات لا تصبح طلبات عبر الرد المقتبس ===
@@ -597,6 +615,33 @@ async function runVoiceEmojiStateTest() {
   if (!correct) process.exitCode = 1;
 }
 
+async function runDirectOrderEmojiStateTest() {
+  console.log('\n🔬 اختبار قاعدة آخر إيموجي مباشر للطلب المؤهل:');
+  const orderMessageId = `test-direct-order-${Date.now()}`;
+  const replyMessageId = `${orderMessageId}-tam`;
+  const first = whatsapp.setDirectOrderEmoji(orderMessageId, '962798765432', '👍', 1);
+  const replacement = whatsapp.setDirectOrderEmoji(orderMessageId, '962798765432', '3️⃣', 3);
+  whatsapp.setOrderForReply(replyMessageId, '962798765432', {
+    orderMessageId,
+    orderClassification: 'valid',
+    orderText: 'من الرابية إلى الحسين توصيل 3',
+  });
+  const replyLink = whatsapp.getLatestReplyForOrder(orderMessageId);
+  const supervisorReplacement = whatsapp.setDirectOrderEmoji(orderMessageId, '962799999999', '2️⃣', 2);
+  const finalState = whatsapp.getDirectOrderEmoji(orderMessageId);
+  const correct =
+    first?.quantity === 1 &&
+    replacement?.quantity === 3 &&
+    replyLink?.replyMessageId === replyMessageId &&
+    replyLink?.producer === '962798765432' &&
+    supervisorReplacement?.quantity === 2 &&
+    finalState?.quantity === 2 &&
+    finalState?.emoji === '2️⃣';
+  console.log(`  ${correct ? '✅' : '❌'} 👍 ثم 3️⃣ ثم 2️⃣ تعني 2 فقط، مع بقاء مفتاح الحركة رد الكابتن`);
+  if (!correct) process.exitCode = 1;
+  whatsapp.clearDirectOrderEmoji(orderMessageId);
+}
+
 runNaturalDeliveryOrderRuntimeTest()
   .then(runStandaloneAcceptRuntimeTest)
   .then(runStickerRuntimeTests)
@@ -604,6 +649,7 @@ runNaturalDeliveryOrderRuntimeTest()
   .then(runVoiceReplyRuntimeTest)
   .then(runVoiceReplyStateTest)
   .then(runVoiceEmojiStateTest)
+  .then(runDirectOrderEmojiStateTest)
   .catch((error) => {
     console.error('❌ فشل اختبار رسالة تم المستقلة:', error.message);
     process.exitCode = 1;
