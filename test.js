@@ -507,6 +507,69 @@ async function runQuotedTextReplyRuntimeTests() {
   console.log(`  ${accepted ? '✅' : '❌'} تم، تم 👇، تا، ت، تم ٢٠، تم رابية، tam، tm وأي نص مقتبس تصل كتأكيد مبدئي`);
   if (!accepted) process.exitCode = 1;
 
+  // صيغ تشغيلية فعلية اعتمدها المستخدم: لا نبحث عن كلمة ثابتة ما دامت الرسالة
+  // رداً مقتبساً مباشراً على طلب مؤهل؛ إيموجي الكمية المخوّل يبقى شرط التسجيل المالي.
+  const approvedNaturalCaptainReplies = [
+    'تم عبي👆', 'تم 👆', 'تم دوار خلدا', 'تم دوار الشعب', 'بدر تم',
+    'تم تنسيق شوي', 'تن', 'تم تنسيق', 'تم ثلث اي وقت', 'تم 20',
+    'تم ١٥', '٢٠تم', 'تم مدينه رياضيه', 'تم ربع كلك', 'تم مدينه رياضيه بس',
+    'معو وقت استلام', 'تم بعد', 'نتمتم', 'تم اذا بزبط بعد', 'تم جسر مادبا',
+    'تم كليك وكاش', 'تم 🤍', 'تم رجوع تنسيق مش مباشر', 'تم تم تم',
+    'تم مع الحوراني', 'تم لعيونك', 'تم 👆 ثلث', 'تم ربع ساعة', 'ثلث هات',
+    'تم الان', 'هات', 'تم 10', 'تم عبدون', 'تم ثلث', 'تم واحه',
+    'تم عشرين كلك', 'اذا بيجي باي ستار تم', 'تم بدن شنته', 'تم بدون شنته',
+    'تم شنطة', 'تم لعيونك الاثنين', 'تم خارج المطار بحطه', 'تم ض الرشيد',
+    'تم اذا مش اكل', 'تم أيونك', 'تم نوع سيارة', 'تم دوار المدينة',
+    'تلاع العلي تم', 'تم عبدون بس اذا بزبط',
+  ];
+  const naturalReplyResults = await Promise.all(approvedNaturalCaptainReplies.map((text, index) =>
+    parser.processMessage({
+      key: {
+        id: `test-approved-natural-captain-reply-${index}`,
+        remoteJid: 'test-group@g.us',
+        participant: '962798765433@s.whatsapp.net',
+        fromMe: false,
+      },
+      message: {
+        extendedTextMessage: {
+          text,
+          contextInfo: {
+            participant: '962798765432@s.whatsapp.net',
+            stanzaId: 'test-original-qualified-order-natural-replies',
+            quotedMessage: { conversation: 'من دوار الثاني للشميساني، توصيل 3' },
+          },
+        },
+      },
+    }, null)
+  ));
+  const allApprovedNaturalRepliesAccepted = naturalReplyResults.every((result, index) =>
+    result?.type === 'accept' &&
+    result.text === approvedNaturalCaptainReplies[index] &&
+    result.orderClassification === 'valid' &&
+    result.quotedMessageId === 'test-original-qualified-order-natural-replies'
+  );
+  console.log(`  ${allApprovedNaturalRepliesAccepted ? '✅' : '❌'} جميع صيغ الكابتن المعتمدة تمر عند اقتباس طلب مؤهل`);
+  if (!allApprovedNaturalRepliesAccepted) process.exitCode = 1;
+
+  const standaloneNaturalReplyResults = await Promise.all(
+    ['تم دوار خلدا', 'بدر تم', 'معو وقت استلام', 'تلاع العلي تم'].map((text, index) =>
+      parser.processMessage({
+        key: {
+          id: `test-natural-captain-reply-without-quote-${index}`,
+          remoteJid: 'test-group@g.us',
+          participant: '962798765433@s.whatsapp.net',
+          fromMe: false,
+        },
+        message: { conversation: text },
+      }, null)
+    )
+  );
+  const noStandaloneNaturalReplyIsReceipt = standaloneNaturalReplyResults.every(
+    (result) => result?.type !== 'accept'
+  );
+  console.log(`  ${noStandaloneNaturalReplyIsReceipt ? '✅' : '❌'} الصيغ نفسها بلا Reply لا تصبح تأكيداً أو حركة`);
+  if (!noStandaloneNaturalReplyIsReceipt) process.exitCode = 1;
+
   const warningReply = await parser.processMessage({
     key: {
       id: 'test-reply-to-warning-no-ledger',
