@@ -15,7 +15,7 @@ const { v4: uuidv4 } = require('uuid');
 const config = require('./config');
 const logger = require('./logger');
 const whatsapp = require('./whatsapp');
-const { classifyOriginalOrder } = require('./order-classification');
+const { classifyOriginalOrder, extractDeliveryOrderDetails } = require('./order-classification');
 let _sheets = null;
 function getSheets() {
   if (!_sheets) _sheets = require('./sheets');
@@ -492,6 +492,7 @@ async function processMessage(msg, sock) {
       text: text ? text.substring(0, 500) : `[رسالة ${msgType}]`,
       orderClassification: orderClassification.classification,
       orderClassificationReason: orderClassification.reason,
+      deliveryOrderDetails: orderClassification.deliveryDetails || extractDeliveryOrderDetails(text),
       timestamp: new Date().toISOString(),
       groupId: msg.key.remoteJid,
     };
@@ -669,6 +670,7 @@ async function processMessage(msg, sock) {
     quotedMessageId,
     orderClassification: orderClassification.classification,
     orderClassificationReason: orderClassification.reason,
+    deliveryOrderDetails: orderClassification.deliveryDetails || extractDeliveryOrderDetails(quotedText),
     isVoiceReply,
     voiceMessageId,
     timestamp: new Date().toISOString(),
@@ -688,4 +690,5 @@ module.exports = {
   isQuantityEmoji,
   cleanPhone,
   classifyOriginalOrder,
+  extractDeliveryOrderDetails,
 };

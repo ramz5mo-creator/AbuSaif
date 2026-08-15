@@ -10,7 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const { authorizeQuantityReaction } = require('./reaction-authorization');
 const { validateQuantityReactionTarget } = require('./reaction-target-validation');
-const { classifyOriginalOrder } = require('./order-classification');
+const { classifyOriginalOrder, extractDeliveryOrderDetails } = require('./order-classification');
 const serverSource = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
 
 console.log('═══════════════════════════════════════');
@@ -157,6 +157,58 @@ originalOrderClassificationTests.forEach(({ input, expected, label }) => {
   console.log(`  ${status} ${label} (${result.classification})`);
   if (result.classification !== expected) process.exitCode = 1;
 });
+
+// === اختبار صيغ التوصيل الطبيعية بلا كلمة «طلب» ===
+console.log('\n🚕 اختبار استخراج صيغ المسار والدفع والتوصيل المختصرة:');
+const naturalDeliveryOrderTests = [
+  {
+    input: 'بداية الرابية إلى الحسين، دفع 0، توصيل 3',
+    expected: { from: 'بدايه الرابيه', to: 'الحسين', payment: 0, delivery: 3 },
+    label: 'مسار مع دفع وتوصيل بلا كلمة طلب',
+  },
+  {
+    input: 'تكسي من رابية الي خدا 4 مقطوع',
+    expected: { from: 'رابيه', to: 'خدا', payment: null, delivery: 4 },
+    label: 'تكسي من وإلى بقيمة مقطوع',
+  },
+  {
+    input: 'تكسي من رابية الي خدا مقطوع',
+    expected: null,
+    label: 'مسار بلا أجرة يبقى للمراجعة',
+  },
+];
+naturalDeliveryOrderTests.forEach(({ input, expected, label }) => {
+  const details = extractDeliveryOrderDetails(input);
+  const classification = classifyOriginalOrder({ text: input });
+  const passed = expected
+    ? details.isComplete && classification.classification === 'valid' &&
+      details.from === expected.from && details.to === expected.to &&
+      details.payment === expected.payment && details.delivery === expected.delivery
+    : !details.isComplete && classification.classification === 'review';
+  console.log(`  ${passed ? '✅' : '❌'} ${label}`);
+  if (!passed) process.exitCode = 1;
+});
+
+async function runNaturalDeliveryOrderRuntimeTest() {
+  console.log('\n🔬 اختبار تشغيل طلب طبيعي بلا كلمة طلب:');
+  const naturalOrderMessage = {
+    key: {
+      id: 'test-natural-delivery-order',
+      remoteJid: 'test-group@g.us',
+      participant: '962798765432@s.whatsapp.net',
+      fromMe: false,
+    },
+    message: { conversation: 'بداية الرابية إلى الحسين، دفع 0، توصيل 3' },
+  };
+  const result = await parser.processMessage(naturalOrderMessage, null);
+  const details = result?.deliveryOrderDetails;
+  const passed = result?.type === 'order' &&
+    result.orderClassification === 'valid' &&
+    details?.from === 'بدايه الرابيه' && details?.to === 'الحسين' &&
+    details?.payment === 0 && details?.delivery === 3 && details?.isComplete === true;
+  console.log(`  ${passed ? '✅' : '❌'} الطلب الطبيعي يمرر من وإلى والدفع والتوصيل إلى سياق التأكيد`);
+  if (!passed) process.exitCode = 1;
+}
 const replyClassificationGuardIsApplied =
   serverSource.includes("result.orderClassification === 'invalid'") &&
   serverSource.includes("result.orderClassification === 'review'") &&
@@ -545,7 +597,8 @@ async function runVoiceEmojiStateTest() {
   if (!correct) process.exitCode = 1;
 }
 
-runStandaloneAcceptRuntimeTest()
+runNaturalDeliveryOrderRuntimeTest()
+  .then(runStandaloneAcceptRuntimeTest)
   .then(runStickerRuntimeTests)
   .then(runQuotedTextReplyRuntimeTests)
   .then(runVoiceReplyRuntimeTest)

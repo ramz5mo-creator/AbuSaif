@@ -1241,6 +1241,12 @@ function getQuotedContextText(contextInfo) {
   return whatsapp.extractText({ message: contextInfo.quotedMessage }) || '';
 }
 
+function formatDeliveryOrderDetails(details) {
+  if (!details?.isComplete) return '';
+  const payment = details.payment === null || details.payment === undefined ? 'غير مذكور' : details.payment;
+  return `من: ${details.from} | إلى: ${details.to} | الدفع: ${payment} | التوصيل: ${details.delivery}`;
+}
+
 /** يبني صف التدقيق دون الاعتماد على نجاحه في تسجيل الأرصدة اليومية. */
 function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone, captainPhone, reactorPhone, identityIncomplete = false }) {
   const targetMessage = quotedMsgId ? whatsapp.getCachedMessage(quotedMsgId) : null;
@@ -1253,6 +1259,8 @@ function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone
   const embeddedOrderText = getQuotedContextText(targetContext);
   const cachedOrderText = whatsapp.extractText(originalOrderMessage) || '';
   const cachedTamText = whatsapp.extractText(targetMessage) || '';
+  const orderText = persistedContext?.orderText || cachedOrderText || embeddedOrderText || result.quotedText || 'غير متوفر';
+  const deliveryOrderDetails = persistedContext?.deliveryOrderDetails || parser.extractDeliveryOrderDetails(orderText);
 
   const producerName = getSafePartyName(producerPhone);
   const captainName = getSafePartyName(captainPhone);
@@ -1264,6 +1272,7 @@ function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone
   const reviewNotes = [
     samePerson ? 'تحذير: رقم المنتج والكابتن متطابقان' : '',
     identityIncomplete ? 'هوية أحد الأطراف غير مكتملة؛ حُفظت العملية للمراجعة ولم تُسقط' : '',
+    formatDeliveryOrderDetails(deliveryOrderDetails),
   ].filter(Boolean).join(' | ');
 
   return {
@@ -1277,7 +1286,7 @@ function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone
     reactorName,
     reactorPhone,
     quantity: result.quantity,
-    orderText: persistedContext?.orderText || cachedOrderText || embeddedOrderText || result.quotedText || 'غير متوفر',
+    orderText,
     tamText: persistedContext?.tamText || (targetContext ? (cachedTamText || result.quotedText || 'غير متوفر') : ''),
     emoji: result.text || '',
     status: needsReview ? 'يحتاج مراجعة' : 'نشط',
@@ -1583,6 +1592,7 @@ async function start() {
                 orderMessageId: originalOrderMsgId || '',
                 orderText: whatsapp.extractText(originalOrderMsg) || getQuotedContextText(targetContextInfo),
                 tamText: whatsapp.extractText(targetMsg) || '',
+                deliveryOrderDetails: parser.extractDeliveryOrderDetails(whatsapp.extractText(originalOrderMsg) || getQuotedContextText(targetContextInfo)),
               });
             }
             logger.info('📌 حالة 1c: إيموجي على رسالة تم (من messageCache/contextInfo)', {
@@ -2353,6 +2363,7 @@ async function start() {
             orderText: whatsapp.extractText(originalOrderMessage) || result.quotedText || '',
             tamText: whatsapp.extractText(msg) || '',
             orderClassification: result.orderClassification || 'valid',
+            deliveryOrderDetails: result.deliveryOrderDetails || null,
             isVoiceOrder: isVoiceAcceptance,
             voiceMessageId: isVoiceAcceptance ? result.voiceMessageId : '',
             voiceReplyCount: voiceReplyStatus?.replyCount || 0,

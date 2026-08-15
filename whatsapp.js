@@ -969,6 +969,7 @@ function setOrderForReply(replyMsgId, producerPhone, context = {}) {
     orderText: context.orderText || '',
     tamText: context.tamText || '',
     orderClassification: context.orderClassification || 'legacy',
+    deliveryOrderDetails: context.deliveryOrderDetails || null,
     isVoiceOrder: Boolean(context.isVoiceOrder),
     voiceMessageId: context.voiceMessageId || '',
     voiceReplyCount: Number(context.voiceReplyCount) || 0,

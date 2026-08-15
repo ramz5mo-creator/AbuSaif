@@ -16,6 +16,48 @@ function normalizeOrderText(value) {
     .trim();
 }
 
+function toAmount(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function extractLabeledAmount(text, labels) {
+  const labelsPattern = labels.join('|');
+  const match = new RegExp(`(?:${labelsPattern})\\s*[:：=-]?\\s*(\\d+(?:\\.\\d+)?)`, 'i').exec(text);
+  return toAmount(match?.[1]);
+}
+
+/**
+ * يستخرج بيانات التوصيل من صياغة طبيعية؛ لا يتطلب كلمة «طلب».
+ * مثالان مدعومان:
+ * - بداية الرابية إلى الحسين، دفع 0، توصيل 3
+ * - تكسي من رابية إلى خدا 4 مقطوع
+ */
+function extractDeliveryOrderDetails(value) {
+  const text = normalizeOrderText(value);
+  if (!text) return { from: '', to: '', payment: null, delivery: null, isComplete: false };
+
+  const routeMatch = /(?:^|[\n،,;]\s*|\s)(?:(?:تكسي|تاكسي)\s+)?(?:من\s+)?(.+?)\s+(?:الى|الي|لل|لـ|ل)\s*(.+?)(?=\s*(?:[\n،,;]|(?:دفع|الدفع|توصيل|التوصيله|مقطوع|المقطوع|سعر|اجره|استلام|تسليم)\s*[:：=-]?\s*\d|\d+(?:\.\d+)?\s+مقطوع)|$)/i.exec(text);
+  const from = (routeMatch?.[1] || '').trim();
+  const to = (routeMatch?.[2] || '').trim();
+  const payment = extractLabeledAmount(text, ['دفع', 'الدفع']);
+  let delivery = extractLabeledAmount(text, ['توصيل', 'التوصيله', 'مقطوع', 'المقطوع', 'سعر', 'اجره']);
+  if (delivery === null) {
+    const fixedFareMatch = /(\d+(?:\.\d+)?)\s+مقطوع/.exec(text);
+    delivery = toAmount(fixedFareMatch?.[1]);
+  }
+
+  return {
+    from,
+    to,
+    payment,
+    delivery,
+    // اكتمال مسار واضح مع أجرة يجعل الرسالة طلباً؛ الدفع اختياري وقد تكون قيمته 0.
+    isComplete: Boolean(from && to && delivery !== null),
+  };
+}
+
 function classifyOriginalOrder({ text, messageType = 'text', isVoiceOrder = false } = {}) {
   if (isVoiceOrder || messageType === 'audio') {
     return { classification: 'valid', reason: 'voice-order' };
@@ -34,16 +76,18 @@ function classifyOriginalOrder({ text, messageType = 'text', isVoiceOrder = fals
     return { classification: 'invalid', reason: 'general-post-or-announcement' };
   }
 
-  const hasNumber = /\d/.test(normalized);
   const hasOrderAssignment = /(?:معك|عندك)\s*(?:\d+\s*)?(?:طلب|طلبات)/.test(normalized);
-  const hasRoute = /(?:من\s+\S[\s\S]{0,140}(?:\s+(?:الى|الي|لـ|ل|لل)\s*)\S)|(?:\S+\s+(?:الى|الي|لـ|ل|لل)\s+\S)/.test(normalized);
-  const hasDeliveryDetail = /(?:توصيل|دفع|مقطوع|سكوتر|مباشر|كليك|استلام|تسليم)/.test(normalized);
+  const deliveryDetails = extractDeliveryOrderDetails(normalized);
 
-  if (hasOrderAssignment || (hasNumber && (hasRoute || hasDeliveryDetail))) {
-    return { classification: 'valid', reason: hasOrderAssignment ? 'explicit-order-assignment' : 'route-or-delivery-details' };
+  if (hasOrderAssignment || deliveryDetails.isComplete) {
+    return {
+      classification: 'valid',
+      reason: hasOrderAssignment ? 'explicit-order-assignment' : 'complete-route-and-delivery',
+      deliveryDetails,
+    };
   }
 
-  return { classification: 'review', reason: 'insufficient-order-evidence' };
+  return { classification: 'review', reason: 'insufficient-order-evidence', deliveryDetails };
 }
 
-module.exports = { classifyOriginalOrder, normalizeOrderText };
+module.exports = { classifyOriginalOrder, extractDeliveryOrderDetails, normalizeOrderText };
