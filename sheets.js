@@ -1369,14 +1369,16 @@ async function updateOrderDetailStatus(transactionId, updates = {}) {
 }
 
 // ====================================================
-// مراجعة العمليات — قرار يدوي بنعم/لا، بلا تأثير تلقائي على الأرصدة
+// مراجعة العمليات — قرار يدوي: 1 للإضافة، 2 لعدم الإضافة
 // ====================================================
 
 const OPERATION_REVIEWS_HEADERS = [
   'رقم المراجعة', 'وقت الإنشاء', 'الجروب', 'نوع التنبيه', 'المعرف المرجعي',
-  'سبب المراجعة', 'الرد (نعم/لا)', 'حالة المعالجة', 'وقت قراءة الرد', 'ملاحظات النظام',
+  'سبب المراجعة', 'القرار (1=إضافة | 2=لا يضاف)', 'حالة القرار', 'وقت القرار', 'ملاحظات النظام',
   'رقم المنتج', 'رقم الكابتن'
 ];
+
+let operationReviewLayoutConfigured = false;
 
 function getOperationReviewsSheetName() {
   return config.sheets.sheetNames.operationReviews || 'مراجعة العمليات';
@@ -1400,10 +1402,89 @@ async function ensureOperationReviewIdentityColumns(sheetName) {
   logger.info('📋 أضيفت حقول أرقام الأطراف إلى ورقة مراجعة العمليات');
 }
 
+/** يطبق واجهة مختصرة وواضحة على الورقة القائمة والجديدة من دون مسح قرارات المستخدم. */
+async function configureOperationReviewsLayout(sheetName) {
+  if (operationReviewLayoutConfigured) return;
+  const meta = await sheetsApi.spreadsheets.get({ spreadsheetId });
+  const sheet = (meta.data.sheets || []).find(s => s.properties?.title === sheetName);
+  if (sheet?.properties?.sheetId === undefined) return;
+  const sheetId = sheet.properties.sheetId;
+
+  await sheetsApi.spreadsheets.values.update({
+    spreadsheetId,
+    range: `'${sheetName}'!G1:J1`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [[
+      'القرار (1=إضافة | 2=لا يضاف)', 'حالة القرار', 'وقت القرار', 'ملاحظات النظام'
+    ]] },
+  });
+
+  await sheetsApi.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [
+        {
+          updateSheetProperties: {
+            properties: { sheetId, rightToLeft: true, gridProperties: { frozenRowCount: 1 } },
+            fields: 'rightToLeft,gridProperties.frozenRowCount',
+          },
+        },
+        {
+          setBasicFilter: {
+            filter: { range: { sheetId, startRowIndex: 0, endRowIndex: 10000, startColumnIndex: 0, endColumnIndex: OPERATION_REVIEWS_HEADERS.length } },
+          },
+        },
+        {
+          repeatCell: {
+            range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: OPERATION_REVIEWS_HEADERS.length },
+            cell: { userEnteredFormat: {
+              backgroundColor: { red: 0.08, green: 0.32, blue: 0.27 },
+              textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
+              horizontalAlignment: 'CENTER', verticalAlignment: 'MIDDLE', wrapStrategy: 'WRAP',
+            } },
+            fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)',
+          },
+        },
+        {
+          repeatCell: {
+            range: { sheetId, startRowIndex: 1, endRowIndex: 10000, startColumnIndex: 6, endColumnIndex: 8 },
+            cell: { userEnteredFormat: { horizontalAlignment: 'CENTER', verticalAlignment: 'MIDDLE' } },
+            fields: 'userEnteredFormat(horizontalAlignment,verticalAlignment)',
+          },
+        },
+        {
+          setDataValidation: {
+            range: { sheetId, startRowIndex: 1, endRowIndex: 10000, startColumnIndex: 6, endColumnIndex: 7 },
+            rule: {
+              condition: { type: 'ONE_OF_LIST', values: [{ userEnteredValue: '1' }, { userEnteredValue: '2' }] },
+              strict: true, showCustomUi: true,
+            },
+          },
+        },
+        {
+          updateDimensionProperties: {
+            range: { sheetId, dimension: 'COLUMNS', startIndex: 5, endIndex: 10 },
+            properties: { pixelSize: 155 }, fields: 'pixelSize',
+          },
+        },
+        {
+          updateDimensionProperties: {
+            range: { sheetId, dimension: 'COLUMNS', startIndex: 9, endIndex: 10 },
+            properties: { pixelSize: 300 }, fields: 'pixelSize',
+          },
+        },
+      ],
+    },
+  });
+  operationReviewLayoutConfigured = true;
+  logger.info('📋 تم تبسيط مراجعة العمليات: 1 للإضافة و2 لعدم الإضافة');
+}
+
 async function ensureOperationReviewsSheet() {
   const sheetName = getOperationReviewsSheetName();
   if (existingSheets.has(sheetName)) {
     await ensureOperationReviewIdentityColumns(sheetName);
+    await configureOperationReviewsLayout(sheetName);
     return;
   }
 
@@ -1422,55 +1503,14 @@ async function ensureOperationReviewsSheet() {
       requestBody: { values: [OPERATION_REVIEWS_HEADERS] },
     });
 
-    const meta = await sheetsApi.spreadsheets.get({ spreadsheetId });
-    const sheet = (meta.data.sheets || []).find(s => s.properties?.title === sheetName);
-    if (sheet?.properties?.sheetId !== undefined) {
-      const sheetId = sheet.properties.sheetId;
-      await sheetsApi.spreadsheets.batchUpdate({
-        spreadsheetId,
-        requestBody: {
-          requests: [
-            {
-              updateSheetProperties: {
-                properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
-                fields: 'gridProperties.frozenRowCount',
-              },
-            },
-            {
-              setBasicFilter: {
-                filter: { range: { sheetId, startRowIndex: 0, endRowIndex: 10000, startColumnIndex: 0, endColumnIndex: OPERATION_REVIEWS_HEADERS.length } },
-              },
-            },
-            {
-              repeatCell: {
-                range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: OPERATION_REVIEWS_HEADERS.length },
-                cell: { userEnteredFormat: {
-                  backgroundColor: { red: 0.72, green: 0.38, blue: 0.05 },
-                  textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } },
-                  horizontalAlignment: 'CENTER', verticalAlignment: 'MIDDLE', wrapStrategy: 'WRAP',
-                } },
-                fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment,wrapStrategy)',
-              },
-            },
-            {
-              setDataValidation: {
-                range: { sheetId, startRowIndex: 1, endRowIndex: 10000, startColumnIndex: 6, endColumnIndex: 7 },
-                rule: {
-                  condition: { type: 'ONE_OF_LIST', values: [{ userEnteredValue: 'نعم' }, { userEnteredValue: 'لا' }] },
-                  strict: true, showCustomUi: true,
-                },
-              },
-            },
-          ],
-        },
-      });
-    }
-
     existingSheets.add(sheetName);
-    logger.info('📋 تم إنشاء ورقة مراجعة العمليات مع خيارات نعم/لا');
+    await configureOperationReviewsLayout(sheetName);
+    logger.info('📋 تم إنشاء ورقة مراجعة العمليات مع خيارات 1 و2');
   } catch (error) {
     if (error.message?.includes('already exists')) {
       existingSheets.add(sheetName);
+      await ensureOperationReviewIdentityColumns(sheetName);
+      await configureOperationReviewsLayout(sheetName);
       return;
     }
     throw error;
@@ -1498,7 +1538,7 @@ async function upsertOperationReview(review) {
     const row = [
       review.reviewId, formatJordanDateTime(review.timestamp), review.groupPrefix || '',
       review.alertType || 'يحتاج مراجعة', review.referenceId || '', review.reason || '',
-      '', 'بانتظار الرد', '', review.notes || '',
+      '', 'بانتظار القرار', '', review.notes || '',
       review.producerPhone || '', review.captainPhone || '',
     ];
     await sheetsApi.spreadsheets.values.append({
@@ -1541,7 +1581,7 @@ async function backfillOperationReviewsFromOrderDetails() {
         alertType: 'تطابق المنتج والكابتن',
         referenceId: row[15] || row[0],
         reason: row[17] || 'رقم المنتج والكابتن متطابقان',
-        notes: 'تنبيه قائم تم استيراده من تفاصيل الطلبات؛ لا يتم تعديل أي رصيد عند اختيار نعم أو لا',
+        notes: 'تنبيه قائم تم استيراده من تفاصيل الطلبات؛ اختر 1 للإضافة أو 2 لعدم الإضافة',
         producerPhone: row[4] || '',
         captainPhone: row[6] || '',
       });
@@ -1554,7 +1594,84 @@ async function backfillOperationReviewsFromOrderDetails() {
   }
 }
 
-/** يقرأ إجابات المستخدم ويحدّث حالة الورقة فقط؛ لا يستدعي أي دوال أرصدة أو معاملات. */
+async function findTransactionByIdForReview(transactionId) {
+  if (!transactionId) return null;
+  const transSheet = config.sheets.sheetNames.transactions || 'سجل الحركات';
+  const response = await sheetsApi.spreadsheets.values.get({
+    spreadsheetId,
+    range: `'${transSheet}'!A:J`,
+  });
+  const rows = response.data.values || [];
+  for (let index = rows.length - 1; index > 0; index--) {
+    const row = rows[index];
+    const rowId = row[0] || '';
+    if (rowId.replace(/^CANCELLED_/, '') !== transactionId) continue;
+    return {
+      rowIndex: index + 1,
+      transactionId,
+      producerPhone: row[2] || '',
+      captainPhone: row[3] || '',
+      quantity: Number(row[4]) || 0,
+      groupPrefix: row[7] || '',
+      notes: row[9] || '',
+      isCancelled: rowId.startsWith('CANCELLED_') || String(row[9] || '').includes('ملغى'),
+    };
+  }
+  return null;
+}
+
+/** يطبق القرار الصريح مرة واحدة على العملية القائمة، ولا ينشئ حركة جديدة مكررة. */
+async function applyOperationReviewDecision(reviewId, resolution) {
+  if (resolution.action === 'reject' && !String(reviewId || '').startsWith('REVIEW_')) {
+    return { success: true, note: 'قرار 2: لا توجد حركة تلقائية مرتبطة بهذه المراجعة، لذلك لم تُضف' };
+  }
+  if (!String(reviewId || '').startsWith('REVIEW_')) {
+    return {
+      success: false,
+      note: 'تعذر الإضافة: لا توجد كمية مكتملة، ولن ينشئ النظام حركة تخمينية',
+    };
+  }
+
+  const transactionId = reviewId.slice('REVIEW_'.length);
+  const transaction = await findTransactionByIdForReview(transactionId);
+  if (!transaction) return { success: false, note: 'تعذر الإضافة: العملية الأصلية غير موجودة في سجل الحركات' };
+
+  if (resolution.action === 'approve') {
+    if (transaction.isCancelled) {
+      return { success: false, note: 'تعذر الإضافة: العملية ملغاة سابقاً ولن يعيدها النظام تلقائياً لتجنب تكرار الرصيد' };
+    }
+    await updateTransactionStatus(transaction.rowIndex, {
+      status: 'نشط',
+      quantity: transaction.quantity,
+      notes: `${transaction.notes} | اعتماد مراجعة رقم 1`,
+    });
+    return { success: true, note: resolution.note };
+  }
+
+  if (transaction.isCancelled) return { success: true, note: 'قرار 2: العملية ملغاة مسبقاً ولم يجرِ خصم مكرر' };
+  if (transaction.quantity <= 0) return { success: false, note: 'تعذر عدم الإضافة: كمية العملية غير صالحة للعكس' };
+
+  if (transaction.producerPhone) {
+    await updateTotalsProduction(transaction.producerPhone, -transaction.quantity, transaction.groupPrefix, 'مراجعة يدوية');
+  }
+  if (transaction.captainPhone) {
+    await updateTotalsReception(transaction.captainPhone, -transaction.quantity, transaction.groupPrefix, 'مراجعة يدوية');
+  }
+  await updateTransactionStatus(transaction.rowIndex, {
+    status: 'ملغى',
+    quantity: 0,
+    notes: `${transaction.notes} | رفض مراجعة رقم 2 — عُكس الأثر`,
+  });
+  await logEdit({
+    editorPhone: 'مراجعة يدوية', editorName: 'قرار 2',
+    producerPhone: transaction.producerPhone, captainPhone: transaction.captainPhone,
+    oldQuantity: transaction.quantity, newQuantity: 0,
+    notes: `رفض من ورقة المراجعة: ${reviewId}`,
+  });
+  return { success: true, note: resolution.note };
+}
+
+/** يقرأ قرار 1 أو 2 ويطبق الأثر مرة واحدة، ثم يوثق النتيجة في نفس صف المراجعة. */
 async function syncOperationReviewResponses() {
   if (!isInitialized) return { updated: 0 };
   const sheetName = getOperationReviewsSheetName();
@@ -1570,12 +1687,16 @@ async function syncOperationReviewResponses() {
       const resolution = getReviewResolution(answer);
       if (!resolution || (row[7] === resolution.status && row[9] === resolution.note)) continue;
 
+      const applied = await applyOperationReviewDecision(row[0], resolution);
+      const status = applied.success
+        ? resolution.status
+        : (resolution.action === 'approve' ? 'تعذر الإضافة' : 'تعذر عدم الإضافة');
       const rowNumber = index + 2;
       await sheetsApi.spreadsheets.values.update({
         spreadsheetId,
         range: `'${sheetName}'!H${rowNumber}:J${rowNumber}`,
         valueInputOption: 'RAW',
-        requestBody: { values: [[resolution.status, formatJordanDateTime(), resolution.note]] },
+        requestBody: { values: [[status, formatJordanDateTime(), applied.note || resolution.note]] },
       });
       updated++;
     }

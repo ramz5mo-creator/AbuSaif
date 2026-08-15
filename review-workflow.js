@@ -4,20 +4,22 @@
  */
 function normalizeReviewAnswer(value) {
   const answer = String(value || '').trim();
-  return answer === 'نعم' || answer === 'لا' ? answer : '';
+  return answer === '1' || answer === '2' ? answer : '';
 }
 
 function getReviewResolution(answer) {
-  if (answer === 'نعم') {
+  if (answer === '1') {
     return {
-      status: 'تم التأكيد — لا تعديل رصيد',
-      note: 'رد مزامن: نعم',
+      action: 'approve',
+      status: 'أضيف للطلبات',
+      note: 'قرار 1: أُضيفت العملية بعد اعتماد المراجعة',
     };
   }
-  if (answer === 'لا') {
+  if (answer === '2') {
     return {
-      status: 'يحتاج تصحيح يدوي — لا تعديل رصيد',
-      note: 'رد مزامن: لا',
+      action: 'reject',
+      status: 'لا يضاف',
+      note: 'قرار 2: لم تُضف العملية بعد رفض المراجعة',
     };
   }
   return null;

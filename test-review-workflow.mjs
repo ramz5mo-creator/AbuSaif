@@ -4,23 +4,26 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { normalizeReviewAnswer, getReviewResolution } = require('./review-workflow.js');
 
-assert.equal(normalizeReviewAnswer(' نعم '), 'نعم');
-assert.equal(normalizeReviewAnswer('لا'), 'لا');
+assert.equal(normalizeReviewAnswer(' 1 '), '1');
+assert.equal(normalizeReviewAnswer('2'), '2');
+assert.equal(normalizeReviewAnswer('نعم'), '');
+assert.equal(normalizeReviewAnswer('لا'), '');
 assert.equal(normalizeReviewAnswer('ربما'), '');
 assert.equal(normalizeReviewAnswer(''), '');
 
-assert.deepEqual(getReviewResolution('نعم'), {
-  status: 'تم التأكيد — لا تعديل رصيد',
-  note: 'رد مزامن: نعم',
+assert.deepEqual(getReviewResolution('1'), {
+  action: 'approve',
+  status: 'أضيف للطلبات',
+  note: 'قرار 1: أُضيفت العملية بعد اعتماد المراجعة',
 });
-assert.deepEqual(getReviewResolution('لا'), {
-  status: 'يحتاج تصحيح يدوي — لا تعديل رصيد',
-  note: 'رد مزامن: لا',
+assert.deepEqual(getReviewResolution('2'), {
+  action: 'reject',
+  status: 'لا يضاف',
+  note: 'قرار 2: لم تُضف العملية بعد رفض المراجعة',
 });
 assert.equal(getReviewResolution(''), null);
 
-// اختيار المستخدم لا يحمل أي قيمة كمية، لذلك لا يمكن أن يسبب تعديل رصيد.
-assert.equal(Object.hasOwn(getReviewResolution('نعم'), 'quantity'), false);
-assert.equal(Object.hasOwn(getReviewResolution('لا'), 'quantity'), false);
+assert.equal(getReviewResolution('1').action, 'approve');
+assert.equal(getReviewResolution('2').action, 'reject');
 
 console.log('✅ اختبار تدفق مراجعة العمليات: نجح');
