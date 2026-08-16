@@ -523,6 +523,150 @@ function getTodaySheetName(groupPrefix = '') {
 }
 
 /**
+ * يتحقق من أن الاسم في الورقة اليومية كتبه المستخدم فعلياً ويصلح لاعتماده.
+ * لا يقبل «مجهول» أو القيم الفارغة كي لا تُستبدل الأسماء الرسمية بمعلومة غير مؤكدة.
+ */
+function isAdoptableManualName(name) {
+  const normalized = String(name || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return false;
+  return !/^(مجهول|غير معروف|unknown|n\/a|لا يوجد|[-—–]+)$/i.test(normalized);
+}
+
+/**
+ * يعتمد الأسماء التي أدخلها المستخدم يدوياً في أوراق اليوم بدلاً من «مجهول».
+ * يحدّث الاسم الرسمي فقط عندما يكون السجل الرسمي فارغاً أو يحمل قيمة مؤقتة.
+ * لا يلمس أرصدة الإنتاج أو الاستلام أو الحركات التاريخية.
+ */
+async function syncManualNamesFromTodaySheets() {
+  if (!isInitialized) {
+    return { success: false, message: 'Google Sheets غير مهيأ' };
+  }
+
+  // getTodaySheetName() بلا بادئة يعيد التاريخ كاملاً مثل 2026-08-16.
+  // لا نستخدم replace على الشرطة كي لا يتحول التاريخ إلى رقم اليوم فقط (16).
+  const targetDate = getTodaySheetName();
+  const groups = config.whatsapp.targetGroups || [];
+  const prefixes = [...new Set(groups.map(group => group.prefix).filter(Boolean))];
+  const stats = {
+    success: true,
+    date: targetDate,
+    sheetsChecked: 0,
+    rowsChecked: 0,
+    accepted: 0,
+    updatedExisting: 0,
+    addedNew: 0,
+    alreadyRegistered: 0,
+    conflicts: 0,
+    skipped: 0,
+  };
+
+  if (!prefixes.length) {
+    return { ...stats, success: false, message: 'لا توجد مجموعات مهيأة' };
+  }
+
+  try {
+    // نعيد تحميل السجل أولاً كي لا نكتب فوق اسم رسمي أضيف حديثاً.
+    await loadRegisteredUsers(true);
+
+    // نجمع الاسم الواحد لكل رقم من أوراق اليوم. اختلاف اسمين لنفس الرقم يظل للمراجعة ولا يُعتمد تلقائياً.
+    const candidates = new Map();
+    for (const prefix of prefixes) {
+      const sheetName = `${prefix}-${targetDate}`;
+      try {
+        const response = await sheetsApi.spreadsheets.values.get({
+          spreadsheetId,
+          range: `'${sheetName}'!A:B`,
+        });
+        const rows = response.data.values || [];
+        stats.sheetsChecked++;
+
+        for (const row of rows.slice(1)) {
+          stats.rowsChecked++;
+          const phone = normalizePhone(row[0] || '');
+          const name = String(row[1] || '').replace(/\s+/g, ' ').trim();
+          if (!phone || !isAdoptableManualName(name)) {
+            stats.skipped++;
+            continue;
+          }
+
+          const candidate = candidates.get(phone);
+          if (!candidate) {
+            candidates.set(phone, { name, sheets: [sheetName], conflict: false });
+          } else if (candidate.name === name) {
+            candidate.sheets.push(sheetName);
+          } else {
+            candidate.conflict = true;
+          }
+        }
+      } catch (error) {
+        // عدم وجود ورقة للمجموعة اليوم لا يمنع فحص بقية المجموعات.
+        logger.debug(`لا توجد ورقة يومية متاحة لمزامنة الأسماء: ${sheetName}`, { error: error.message });
+      }
+    }
+
+    const registeredSheet = config.sheets.sheetNames.registeredUsers || 'المسجلين';
+    const updates = [];
+    const additions = [];
+
+    for (const [phone, candidate] of candidates) {
+      if (candidate.conflict) {
+        stats.conflicts++;
+        logger.warn(`⚠️ تعارض اسم يدوي للرقم ${phone}؛ لم يتم اعتماده تلقائياً`);
+        continue;
+      }
+
+      const registered = registeredUsersCache.get(phone);
+      const officialName = typeof registered === 'string' ? registered : (registered?.name || '');
+      if (isAdoptableManualName(officialName)) {
+        stats.alreadyRegistered++;
+        continue;
+      }
+
+      if (registered?.rowIndex) {
+        updates.push({ range: `'${registeredSheet}'!B${registered.rowIndex}`, values: [[candidate.name]] });
+        stats.updatedExisting++;
+      } else {
+        additions.push([phone, candidate.name, '', '']);
+        stats.addedNew++;
+      }
+      stats.accepted++;
+    }
+
+    if (updates.length) {
+      await sheetsApi.spreadsheets.values.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          valueInputOption: 'RAW',
+          data: updates,
+        },
+      });
+    }
+
+    if (additions.length) {
+      await sheetsApi.spreadsheets.values.append({
+        spreadsheetId,
+        range: `'${registeredSheet}'!A:D`,
+        valueInputOption: 'RAW',
+        insertDataOption: 'INSERT_ROWS',
+        requestBody: { values: additions },
+      });
+    }
+
+    if (stats.accepted) {
+      await loadRegisteredUsers(true);
+      logger.info(`👤 مزامنة الأسماء اليدوية: تم اعتماد ${stats.accepted} اسم (${stats.updatedExisting} تحديث، ${stats.addedNew} إضافة)`);
+    } else {
+      logger.info('👤 مزامنة الأسماء اليدوية: لا توجد أسماء جديدة لاعتمادها');
+    }
+
+    return stats;
+  } catch (error) {
+    logger.error('❌ فشلت مزامنة الأسماء اليدوية', { error: error.message });
+    return { ...stats, success: false, message: error.message };
+  }
+}
+
+/**
  * إنشاء ورقة يومية جديدة إذا لم تكن موجودة
  */
 async function ensureDailySheet(sheetName) {
@@ -3401,6 +3545,8 @@ module.exports = {
   cancelTransaction,
   generateWeeklyReport,
   getTodaySheetName,
+  isAdoptableManualName,
+  syncManualNamesFromTodaySheets,
   // التعديل
   processEdit,
   findTransactionByMessageId,

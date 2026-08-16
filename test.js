@@ -11,7 +11,7 @@ const path = require('path');
 const { authorizeQuantityReaction } = require('./reaction-authorization');
 const { validateQuantityReactionTarget } = require('./reaction-target-validation');
 const { classifyOriginalOrder, extractDeliveryOrderDetails } = require('./order-classification');
-const { buildReviewEvidenceFields } = require('./sheets');
+const { buildReviewEvidenceFields, isAdoptableManualName, getTodaySheetName } = require('./sheets');
 const serverSource = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
 
 console.log('═══════════════════════════════════════');
@@ -31,6 +31,25 @@ const evidenceExpected = ['3 اوردرات من حي عدن ل بيادر تو�
 const evidencePassed = evidenceExpected.every((value, index) => reviewEvidence[index] === value);
 console.log(`  ${evidencePassed ? '✅' : '❌'} يحفظ النص والرد والإيموجي وصاحب التفاعل بوضوح`);
 if (!evidencePassed) process.exitCode = 1;
+
+// === اختبار اعتماد الاسم اليدوي بدلاً من مجهول ===
+console.log('\n👤 اختبار معيار اعتماد الاسم اليدوي:');
+const manualNameTests = [
+  { input: 'أنس الجعيدي', expected: true, label: 'اسم يدوي صحيح يُعتمد' },
+  { input: '  أنس   الجعيدي  ', expected: true, label: 'المسافات الزائدة لا تمنع الاعتماد' },
+  { input: 'مجهول', expected: false, label: 'مجهول لا يُعاد اعتماده' },
+  { input: 'غير معروف', expected: false, label: 'غير معروف لا يُعتمد' },
+  { input: '', expected: false, label: 'الاسم الفارغ لا يُعتمد' },
+];
+manualNameTests.forEach(({ input, expected, label }) => {
+  const result = isAdoptableManualName(input);
+  console.log(`  ${result === expected ? '✅' : '❌'} ${label}`);
+  if (result !== expected) process.exitCode = 1;
+});
+const todaySheetName = getTodaySheetName();
+const fullDatePassed = /^\d{4}-\d{2}-\d{2}$/.test(todaySheetName);
+console.log(`  ${fullDatePassed ? '✅' : '❌'} اسم ورقة اليوم يحتفظ بالتاريخ الكامل (${todaySheetName})`);
+if (!fullDatePassed) process.exitCode = 1;
 
 // === اختبار تحويل إيموجيات الأرقام ===
 console.log('🔢 اختبار تحويل إيموجيات الأرقام:');
