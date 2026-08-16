@@ -1547,6 +1547,7 @@ const OPERATION_REVIEWS_HEADERS = [
 ];
 
 let operationReviewLayoutConfigured = false;
+let operationReviewRowsWithoutEmojiPurged = false;
 
 function getOperationReviewsSheetName() {
   return config.sheets.sheetNames.operationReviews || 'مراجعة العمليات';
@@ -1596,7 +1597,7 @@ function buildConversationSummary(review = {}) {
   const captainName = text(review.captainName || getRegisteredName(review.captainPhone), review.captainPhone ? 'مجهول' : 'غير متوفر');
   const orderText = text(review.orderText, 'غير متوفر');
   const captainReplyText = text(review.captainReplyText, 'لا يوجد رد مقتبس');
-  const quantityEmoji = String(review.quantityEmoji || '').trim();
+  const quantityEmoji = String(review.quantityEmoji || review.emoji || '').trim();
   const quantityValue = Number(review.quantity);
   const quantity = Number.isFinite(quantityValue) && quantityValue > 0 ? quantityValue : 'غير محددة';
   const reactorName = text(review.reactorName, review.reactorPhone || 'غير متوفر');
@@ -1618,7 +1619,7 @@ function buildReviewEvidenceFields(review = {}) {
   return [
     review.orderText || '',
     review.captainReplyText || '',
-    review.quantityEmoji || '',
+    review.quantityEmoji || review.emoji || '',
     [reactorName, reactorPhone].filter(Boolean).join(' | '),
     buildConversationSummary(review),
   ];
@@ -1720,6 +1721,7 @@ async function ensureOperationReviewsSheet() {
     await ensureOperationReviewIdentityColumns(sheetName);
     await ensureOperationReviewEvidenceColumns(sheetName);
     await configureOperationReviewsLayout(sheetName);
+    await purgeOperationReviewRowsWithoutEmojiOnce(sheetName);
     return;
   }
 
@@ -1740,6 +1742,7 @@ async function ensureOperationReviewsSheet() {
 
     existingSheets.add(sheetName);
     await configureOperationReviewsLayout(sheetName);
+    await purgeOperationReviewRowsWithoutEmojiOnce(sheetName);
     logger.info('📋 تم إنشاء ورقة مراجعة العمليات مع خيارات 1 و2');
   } catch (error) {
     if (error.message?.includes('already exists')) {
@@ -1747,6 +1750,7 @@ async function ensureOperationReviewsSheet() {
       await ensureOperationReviewIdentityColumns(sheetName);
       await ensureOperationReviewEvidenceColumns(sheetName);
       await configureOperationReviewsLayout(sheetName);
+      await purgeOperationReviewRowsWithoutEmojiOnce(sheetName);
       return;
     }
     throw error;
@@ -1762,14 +1766,98 @@ async function findOperationReviewRow(reviewId) {
   return index >= 0 ? index + 1 : null;
 }
 
+/** يتحقق من وجود إيموجي كمية صالح في بيانات المراجعة، مع دعم الاسم القديم emoji. */
+function hasOperationReviewQuantityEmoji(review = {}) {
+  return Boolean(String(review.quantityEmoji || review.emoji || '').trim());
+}
+
+/**
+ * يحذف فقط صفوف المراجعة المعلقة الخالية من إيموجي الكمية.
+ * لا يلمس الأرصدة أو الحركات أو الصفوف التي اتخذ المستخدم فيها القرار 1 أو 2.
+ */
+async function purgeOperationReviewRowsWithoutEmoji(sheetName = getOperationReviewsSheetName()) {
+  if (!isInitialized) return { deleted: 0, skipped: true };
+
+  try {
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${sheetName}'!A2:Q`,
+    });
+    const rows = response.data.values || [];
+    const quantityEmojiColumnIndex = OPERATION_REVIEWS_HEADERS.indexOf('إيموجي الكمية');
+    if (quantityEmojiColumnIndex < 0) {
+      throw new Error('تعذر تحديد عمود إيموجي الكمية في ورقة المراجعة');
+    }
+
+    const rowsToDelete = [];
+    for (let index = 0; index < rows.length; index++) {
+      const row = rows[index];
+      const reviewId = String(row[0] || '').trim();
+      const decision = normalizeReviewAnswer(row[6]);
+      const quantityEmoji = String(row[quantityEmojiColumnIndex] || '').trim();
+      // لا نحذف صفاً فارغاً أو صفاً عالجه المستخدم مسبقاً بقرار 1 أو 2.
+      if (!reviewId || decision || quantityEmoji) continue;
+      rowsToDelete.push(index + 2);
+    }
+
+    if (!rowsToDelete.length) return { deleted: 0 };
+
+    const metadata = await sheetsApi.spreadsheets.get({
+      spreadsheetId,
+      fields: 'sheets.properties(sheetId,title)',
+    });
+    const reviewSheet = (metadata.data.sheets || [])
+      .find((sheet) => sheet.properties?.title === sheetName);
+    const reviewSheetId = reviewSheet?.properties?.sheetId;
+    if (reviewSheetId === undefined) {
+      throw new Error(`تعذر تحديد معرّف ورقة المراجعة: ${sheetName}`);
+    }
+
+    await sheetsApi.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: rowsToDelete
+          .sort((a, b) => b - a)
+          .map((rowNumber) => ({
+            deleteDimension: {
+              range: {
+                sheetId: reviewSheetId,
+                dimension: 'ROWS',
+                startIndex: rowNumber - 1,
+                endIndex: rowNumber,
+              },
+            },
+          })),
+      },
+    });
+    logger.info('🧹 حُذفت صفوف مراجعة بلا إيموجي كمية', { count: rowsToDelete.length });
+    return { deleted: rowsToDelete.length };
+  } catch (error) {
+    logger.error('فشل تنظيف صفوف المراجعة بلا إيموجي كمية', { error: error.message });
+    return { deleted: 0, error: error.message };
+  }
+}
+
+/** ينفذ تنظيف الصفوف الحالية مرة عند تهيئة ورقة المراجعة في كل تشغيل للخدمة. */
+async function purgeOperationReviewRowsWithoutEmojiOnce(sheetName) {
+  if (operationReviewRowsWithoutEmojiPurged) return { deleted: 0, skipped: true };
+  const result = await purgeOperationReviewRowsWithoutEmoji(sheetName);
+  if (!result.error && !result.skipped) operationReviewRowsWithoutEmojiPurged = true;
+  return result;
+}
+
 /** ينشئ تنبيهاً واحداً لكل عملية تحتاج مراجعة، ويحافظ على جواب المستخدم إذا كان موجوداً. */
 async function upsertOperationReview(review) {
-  if (!isInitialized || !review?.reviewId) return;
+  if (!isInitialized || !review?.reviewId) return false;
+  if (!hasOperationReviewQuantityEmoji(review)) {
+    logger.info('⏭️ تجاهل مراجعة بلا إيموجي كمية', { reviewId: String(review.reviewId).substring(0, 8) });
+    return false;
+  }
   const sheetName = getOperationReviewsSheetName();
   try {
     await ensureOperationReviewsSheet();
     const existingRow = await findOperationReviewRow(review.reviewId);
-    if (existingRow) return;
+    if (existingRow) return false;
 
     const row = [
       review.reviewId, formatJordanDateTime(review.timestamp), review.groupPrefix || '',
@@ -1784,8 +1872,10 @@ async function upsertOperationReview(review) {
       valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [row] },
     });
     logger.info('🔎 تمت إضافة عملية إلى ورقة المراجعات', { reviewId: review.reviewId.substring(0, 8) });
+    return true;
   } catch (error) {
     logger.error('فشل حفظ مراجعة العملية', { error: error.message, reviewId: review.reviewId });
+    return false;
   }
 }
 
@@ -1811,7 +1901,7 @@ async function backfillOperationReviewsFromOrderDetails() {
       const reviewId = `REVIEW_${transactionId}`;
       const exists = await findOperationReviewRow(reviewId);
       if (exists) continue;
-      await upsertOperationReview({
+      const added = await upsertOperationReview({
         reviewId,
         timestamp: row[1],
         groupPrefix: row[2] || '',
@@ -1830,7 +1920,7 @@ async function backfillOperationReviewsFromOrderDetails() {
         reactorName: row[7] || '',
         reactorPhone: row[8] || '',
       });
-      created++;
+      if (added) created++;
     }
     return { created };
   } catch (error) {
@@ -3571,6 +3661,8 @@ module.exports = {
   updateOrderDetailStatus,
   ensureOperationReviewsSheet,
   upsertOperationReview,
+  hasOperationReviewQuantityEmoji,
+  purgeOperationReviewRowsWithoutEmoji,
   buildReviewEvidenceFields,
   buildConversationSummary,
   backfillOperationReviewsFromOrderDetails,

@@ -11,12 +11,32 @@ const path = require('path');
 const { authorizeQuantityReaction } = require('./reaction-authorization');
 const { validateQuantityReactionTarget } = require('./reaction-target-validation');
 const { classifyOriginalOrder, extractDeliveryOrderDetails } = require('./order-classification');
-const { buildReviewEvidenceFields, buildConversationSummary, isAdoptableManualName, getTodaySheetName } = require('./sheets');
+const {
+  buildReviewEvidenceFields,
+  buildConversationSummary,
+  hasOperationReviewQuantityEmoji,
+  isAdoptableManualName,
+  getTodaySheetName,
+} = require('./sheets');
 const serverSource = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
 
 console.log('═══════════════════════════════════════');
 console.log('   اختبار نظام AbuSaif');
 console.log('═══════════════════════════════════════\n');
+
+// === اختبار حارس مراجعة العمليات بلا إيموجي كمية ===
+console.log('🧹 اختبار منع مراجعة العمليات بلا إيموجي كمية:');
+const reviewEmojiGuardTests = [
+  { input: { quantityEmoji: '👍' }, expected: true, label: 'إيموجي كمية محفوظ يقبل المراجعة' },
+  { input: { emoji: '2️⃣' }, expected: true, label: 'حقل emoji القديم يبقى مدعوماً' },
+  { input: { quantityEmoji: '   ' }, expected: false, label: 'إيموجي فارغ يمنع إنشاء المراجعة' },
+  { input: {}, expected: false, label: 'غياب الإيموجي يمنع إنشاء المراجعة' },
+];
+reviewEmojiGuardTests.forEach(({ input, expected, label }) => {
+  const result = hasOperationReviewQuantityEmoji(input);
+  console.log(`  ${result === expected ? '✅' : '❌'} ${label}`);
+  if (result !== expected) process.exitCode = 1;
+});
 
 // === اختبار دليل المراجعة الواضح ===
 console.log('🔎 اختبار دليل رد الكابتن وإيموجي الكمية في المراجعة:');
@@ -31,6 +51,11 @@ const evidenceExpected = ['3 اوردرات من حي عدن ل بيادر تو�
 const evidencePassed = evidenceExpected.every((value, index) => reviewEvidence[index] === value);
 console.log(`  ${evidencePassed ? '✅' : '❌'} يحفظ النص والرد والإيموجي وصاحب التفاعل بوضوح`);
 if (!evidencePassed) process.exitCode = 1;
+
+const legacyEmojiEvidence = buildReviewEvidenceFields({ emoji: '2️⃣' });
+const legacyEmojiEvidencePassed = legacyEmojiEvidence[2] === '2️⃣';
+console.log(`  ${legacyEmojiEvidencePassed ? '✅' : '❌'} يحفظ حقل emoji القديم في عمود إيموجي الكمية`);
+if (!legacyEmojiEvidencePassed) process.exitCode = 1;
 
 const conversationSummary = buildConversationSummary({
   producerName: 'أحمد',
