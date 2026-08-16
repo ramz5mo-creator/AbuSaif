@@ -159,6 +159,21 @@ const originalOrderClassificationTests = [
     label: 'إسناد صريح بطلب يبقى مؤهلاً',
   },
   {
+    input: { text: 'دوار الشعب توصيل' },
+    expected: 'valid',
+    label: 'ذكر توصيل يجعل الرسالة طلباً مرشحاً لإيموجي صاحب الطلب',
+  },
+  {
+    input: { text: 'الرابية دفع 0' },
+    expected: 'valid',
+    label: 'ذكر دفع يجعل الرسالة طلباً مرشحاً لإيموجي صاحب الطلب',
+  },
+  {
+    input: { text: 'إعلان: خدمة توصيل جديدة للجميع' },
+    expected: 'invalid',
+    label: 'إعلان يذكر توصيل يبقى مرفوضاً',
+  },
+  {
     input: { text: 'شباب عند البوابة' },
     expected: 'review',
     label: 'صيغة غير واضحة تذهب للمراجعة بلا رصيد',

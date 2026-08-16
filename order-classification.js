@@ -78,11 +78,19 @@ function classifyOriginalOrder({ text, messageType = 'text', isVoiceOrder = fals
 
   const hasOrderAssignment = /(?:معك|عندك)\s*(?:\d+\s*)?(?:طلب|طلبات)/.test(normalized);
   const deliveryDetails = extractDeliveryOrderDetails(normalized);
+  // قرار المستخدم: ذكر «توصيل» أو «دفع» يكفي لاعتبار الرسالة طلباً مرشحاً؛
+  // لا تنشأ حركة إلا لاحقاً مع رد الكابتن المقتبس وإيموجي كمية مخوّل.
+  // يبقى فحص التحذيرات والإعلانات أعلاه سابقاً على هذا الاستثناء.
+  const hasDeliveryOrPaymentKeyword = /(?:^|[\s،,:;])(?:توصيل(?:ه)?|دفع|الدفع)(?=$|[\s،,:;\d])/.test(normalized);
 
-  if (hasOrderAssignment || deliveryDetails.isComplete) {
+  if (hasOrderAssignment || deliveryDetails.isComplete || hasDeliveryOrPaymentKeyword) {
     return {
       classification: 'valid',
-      reason: hasOrderAssignment ? 'explicit-order-assignment' : 'complete-route-and-delivery',
+      reason: hasOrderAssignment
+        ? 'explicit-order-assignment'
+        : deliveryDetails.isComplete
+          ? 'complete-route-and-delivery'
+          : 'delivery-or-payment-keyword',
       deliveryDetails,
     };
   }
