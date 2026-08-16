@@ -1200,13 +1200,35 @@ const ORDER_DETAILS_HEADERS = [
   'المنتج', 'رقم المنتج',
   'الكابتن المستلم', 'رقم الكابتن',
   'واضع التفاعل', 'رقم واضع التفاعل',
-  'الكمية', 'نص الطلب', 'رسالة تم', 'التفاعل',
+  'الكمية', 'نص طلب المنتج', 'نص رد الكابتن', 'إيموجي الكمية',
   'الحالة', 'معرف رسالة تم', 'معرف رسالة الطلب', 'المصدر', 'ملاحظات'
 ];
 
+/** يوضح رؤوس دليل الطلب في الأوراق القائمة دون تغيير أي صف بيانات. */
+async function ensureOrderDetailEvidenceHeaders(sheetName) {
+  const evidenceHeaders = ['نص طلب المنتج', 'نص رد الكابتن', 'إيموجي الكمية'];
+  const response = await sheetsApi.spreadsheets.values.get({
+    spreadsheetId,
+    range: `'${sheetName}'!K1:M1`,
+  });
+  const currentHeaders = response.data.values?.[0] || [];
+  if (evidenceHeaders.every((header, index) => currentHeaders[index] === header)) return;
+
+  await sheetsApi.spreadsheets.values.update({
+    spreadsheetId,
+    range: `'${sheetName}'!K1:M1`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [evidenceHeaders] },
+  });
+  logger.info('📋 تم توضيح حقول نص الطلب ورد الكابتن وإيموجي الكمية');
+}
+
 async function ensureOrderDetailsSheet() {
   const sheetName = config.sheets.sheetNames.orderDetails || 'تفاصيل الطلبات';
-  if (existingSheets.has(sheetName)) return;
+  if (existingSheets.has(sheetName)) {
+    await ensureOrderDetailEvidenceHeaders(sheetName);
+    return;
+  }
 
   try {
     await sheetsApi.spreadsheets.batchUpdate({
@@ -1264,6 +1286,7 @@ async function ensureOrderDetailsSheet() {
   } catch (error) {
     if (error.message?.includes('already exists')) {
       existingSheets.add(sheetName);
+      await ensureOrderDetailEvidenceHeaders(sheetName);
       return;
     }
     throw error;
@@ -1375,7 +1398,8 @@ async function updateOrderDetailStatus(transactionId, updates = {}) {
 const OPERATION_REVIEWS_HEADERS = [
   'رقم المراجعة', 'وقت الإنشاء', 'الجروب', 'نوع التنبيه', 'المعرف المرجعي',
   'سبب المراجعة', 'القرار (1=إضافة | 2=لا يضاف)', 'حالة القرار', 'وقت القرار', 'ملاحظات النظام',
-  'رقم المنتج', 'رقم الكابتن'
+  'رقم المنتج', 'رقم الكابتن',
+  'نص طلب المنتج', 'نص رد الكابتن', 'إيموجي الكمية', 'واضع إيموجي الكمية'
 ];
 
 let operationReviewLayoutConfigured = false;
@@ -1400,6 +1424,36 @@ async function ensureOperationReviewIdentityColumns(sheetName) {
     requestBody: { values: [['رقم المنتج', 'رقم الكابتن']] },
   });
   logger.info('📋 أضيفت حقول أرقام الأطراف إلى ورقة مراجعة العمليات');
+}
+
+/** يضيف دليل الطلب إلى ورقة المراجعة القائمة من دون مسح أي قرار سابق. */
+async function ensureOperationReviewEvidenceColumns(sheetName) {
+  const evidenceHeaders = ['نص طلب المنتج', 'نص رد الكابتن', 'إيموجي الكمية', 'واضع إيموجي الكمية'];
+  const response = await sheetsApi.spreadsheets.values.get({
+    spreadsheetId,
+    range: `'${sheetName}'!M1:P1`,
+  });
+  const currentHeaders = response.data.values?.[0] || [];
+  if (evidenceHeaders.every((header, index) => currentHeaders[index] === header)) return;
+
+  await sheetsApi.spreadsheets.values.update({
+    spreadsheetId,
+    range: `'${sheetName}'!M1:P1`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [evidenceHeaders] },
+  });
+  logger.info('📋 أضيف دليل نص الطلب ورد الكابتن وإيموجي الكمية إلى المراجعة');
+}
+
+function buildReviewEvidenceFields(review = {}) {
+  const reactorName = String(review.reactorName || '').trim();
+  const reactorPhone = String(review.reactorPhone || '').trim();
+  return [
+    review.orderText || '',
+    review.captainReplyText || '',
+    review.quantityEmoji || '',
+    [reactorName, reactorPhone].filter(Boolean).join(' | '),
+  ];
 }
 
 /** يطبق واجهة مختصرة وواضحة على الورقة القائمة والجديدة من دون مسح قرارات المستخدم. */
@@ -1473,6 +1527,12 @@ async function configureOperationReviewsLayout(sheetName) {
             properties: { pixelSize: 300 }, fields: 'pixelSize',
           },
         },
+        {
+          updateDimensionProperties: {
+            range: { sheetId, dimension: 'COLUMNS', startIndex: 12, endIndex: 16 },
+            properties: { pixelSize: 260 }, fields: 'pixelSize',
+          },
+        },
       ],
     },
   });
@@ -1484,6 +1544,7 @@ async function ensureOperationReviewsSheet() {
   const sheetName = getOperationReviewsSheetName();
   if (existingSheets.has(sheetName)) {
     await ensureOperationReviewIdentityColumns(sheetName);
+    await ensureOperationReviewEvidenceColumns(sheetName);
     await configureOperationReviewsLayout(sheetName);
     return;
   }
@@ -1498,7 +1559,7 @@ async function ensureOperationReviewsSheet() {
 
     await sheetsApi.spreadsheets.values.update({
       spreadsheetId,
-      range: `'${sheetName}'!A1:L1`,
+      range: `'${sheetName}'!A1:P1`,
       valueInputOption: 'RAW',
       requestBody: { values: [OPERATION_REVIEWS_HEADERS] },
     });
@@ -1510,6 +1571,7 @@ async function ensureOperationReviewsSheet() {
     if (error.message?.includes('already exists')) {
       existingSheets.add(sheetName);
       await ensureOperationReviewIdentityColumns(sheetName);
+      await ensureOperationReviewEvidenceColumns(sheetName);
       await configureOperationReviewsLayout(sheetName);
       return;
     }
@@ -1540,10 +1602,11 @@ async function upsertOperationReview(review) {
       review.alertType || 'يحتاج مراجعة', review.referenceId || '', review.reason || '',
       '', 'بانتظار القرار', '', review.notes || '',
       review.producerPhone || '', review.captainPhone || '',
+      ...buildReviewEvidenceFields(review),
     ];
     await sheetsApi.spreadsheets.values.append({
       spreadsheetId,
-      range: `'${sheetName}'!A:L`,
+      range: `'${sheetName}'!A:P`,
       valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [row] },
     });
     logger.info('🔎 تمت إضافة عملية إلى ورقة المراجعات', { reviewId: review.reviewId.substring(0, 8) });
@@ -1584,6 +1647,11 @@ async function backfillOperationReviewsFromOrderDetails() {
         notes: 'تنبيه قائم تم استيراده من تفاصيل الطلبات؛ اختر 1 للإضافة أو 2 لعدم الإضافة',
         producerPhone: row[4] || '',
         captainPhone: row[6] || '',
+        orderText: row[10] || '',
+        captainReplyText: row[11] || '',
+        quantityEmoji: row[12] || '',
+        reactorName: row[7] || '',
+        reactorPhone: row[8] || '',
       });
       created++;
     }
@@ -3326,6 +3394,7 @@ module.exports = {
   updateOrderDetailStatus,
   ensureOperationReviewsSheet,
   upsertOperationReview,
+  buildReviewEvidenceFields,
   backfillOperationReviewsFromOrderDetails,
   syncOperationReviewResponses,
   isSupervisor,

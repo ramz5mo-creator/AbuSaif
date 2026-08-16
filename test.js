@@ -11,11 +11,26 @@ const path = require('path');
 const { authorizeQuantityReaction } = require('./reaction-authorization');
 const { validateQuantityReactionTarget } = require('./reaction-target-validation');
 const { classifyOriginalOrder, extractDeliveryOrderDetails } = require('./order-classification');
+const { buildReviewEvidenceFields } = require('./sheets');
 const serverSource = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
 
 console.log('═══════════════════════════════════════');
 console.log('   اختبار نظام AbuSaif');
 console.log('═══════════════════════════════════════\n');
+
+// === اختبار دليل المراجعة الواضح ===
+console.log('🔎 اختبار دليل رد الكابتن وإيموجي الكمية في المراجعة:');
+const reviewEvidence = buildReviewEvidenceFields({
+  orderText: '3 اوردرات من حي عدن ل بيادر توصيلك 7.5',
+  captainReplyText: 'تم بيادر',
+  quantityEmoji: '3️⃣',
+  reactorName: 'المنتج',
+  reactorPhone: '799999999',
+});
+const evidenceExpected = ['3 اوردرات من حي عدن ل بيادر توصيلك 7.5', 'تم بيادر', '3️⃣', 'المنتج | 799999999'];
+const evidencePassed = evidenceExpected.every((value, index) => reviewEvidence[index] === value);
+console.log(`  ${evidencePassed ? '✅' : '❌'} يحفظ النص والرد والإيموجي وصاحب التفاعل بوضوح`);
+if (!evidencePassed) process.exitCode = 1;
 
 // === اختبار تحويل إيموجيات الأرقام ===
 console.log('🔢 اختبار تحويل إيموجيات الأرقام:');

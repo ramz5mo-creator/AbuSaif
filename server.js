@@ -1835,6 +1835,11 @@ async function start() {
               notes: `المعرّف المتاح للمنتج: ${String(unresolvedProducer || 'غير متوفر').substring(0, 40)}`,
               producerPhone: unresolvedProducer,
               captainPhone: unresolvedCaptain,
+              orderText: unresolvedDetail.orderText,
+              captainReplyText: unresolvedDetail.tamText,
+              quantityEmoji: unresolvedDetail.emoji,
+              reactorName: unresolvedDetail.reactorName,
+              reactorPhone: unresolvedDetail.reactorPhone,
             });
             logger.warn('⏳ تفاعل كمية حُفظ للمراجعة بسبب هوية صاحب طلب غير مكتملة', {
               reactor: producerPhone || 'unknown',
@@ -1990,6 +1995,11 @@ async function start() {
             notes: 'لا يتم تعديل أي رصيد عند اختيار نعم أو لا',
             producerPhone: finalProducerPhone || '',
             captainPhone: resolvedCaptainForSheet || '',
+            orderText: orderDetail.orderText,
+            captainReplyText: orderDetail.tamText,
+            quantityEmoji: orderDetail.emoji,
+            reactorName: orderDetail.reactorName,
+            reactorPhone: orderDetail.reactorPhone,
           }).catch(() => {});
         }
 
@@ -2365,6 +2375,8 @@ async function start() {
           notes: `سبب التصنيف: ${result.orderClassificationReason || 'غير محدد'} | النص: ${(result.quotedText || '').substring(0, 160)}`,
           producerPhone: result.orderOwnerPhone || '',
           captainPhone: result.phone || '',
+          orderText: result.quotedText || '',
+          captainReplyText: result.text || '',
         });
         logger.warn('🔎 رد على طلب غير واضح حُفظ للمراجعة بلا رصيد', {
           reason: result.orderClassificationReason,
