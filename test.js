@@ -257,6 +257,12 @@ const originalOrderClassificationTests = [
     label: 'السابع خلف الموصلي وأم السماق مع رقم تصبح طلباً مؤهلاً',
   },
   {
+    input: { text: 'البيادر ٢٠\nالسيتي مول ٣' },
+    expected: 'valid',
+    expectedReason: 'numeric-value-with-two-free-route-areas',
+    label: 'البيادر والسيتي مول مع أرقام عربية تصبح طلباً مؤهلاً لا مراجعة',
+  },
+  {
     input: { text: 'معك كمان 3 طلبات' },
     expected: 'valid',
     expectedReason: 'additional-order-assignment',
