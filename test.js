@@ -251,6 +251,12 @@ const originalOrderClassificationTests = [
     label: 'منطقتان حرتان مفصولتان بأسطر مع رقم تصبحان طلباً مؤهلاً',
   },
   {
+    input: { text: 'السابع خلف الموصلي 25\nام السماق 3\nمستلزمات تدخين' },
+    expected: 'valid',
+    expectedReason: 'numeric-value-with-two-free-route-areas',
+    label: 'السابع خلف الموصلي وأم السماق مع رقم تصبح طلباً مؤهلاً',
+  },
+  {
     input: { text: 'معك كمان 3 طلبات' },
     expected: 'valid',
     expectedReason: 'additional-order-assignment',

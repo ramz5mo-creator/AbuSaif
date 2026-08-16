@@ -32,6 +32,7 @@ function extractLabeledAmount(text, labels) {
 // تُفحص التحذيرات والإعلانات قبل استعمال هذه القائمة في classifyOriginalOrder.
 const FREE_ROUTE_LOCALITIES = [
   { key: 'السابع', terms: ['السابع', 'سابع'] },
+  { key: 'أم السماق', terms: ['ام السماق', 'ام السمانق'] },
   { key: 'الملكية', terms: ['الملكيه', 'ملكيه'] },
   { key: 'غوشة', terms: ['غوشه'] },
   { key: 'السلط', terms: ['السلط', 'سلط'] },
