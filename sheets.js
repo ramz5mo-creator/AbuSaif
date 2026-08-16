@@ -1543,7 +1543,7 @@ const OPERATION_REVIEWS_HEADERS = [
   'رقم المراجعة', 'وقت الإنشاء', 'الجروب', 'نوع التنبيه', 'المعرف المرجعي',
   'سبب المراجعة', 'القرار (1=إضافة | 2=لا يضاف)', 'حالة القرار', 'وقت القرار', 'ملاحظات النظام',
   'رقم المنتج', 'رقم الكابتن',
-  'نص طلب المنتج', 'نص رد الكابتن', 'إيموجي الكمية', 'واضع إيموجي الكمية'
+  'نص طلب المنتج', 'نص رد الكابتن', 'إيموجي الكمية', 'واضع إيموجي الكمية', 'ملخص المحادثة'
 ];
 
 let operationReviewLayoutConfigured = false;
@@ -1570,23 +1570,46 @@ async function ensureOperationReviewIdentityColumns(sheetName) {
   logger.info('📋 أضيفت حقول أرقام الأطراف إلى ورقة مراجعة العمليات');
 }
 
-/** يضيف دليل الطلب إلى ورقة المراجعة القائمة من دون مسح أي قرار سابق. */
+/** يضيف دليل الطلب وملخص المحادثة إلى ورقة المراجعة القائمة من دون مسح أي قرار سابق. */
 async function ensureOperationReviewEvidenceColumns(sheetName) {
-  const evidenceHeaders = ['نص طلب المنتج', 'نص رد الكابتن', 'إيموجي الكمية', 'واضع إيموجي الكمية'];
+  const evidenceHeaders = ['نص طلب المنتج', 'نص رد الكابتن', 'إيموجي الكمية', 'واضع إيموجي الكمية', 'ملخص المحادثة'];
   const response = await sheetsApi.spreadsheets.values.get({
     spreadsheetId,
-    range: `'${sheetName}'!M1:P1`,
+    range: `'${sheetName}'!M1:Q1`,
   });
   const currentHeaders = response.data.values?.[0] || [];
   if (evidenceHeaders.every((header, index) => currentHeaders[index] === header)) return;
 
   await sheetsApi.spreadsheets.values.update({
     spreadsheetId,
-    range: `'${sheetName}'!M1:P1`,
+    range: `'${sheetName}'!M1:Q1`,
     valueInputOption: 'RAW',
     requestBody: { values: [evidenceHeaders] },
   });
-  logger.info('📋 أضيف دليل نص الطلب ورد الكابتن وإيموجي الكمية إلى المراجعة');
+  logger.info('📋 أضيف دليل الطلب وملخص المحادثة إلى المراجعة');
+}
+
+/** يبني تسلسلاً مقروءاً للمحادثة كي يُتخذ قرار المراجعة من الشيت دون الرجوع إلى واتساب. */
+function buildConversationSummary(review = {}) {
+  const text = (value, fallback) => String(value || '').trim() || fallback;
+  const producerName = text(review.producerName || getRegisteredName(review.producerPhone), review.producerPhone ? 'مجهول' : 'غير متوفر');
+  const captainName = text(review.captainName || getRegisteredName(review.captainPhone), review.captainPhone ? 'مجهول' : 'غير متوفر');
+  const orderText = text(review.orderText, 'غير متوفر');
+  const captainReplyText = text(review.captainReplyText, 'لا يوجد رد مقتبس');
+  const quantityEmoji = String(review.quantityEmoji || '').trim();
+  const quantityValue = Number(review.quantity);
+  const quantity = Number.isFinite(quantityValue) && quantityValue > 0 ? quantityValue : 'غير محددة';
+  const reactorName = text(review.reactorName, review.reactorPhone || 'غير متوفر');
+
+  return [
+    `📦 المنتج: ${producerName}`,
+    `"${orderText}"`,
+    '',
+    `✅ الكابتن: ${captainName}`,
+    `"${captainReplyText}"`,
+    '',
+    `${quantityEmoji || '📌'} الكمية: ${quantity} (من: ${reactorName})`,
+  ].join('\n');
 }
 
 function buildReviewEvidenceFields(review = {}) {
@@ -1597,6 +1620,7 @@ function buildReviewEvidenceFields(review = {}) {
     review.captainReplyText || '',
     review.quantityEmoji || '',
     [reactorName, reactorPhone].filter(Boolean).join(' | '),
+    buildConversationSummary(review),
   ];
 }
 
@@ -1674,7 +1698,13 @@ async function configureOperationReviewsLayout(sheetName) {
         {
           updateDimensionProperties: {
             range: { sheetId, dimension: 'COLUMNS', startIndex: 12, endIndex: 16 },
-            properties: { pixelSize: 260 }, fields: 'pixelSize',
+            properties: { pixelSize: 230 }, fields: 'pixelSize',
+          },
+        },
+        {
+          updateDimensionProperties: {
+            range: { sheetId, dimension: 'COLUMNS', startIndex: 16, endIndex: 17 },
+            properties: { pixelSize: 420 }, fields: 'pixelSize',
           },
         },
       ],
@@ -1703,7 +1733,7 @@ async function ensureOperationReviewsSheet() {
 
     await sheetsApi.spreadsheets.values.update({
       spreadsheetId,
-      range: `'${sheetName}'!A1:P1`,
+      range: `'${sheetName}'!A1:Q1`,
       valueInputOption: 'RAW',
       requestBody: { values: [OPERATION_REVIEWS_HEADERS] },
     });
@@ -1750,7 +1780,7 @@ async function upsertOperationReview(review) {
     ];
     await sheetsApi.spreadsheets.values.append({
       spreadsheetId,
-      range: `'${sheetName}'!A:P`,
+      range: `'${sheetName}'!A:Q`,
       valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS', requestBody: { values: [row] },
     });
     logger.info('🔎 تمت إضافة عملية إلى ورقة المراجعات', { reviewId: review.reviewId.substring(0, 8) });
@@ -1791,6 +1821,9 @@ async function backfillOperationReviewsFromOrderDetails() {
         notes: 'تنبيه قائم تم استيراده من تفاصيل الطلبات؛ اختر 1 للإضافة أو 2 لعدم الإضافة',
         producerPhone: row[4] || '',
         captainPhone: row[6] || '',
+        producerName: row[3] || '',
+        captainName: row[5] || '',
+        quantity: row[9] || '',
         orderText: row[10] || '',
         captainReplyText: row[11] || '',
         quantityEmoji: row[12] || '',
@@ -3539,6 +3572,7 @@ module.exports = {
   ensureOperationReviewsSheet,
   upsertOperationReview,
   buildReviewEvidenceFields,
+  buildConversationSummary,
   backfillOperationReviewsFromOrderDetails,
   syncOperationReviewResponses,
   isSupervisor,

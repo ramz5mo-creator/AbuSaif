@@ -11,7 +11,7 @@ const path = require('path');
 const { authorizeQuantityReaction } = require('./reaction-authorization');
 const { validateQuantityReactionTarget } = require('./reaction-target-validation');
 const { classifyOriginalOrder, extractDeliveryOrderDetails } = require('./order-classification');
-const { buildReviewEvidenceFields, isAdoptableManualName, getTodaySheetName } = require('./sheets');
+const { buildReviewEvidenceFields, buildConversationSummary, isAdoptableManualName, getTodaySheetName } = require('./sheets');
 const serverSource = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
 
 console.log('═══════════════════════════════════════');
@@ -31,6 +31,25 @@ const evidenceExpected = ['3 اوردرات من حي عدن ل بيادر تو�
 const evidencePassed = evidenceExpected.every((value, index) => reviewEvidence[index] === value);
 console.log(`  ${evidencePassed ? '✅' : '❌'} يحفظ النص والرد والإيموجي وصاحب التفاعل بوضوح`);
 if (!evidencePassed) process.exitCode = 1;
+
+const conversationSummary = buildConversationSummary({
+  producerName: 'أحمد',
+  orderText: '3 اوردرات من حي عدن ل بيادر توصيلك 7.5',
+  captainName: 'محمد',
+  captainReplyText: 'تم بيادر',
+  quantity: 3,
+  quantityEmoji: '3️⃣',
+  reactorName: 'أحمد',
+});
+const summaryExpected = [
+  '📦 المنتج: أحمد',
+  '"3 اوردرات من حي عدن ل بيادر توصيلك 7.5"',
+  '✅ الكابتن: محمد',
+  '"تم بيادر"',
+  '3️⃣ الكمية: 3 (من: أحمد)',
+].every(value => conversationSummary.includes(value));
+console.log(`  ${summaryExpected ? '✅' : '❌'} يبني ملخص محادثة كاملاً ومقروءاً لصف المراجعة`);
+if (!summaryExpected) process.exitCode = 1;
 
 // === اختبار اعتماد الاسم اليدوي بدلاً من مجهول ===
 console.log('\n👤 اختبار معيار اعتماد الاسم اليدوي:');
