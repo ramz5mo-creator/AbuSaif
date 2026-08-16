@@ -30,5 +30,11 @@ assert.equal(getReviewResolution('2').action, 'reject');
 const sheetsSource = readFileSync(new URL('./sheets.js', import.meta.url), 'utf8');
 assert.match(sheetsSource, /updateOrderDetailStatus\(transactionId, \{ status: 'أضيف للطلبات' \}\)/);
 assert.match(sheetsSource, /updateOrderDetailStatus\(transactionId, \{ status: 'لا يضاف' \}\)/);
+assert.match(sheetsSource, /async function applyManualReviewDecision/);
+assert.match(sheetsSource, /const transactionId = `MANUAL_\$\{reviewId\}`/);
+assert.match(sheetsSource, /const quantity = 1/);
+assert.match(sheetsSource, /قرار 1: أضيفت العملية يدوياً بكمية 1/);
+assert.match(sheetsSource, /قرار 1: العملية مضافة مسبقاً ولم تُكرر/);
+assert.match(sheetsSource, /قرار 2: لم تُضف العملية/);
 
 console.log('✅ اختبار تدفق مراجعة العمليات: نجح');

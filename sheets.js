@@ -1620,16 +1620,107 @@ async function findTransactionByIdForReview(transactionId) {
   return null;
 }
 
-/** يطبق القرار الصريح مرة واحدة على العملية القائمة، ولا ينشئ حركة جديدة مكررة. */
-async function applyOperationReviewDecision(reviewId, resolution) {
-  if (resolution.action === 'reject' && !String(reviewId || '').startsWith('REVIEW_')) {
-    return { success: true, note: 'قرار 2: لا توجد حركة تلقائية مرتبطة بهذه المراجعة، لذلك لم تُضف' };
+/**
+ * ينفذ قرار المراجعة اليدوي للصفوف التي لا تملك حركة أصلية.
+ * كل صف مراجعة يمثل تأكيد كابتن واحد؛ لذلك يعتمد القرار 1 كمية واحدة فقط.
+ */
+async function applyManualReviewDecision(reviewId, resolution, reviewData = {}) {
+  const transactionId = `MANUAL_${reviewId}`;
+  const existing = await findTransactionByIdForReview(transactionId);
+  const producerPhone = String(reviewData.producerPhone || '').trim();
+  const captainPhone = String(reviewData.captainPhone || '').trim();
+  const groupPrefix = String(reviewData.groupPrefix || '').trim();
+
+  if (resolution.action === 'reject') {
+    if (!existing || existing.isCancelled) {
+      return { success: true, note: 'قرار 2: لم تُضف العملية' };
+    }
+    await updateTotalsProduction(existing.producerPhone, -existing.quantity, existing.groupPrefix, 'قرار 2 مراجعة يدوية');
+    await updateTotalsReception(existing.captainPhone, -existing.quantity, existing.groupPrefix, 'قرار 2 مراجعة يدوية');
+    await updateTransactionStatus(existing.rowIndex, {
+      status: 'ملغى', quantity: 0,
+      notes: `${existing.notes} | قرار 2: أُلغي الإدخال اليدوي`,
+    });
+    await updateOrderDetailStatus(transactionId, { status: 'لا يضاف', quantity: 0 });
+    await logEdit({
+      editorPhone: 'مراجعة يدوية', editorName: 'قرار 2',
+      producerPhone: existing.producerPhone, captainPhone: existing.captainPhone,
+      oldQuantity: existing.quantity, newQuantity: 0,
+      notes: `إلغاء إدخال يدوي من المراجعة: ${reviewId}`,
+    });
+    return { success: true, note: 'قرار 2: لم تُضف العملية' };
   }
+
+  if (!producerPhone || !captainPhone) {
+    return { success: false, note: 'تعذر الإضافة: رقم المنتج أو الكابتن غير موجود في صف المراجعة' };
+  }
+
+  if (existing && !existing.isCancelled) {
+    await updateOrderDetailStatus(transactionId, { status: 'أضيف للطلبات', quantity: existing.quantity || 1 });
+    return { success: true, note: 'قرار 1: العملية مضافة مسبقاً ولم تُكرر' };
+  }
+
+  const quantity = 1;
+  if (existing?.isCancelled) {
+    await updateTotalsProduction(existing.producerPhone, quantity, existing.groupPrefix, 'قرار 1 مراجعة يدوية');
+    await updateTotalsReception(existing.captainPhone, quantity, existing.groupPrefix, 'قرار 1 مراجعة يدوية');
+    await updateTransactionStatus(existing.rowIndex, {
+      status: 'نشط', quantity,
+      notes: `${existing.notes} | قرار 1: إعادة اعتماد الإدخال اليدوي`,
+    });
+    await updateOrderDetailStatus(transactionId, { status: 'أضيف للطلبات', quantity });
+    await logEdit({
+      editorPhone: 'مراجعة يدوية', editorName: 'قرار 1',
+      producerPhone: existing.producerPhone, captainPhone: existing.captainPhone,
+      oldQuantity: 0, newQuantity: quantity,
+      notes: `إعادة اعتماد إدخال يدوي من المراجعة: ${reviewId}`,
+    });
+    return { success: true, note: 'قرار 1: أضيفت العملية يدوياً بكمية 1' };
+  }
+
+  await updateTotalsProduction(producerPhone, quantity, groupPrefix, 'قرار 1 مراجعة يدوية');
+  await updateTotalsReception(captainPhone, quantity, groupPrefix, 'قرار 1 مراجعة يدوية');
+  await recordTransaction({
+    transactionId,
+    timestamp: reviewData.timestamp || new Date().toISOString(),
+    producerPhone,
+    captainPhone,
+    quantity,
+    type: 'اعتماد يدوي من المراجعة',
+    emoji: '1️⃣',
+    groupPrefix,
+    messageId: reviewData.referenceId || '',
+    status: 'نشط',
+    notes: `قرار 1 يدوي | ${reviewData.reason || 'مراجعة عملية'} | reviewId=${reviewId}`,
+  });
+  await upsertOrderDetails({
+    transactionId,
+    timestamp: reviewData.timestamp || new Date().toISOString(),
+    groupPrefix,
+    producerName: 'قرار مراجعة', producerPhone,
+    captainName: 'قرار مراجعة', captainPhone,
+    quantity,
+    orderText: reviewData.reason || 'اعتماد يدوي من المراجعة',
+    tamText: reviewData.notes || 'قرار المستخدم رقم 1',
+    emoji: '1️⃣',
+    status: 'أضيف للطلبات',
+    tamMessageId: reviewData.referenceId || '',
+    orderMessageId: reviewData.referenceId || '',
+    source: 'manual-review',
+    notes: `اعتماد يدوي للمراجعة ${reviewId}`,
+  });
+  await logEdit({
+    editorPhone: 'مراجعة يدوية', editorName: 'قرار 1',
+    producerPhone, captainPhone, oldQuantity: 0, newQuantity: quantity,
+    notes: `إضافة يدوية من المراجعة: ${reviewId}`,
+  });
+  return { success: true, note: 'قرار 1: أضيفت العملية يدوياً بكمية 1' };
+}
+
+/** يطبق القرار الصريح مرة واحدة على العملية القائمة أو على اعتماد يدوي اختاره المستخدم. */
+async function applyOperationReviewDecision(reviewId, resolution, reviewData = {}) {
   if (!String(reviewId || '').startsWith('REVIEW_')) {
-    return {
-      success: false,
-      note: 'تعذر الإضافة: لا توجد كمية مكتملة، ولن ينشئ النظام حركة تخمينية',
-    };
+    return applyManualReviewDecision(reviewId, resolution, reviewData);
   }
 
   const transactionId = reviewId.slice('REVIEW_'.length);
@@ -1691,7 +1782,15 @@ async function syncOperationReviewResponses() {
       const resolution = getReviewResolution(answer);
       if (!resolution || (row[7] === resolution.status && row[9] === resolution.note)) continue;
 
-      const applied = await applyOperationReviewDecision(row[0], resolution);
+      const applied = await applyOperationReviewDecision(row[0], resolution, {
+        timestamp: row[1] || '',
+        groupPrefix: row[2] || '',
+        referenceId: row[4] || '',
+        reason: row[5] || '',
+        notes: row[9] || '',
+        producerPhone: row[10] || '',
+        captainPhone: row[11] || '',
+      });
       const status = applied.success
         ? resolution.status
         : (resolution.action === 'approve' ? 'تعذر الإضافة' : 'تعذر عدم الإضافة');
