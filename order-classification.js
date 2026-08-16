@@ -38,11 +38,11 @@ function extractDeliveryOrderDetails(value) {
   const text = normalizeOrderText(value);
   if (!text) return { from: '', to: '', payment: null, delivery: null, isComplete: false };
 
-  const routeMatch = /(?:^|[\n،,;]\s*|\s)(?:(?:تكسي|تاكسي)\s+)?(?:من\s+)?(.+?)\s+(?:الى|الي|لل|لـ|ل)\s*(.+?)(?=\s*(?:[\n،,;]|(?:دفع|الدفع|توصيل|التوصيله|مقطوع|المقطوع|سعر|اجره|استلام|تسليم)\s*[:：=-]?\s*\d|\d+(?:\.\d+)?\s+مقطوع)|$)/i.exec(text);
+  const routeMatch = /(?:^|[\n،,;]\s*|\s)(?:(?:تكسي|تاكسي)\s+)?(?:من\s+)?(.+?)\s+(?:الى|الي|لل|لـ|ل)\s*(.+?)(?=\s*(?:[\n،,;]|(?:دفع|الدفع|توصيل|توصيلك|التوصيله|مقطوع|المقطوع|سعر|اجره|استلام|تسليم)\s*[:：=-]?\s*\d|\d+(?:\.\d+)?\s+مقطوع)|$)/i.exec(text);
   const from = (routeMatch?.[1] || '').trim();
   const to = (routeMatch?.[2] || '').trim();
   const payment = extractLabeledAmount(text, ['دفع', 'الدفع']);
-  let delivery = extractLabeledAmount(text, ['توصيل', 'التوصيله', 'مقطوع', 'المقطوع', 'سعر', 'اجره']);
+  let delivery = extractLabeledAmount(text, ['توصيل', 'توصيلك', 'التوصيله', 'مقطوع', 'المقطوع', 'سعر', 'اجره']);
   if (delivery === null) {
     const fixedFareMatch = /(\d+(?:\.\d+)?)\s+مقطوع/.exec(text);
     delivery = toAmount(fixedFareMatch?.[1]);
@@ -78,19 +78,26 @@ function classifyOriginalOrder({ text, messageType = 'text', isVoiceOrder = fals
 
   const hasOrderAssignment = /(?:معك|عندك)\s*(?:\d+\s*)?(?:طلب|طلبات)/.test(normalized);
   const deliveryDetails = extractDeliveryOrderDetails(normalized);
-  // قرار المستخدم: ذكر «توصيل» أو «دفع» يكفي لاعتبار الرسالة طلباً مرشحاً؛
+  // قرار المستخدم: ذكر «توصيل» أو «توصيلك» أو «دفع» يكفي لاعتبار الرسالة طلباً مرشحاً؛
   // لا تنشأ حركة إلا لاحقاً مع رد الكابتن المقتبس وإيموجي كمية مخوّل.
   // يبقى فحص التحذيرات والإعلانات أعلاه سابقاً على هذا الاستثناء.
-  const hasDeliveryOrPaymentKeyword = /(?:^|[\s،,:;])(?:توصيل(?:ه)?|دفع|الدفع)(?=$|[\s،,:;\d])/.test(normalized);
+  const hasDeliveryOrPaymentKeyword = /(?:^|[\s،,:;])(?:توصيل(?:ه|ك)?|دفع|الدفع)(?=$|[\s،,:;\d])/.test(normalized);
+  // لا تكفي القيمة الرقمية وحدها؛ لا بد من مسار واضح بين منطقتين أو من سياق توصيل.
+  // فحص المنشورات العامة يقع أعلاه، لذلك لا يتحول الإعلان الرقمي إلى طلب.
+  const hasNumericValue = /\d+(?:\.\d+)?/.test(normalized);
+  const hasRouteContext = Boolean(deliveryDetails.from && deliveryDetails.to);
+  const hasNumericOrderContext = hasNumericValue && (hasRouteContext || hasDeliveryOrPaymentKeyword);
 
-  if (hasOrderAssignment || deliveryDetails.isComplete || hasDeliveryOrPaymentKeyword) {
+  if (hasOrderAssignment || deliveryDetails.isComplete || hasDeliveryOrPaymentKeyword || hasNumericOrderContext) {
     return {
       classification: 'valid',
       reason: hasOrderAssignment
         ? 'explicit-order-assignment'
         : deliveryDetails.isComplete
           ? 'complete-route-and-delivery'
-          : 'delivery-or-payment-keyword',
+          : hasDeliveryOrPaymentKeyword
+            ? 'delivery-or-payment-keyword'
+            : 'numeric-value-with-route-context',
       deliveryDetails,
     };
   }
