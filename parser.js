@@ -27,7 +27,7 @@ const processedIds = new Set();
 // كلمات الاستلام المستقلة فقط (تُحدّث من Google Sheets).
 // الرد المقتبس على طلب نصي يقبل بأي نص؛ أما هذه الكلمات فتمنع رسائل التأكيد
 // الشائعة إذا أُرسلت بلا رد من التحول إلى طلب أصلي بالخطأ.
-const standaloneConfirmationWords = ['تم', 'تا', 'ت', 'tam', 'tm'];
+const standaloneConfirmationWords = ['تم', 'تمم', 'تا', 'ت', 'tam', 'tm'];
 let acceptWords = [...new Set([...config.defaultAcceptWords, ...standaloneConfirmationWords])];
 
 function updateAcceptWords(words) {

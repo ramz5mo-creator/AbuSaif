@@ -108,6 +108,7 @@ quantityTests.forEach(({ input, expected }) => {
 console.log('\n📝 اختبار كلمات الاستلام:');
 const acceptTests = [
   { input: 'تم', expected: true },
+  { input: 'تمم', expected: true },
   { input: 'تم 👇', expected: true },
   { input: 'تا', expected: true },
   { input: 'ت', expected: true },
@@ -134,6 +135,7 @@ acceptTests.forEach(({ input, expected }) => {
 console.log('\n🚫 اختبار منع التأكيد الذاتي بلا طلب:');
 const standaloneAcceptTests = [
   { text: 'تم', isReply: false, expected: true, label: 'تم مستقلة تُهمل' },
+  { text: 'تمم', isReply: false, expected: true, label: 'تمم مستقلة تُهمل' },
   { text: 'تم', isReply: true, expected: false, label: 'تم رداً على طلب تبقى صالحة' },
   { text: 'طلب الجبيهة', isReply: false, expected: false, label: 'طلب أصلي لا يُهمل' },
 ];
@@ -247,6 +249,12 @@ const originalOrderClassificationTests = [
     expected: 'valid',
     expectedReason: 'numeric-value-with-two-free-route-areas',
     label: 'منطقتان حرتان مفصولتان بأسطر مع رقم تصبحان طلباً مؤهلاً',
+  },
+  {
+    input: { text: 'معك كمان 3 طلبات' },
+    expected: 'valid',
+    expectedReason: 'additional-order-assignment',
+    label: 'معك كمان 3 طلبات تصبح طلباً مستقلاً مؤهلاً',
   },
   {
     input: { text: 'ماركا الجنوبية المقابلين' },
@@ -589,7 +597,7 @@ async function runStickerRuntimeTests() {
 
 async function runQuotedTextReplyRuntimeTests() {
   console.log('\n🔬 اختبار قبول أي رد نصي مقتبس على طلب نصي:');
-  const replies = ['تم', 'تم 👇', 'تا', 'ت', 'تم ٢٠', 'تم رابية', 'tam', 'tm', 'باصي'];
+  const replies = ['تم', 'تمم', 'تم 👇', 'تا', 'ت', 'تم ٢٠', 'تم رابية', 'tam', 'tm', 'باصي'];
   const results = await Promise.all(replies.map((text, index) => parser.processMessage({
     key: {
       id: `test-general-text-reply-${index}`,
@@ -616,6 +624,31 @@ async function runQuotedTextReplyRuntimeTests() {
   );
   console.log(`  ${accepted ? '✅' : '❌'} تم، تم 👇، تا، ت، تم ٢٠، تم رابية، tam، tm وأي نص مقتبس تصل كتأكيد مبدئي`);
   if (!accepted) process.exitCode = 1;
+
+  const additionalOrderReply = await parser.processMessage({
+    key: {
+      id: 'test-additional-order-captain-reply',
+      remoteJid: 'test-group@g.us',
+      participant: '962798765433@s.whatsapp.net',
+      fromMe: false,
+    },
+    message: {
+      extendedTextMessage: {
+        text: 'تم',
+        contextInfo: {
+          participant: '962798765432@s.whatsapp.net',
+          stanzaId: 'test-additional-order-message',
+          quotedMessage: { conversation: 'معك كمان 3 طلبات' },
+        },
+      },
+    },
+  }, null);
+  const additionalOrderAccepted = additionalOrderReply?.type === 'accept' &&
+    additionalOrderReply?.orderClassification === 'valid' &&
+    additionalOrderReply?.orderClassificationReason === 'additional-order-assignment' &&
+    additionalOrderReply?.quotedMessageId === 'test-additional-order-message';
+  console.log(`  ${additionalOrderAccepted ? '✅' : '❌'} معك كمان 3 طلبات → تم مقتبس يصل لمسار إيموجي الكمية`);
+  if (!additionalOrderAccepted) process.exitCode = 1;
 
   // صيغ تشغيلية فعلية اعتمدها المستخدم: لا نبحث عن كلمة ثابتة ما دامت الرسالة
   // رداً مقتبساً مباشراً على طلب مؤهل؛ إيموجي الكمية المخوّل يبقى شرط التسجيل المالي.

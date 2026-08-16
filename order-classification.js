@@ -107,6 +107,8 @@ function classifyOriginalOrder({ text, messageType = 'text', isVoiceOrder = fals
   }
 
   const hasOrderAssignment = /(?:معك|عندك)\s*(?:\d+\s*)?(?:طلب|طلبات)/.test(normalized);
+  // صيغة متابعة طلب مؤكد: «معك كمان 3 طلبات». تعد طلباً مستقلاً بالقيمة المذكورة.
+  const hasAdditionalOrderAssignment = /(?:معك|عندك)\s*(?:كمان|ايضا)\s*(?:\d+\s*)?(?:طلب|طلبات)/.test(normalized);
   const deliveryDetails = extractDeliveryOrderDetails(normalized);
   // قرار المستخدم: ذكر «توصيل» أو «توصيلك» أو «دفع» يكفي لاعتبار الرسالة طلباً مرشحاً؛
   // لا تنشأ حركة إلا لاحقاً مع رد الكابتن المقتبس وإيموجي كمية مخوّل.
@@ -122,10 +124,12 @@ function classifyOriginalOrder({ text, messageType = 'text', isVoiceOrder = fals
   const hasFreeRouteWithNumber = hasNumericValue && freeRouteAreas.length >= 2;
   const hasNumericOrderContext = hasNumericValue && (hasRouteContext || hasDeliveryOrPaymentKeyword || hasFreeRouteWithNumber);
 
-  if (hasOrderAssignment || deliveryDetails.isComplete || hasDeliveryOrPaymentKeyword || hasNumericOrderContext) {
+  if (hasOrderAssignment || hasAdditionalOrderAssignment || deliveryDetails.isComplete || hasDeliveryOrPaymentKeyword || hasNumericOrderContext) {
     return {
       classification: 'valid',
-      reason: hasOrderAssignment
+      reason: hasAdditionalOrderAssignment
+        ? 'additional-order-assignment'
+        : hasOrderAssignment
         ? 'explicit-order-assignment'
         : deliveryDetails.isComplete
           ? 'complete-route-and-delivery'
