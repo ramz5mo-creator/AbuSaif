@@ -237,6 +237,23 @@ const originalOrderClassificationTests = [
     label: 'رقم عربي مع مسار بين منطقتين يصبح طلباً مؤهلاً',
   },
   {
+    input: { text: 'سلط دبابنه ٠\nبيادر ٥' },
+    expected: 'valid',
+    expectedReason: 'numeric-value-with-two-free-route-areas',
+    label: 'منطقتان حرتان مع رقم تصبحان طلباً مؤهلاً',
+  },
+  {
+    input: { text: 'ماركا الجنوبية\nالمقابلين\n٣' },
+    expected: 'valid',
+    expectedReason: 'numeric-value-with-two-free-route-areas',
+    label: 'منطقتان حرتان مفصولتان بأسطر مع رقم تصبحان طلباً مؤهلاً',
+  },
+  {
+    input: { text: 'ماركا الجنوبية المقابلين' },
+    expected: 'review',
+    label: 'منطقتان بلا رقم لا تصبحان طلباً تلقائياً',
+  },
+  {
     input: { text: 'إعلان: خدمة توصيل جديدة للجميع' },
     expected: 'invalid',
     label: 'إعلان يذكر توصيل يبقى مرفوضاً',
@@ -262,11 +279,11 @@ const originalOrderClassificationTests = [
     label: 'التسجيل الصوتي يبقى مؤهلاً وفق قاعدته الخاصة',
   },
 ];
-originalOrderClassificationTests.forEach(({ input, expected, label }) => {
+originalOrderClassificationTests.forEach(({ input, expected, expectedReason, label }) => {
   const result = classifyOriginalOrder(input);
-  const status = result.classification === expected ? '✅' : '❌';
+  const status = result.classification === expected && (!expectedReason || result.reason === expectedReason) ? '✅' : '❌';
   console.log(`  ${status} ${label} (${result.classification})`);
-  if (result.classification !== expected) process.exitCode = 1;
+  if (result.classification !== expected || (expectedReason && result.reason !== expectedReason)) process.exitCode = 1;
 });
 
 // === اختبار صيغ التوصيل الطبيعية بلا كلمة «طلب» ===

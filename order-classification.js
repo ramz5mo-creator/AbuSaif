@@ -28,6 +28,36 @@ function extractLabeledAmount(text, labels) {
   return toAmount(match?.[1]);
 }
 
+// أسماء مناطق شائعة في صياغات الطلبات الحرة. لا يكفي الاسم وحده: يلزم منطقتان مختلفتان ورقم.
+// تُفحص التحذيرات والإعلانات قبل استعمال هذه القائمة في classifyOriginalOrder.
+const FREE_ROUTE_LOCALITIES = [
+  { key: 'السابع', terms: ['السابع', 'سابع'] },
+  { key: 'الملكية', terms: ['الملكيه', 'ملكيه'] },
+  { key: 'غوشة', terms: ['غوشه'] },
+  { key: 'السلط', terms: ['السلط', 'سلط'] },
+  { key: 'الدبابنة', terms: ['الدبابنه', 'دبابنه'] },
+  { key: 'البيادر', terms: ['البيادر', 'بيادر'] },
+  { key: 'ماركا الجنوبية', terms: ['ماركا الجنوبيه', 'ماركا'] },
+  { key: 'المقابلين', terms: ['المقابلين'] },
+  { key: 'الرابية', terms: ['الرابيه', 'رابيه'] },
+  { key: 'عبدون', terms: ['عبدون'] },
+  { key: 'خلدا', terms: ['خلدا'] },
+  { key: 'الجبيهة', terms: ['الجبيهه', 'جبيهه'] },
+  { key: 'الصويفية', terms: ['الصويفيه', 'صويفيه'] },
+  { key: 'النخيل', terms: ['النخيل'] },
+  { key: 'جبل النظيف', terms: ['جبل النظيف'] },
+  { key: 'الحسين', terms: ['الحسين'] },
+  { key: 'خدا', terms: ['خدا'] },
+];
+
+/** يستخرج منطقتين مستقلتين من نص حر لا يستعمل «من/إلى». */
+function extractFreeRouteAreas(value) {
+  const searchable = ` ${normalizeOrderText(value).replace(/[،,;:()\-–—]+/g, ' ')} `;
+  return FREE_ROUTE_LOCALITIES
+    .filter(({ terms }) => terms.some(term => searchable.includes(` ${term} `)))
+    .map(({ key }) => key);
+}
+
 /**
  * يستخرج بيانات التوصيل من صياغة طبيعية؛ لا يتطلب كلمة «طلب».
  * مثالان مدعومان:
@@ -86,7 +116,11 @@ function classifyOriginalOrder({ text, messageType = 'text', isVoiceOrder = fals
   // فحص المنشورات العامة يقع أعلاه، لذلك لا يتحول الإعلان الرقمي إلى طلب.
   const hasNumericValue = /\d+(?:\.\d+)?/.test(normalized);
   const hasRouteContext = Boolean(deliveryDetails.from && deliveryDetails.to);
-  const hasNumericOrderContext = hasNumericValue && (hasRouteContext || hasDeliveryOrPaymentKeyword);
+  // صيغة الجروبات الحرة: منطقتان مع رقم حتى إن لم تستعمل «من/إلى» أو كلمة توصيل.
+  // لا يترتب عليها رصيد بمفردها؛ ما زال يلزم رد كابتن مقتبس وإيموجي كمية مخوّل لاحقاً.
+  const freeRouteAreas = extractFreeRouteAreas(normalized);
+  const hasFreeRouteWithNumber = hasNumericValue && freeRouteAreas.length >= 2;
+  const hasNumericOrderContext = hasNumericValue && (hasRouteContext || hasDeliveryOrPaymentKeyword || hasFreeRouteWithNumber);
 
   if (hasOrderAssignment || deliveryDetails.isComplete || hasDeliveryOrPaymentKeyword || hasNumericOrderContext) {
     return {
@@ -97,7 +131,9 @@ function classifyOriginalOrder({ text, messageType = 'text', isVoiceOrder = fals
           ? 'complete-route-and-delivery'
           : hasDeliveryOrPaymentKeyword
             ? 'delivery-or-payment-keyword'
-            : 'numeric-value-with-route-context',
+            : hasFreeRouteWithNumber
+              ? 'numeric-value-with-two-free-route-areas'
+              : 'numeric-value-with-route-context',
       deliveryDetails,
     };
   }
@@ -105,4 +141,4 @@ function classifyOriginalOrder({ text, messageType = 'text', isVoiceOrder = fals
   return { classification: 'review', reason: 'insufficient-order-evidence', deliveryDetails };
 }
 
-module.exports = { classifyOriginalOrder, extractDeliveryOrderDetails, normalizeOrderText };
+module.exports = { classifyOriginalOrder, extractDeliveryOrderDetails, extractFreeRouteAreas, normalizeOrderText };
