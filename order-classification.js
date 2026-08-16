@@ -28,8 +28,8 @@ function extractLabeledAmount(text, labels) {
   return toAmount(match?.[1]);
 }
 
-// أسماء مناطق شائعة في صياغات الطلبات الحرة. لا يكفي الاسم وحده: يلزم منطقتان مختلفتان ورقم.
-// تُفحص التحذيرات والإعلانات قبل استعمال هذه القائمة في classifyOriginalOrder.
+// أسماء شائعة لتحسين التعرّف فقط؛ لا يشترط النظام أن تكون المنطقة ضمن هذه القائمة.
+// يُستكمل ذلك بمعيار عام لاستخراج عبارتين مكانيّتين مرتبطتين برقم.
 const FREE_ROUTE_LOCALITIES = [
   { key: 'السابع', terms: ['السابع', 'سابع'] },
   { key: 'أم السماق', terms: ['ام السماق', 'ام السمانق'] },
@@ -52,12 +52,28 @@ const FREE_ROUTE_LOCALITIES = [
   { key: 'خدا', terms: ['خدا'] },
 ];
 
-/** يستخرج منطقتين مستقلتين من نص حر لا يستعمل «من/إلى». */
+/** يستخرج مناطق معروفة من نص حر لا يستعمل «من/إلى». */
 function extractFreeRouteAreas(value) {
   const searchable = ` ${normalizeOrderText(value).replace(/[،,;:()\-–—]+/g, ' ')} `;
   return FREE_ROUTE_LOCALITIES
     .filter(({ terms }) => terms.some(term => searchable.includes(` ${term} `)))
     .map(({ key }) => key);
+}
+
+/**
+ * يستخرج أي عبارتين مكانيّتين ظاهرياً من صيغة «اسم موقع ... رقم».
+ * العبارة من كلمة إلى ثلاث كلمات عربية أمام رقم، ولا يشترط أن تكون ضمن قائمة أسماء.
+ * لا ينشئ هذا الدليل أي رصيد بمفرده؛ الرد المقتبس والإيموجي المخوّل ما زالا إلزاميين.
+ */
+function extractNumberedRouteAreaCandidates(value) {
+  const searchable = normalizeOrderText(value).replace(/[،,;:()\-–—]+/g, ' ');
+  const pattern = /(?:^|\s)((?:\p{L}{2,}\s+){1,3})\d+(?:\.\d+)?(?=\s|$)/gu;
+  const areas = [];
+  for (const match of searchable.matchAll(pattern)) {
+    const candidate = match[1].trim().replace(/\s+/g, ' ');
+    if (candidate && !areas.includes(candidate)) areas.push(candidate);
+  }
+  return areas;
 }
 
 /**
@@ -103,6 +119,7 @@ function classifyOriginalOrder({ text, messageType = 'text', isVoiceOrder = fals
   const generalPostTerms = [
     'تحذير', 'تنبيه', 'اعلان', 'قواعد', 'تعليمات', 'نظامنا', 'نظام ',
     'عموله', 'اشتراك', 'كشفك', 'الخطوات', 'ممنوع', 'سياسه', 'مؤسسه',
+    'عرض', 'خصم', 'خدمه توصيل',
   ];
   if (/https?:\/\/|www\./i.test(normalized) || generalPostTerms.some(term => normalized.includes(term))) {
     return { classification: 'invalid', reason: 'general-post-or-announcement' };
@@ -120,10 +137,13 @@ function classifyOriginalOrder({ text, messageType = 'text', isVoiceOrder = fals
   // فحص المنشورات العامة يقع أعلاه، لذلك لا يتحول الإعلان الرقمي إلى طلب.
   const hasNumericValue = /\d+(?:\.\d+)?/.test(normalized);
   const hasRouteContext = Boolean(deliveryDetails.from && deliveryDetails.to);
-  // صيغة الجروبات الحرة: منطقتان مع رقم حتى إن لم تستعمل «من/إلى» أو كلمة توصيل.
+  // صيغة الجروبات الحرة: أي منطقتين مع رقم، سواء كانتا ضمن قائمة معروفة أم لا.
   // لا يترتب عليها رصيد بمفردها؛ ما زال يلزم رد كابتن مقتبس وإيموجي كمية مخوّل لاحقاً.
-  const freeRouteAreas = extractFreeRouteAreas(normalized);
-  const hasFreeRouteWithNumber = hasNumericValue && freeRouteAreas.length >= 2;
+  const knownFreeRouteAreas = extractFreeRouteAreas(normalized);
+  const numberedRouteAreaCandidates = extractNumberedRouteAreaCandidates(normalized);
+  const hasFreeRouteWithNumber = hasNumericValue && (
+    knownFreeRouteAreas.length >= 2 || numberedRouteAreaCandidates.length >= 2
+  );
   const hasNumericOrderContext = hasNumericValue && (hasRouteContext || hasDeliveryOrPaymentKeyword || hasFreeRouteWithNumber);
 
   if (hasOrderAssignment || hasAdditionalOrderAssignment || deliveryDetails.isComplete || hasDeliveryOrPaymentKeyword || hasNumericOrderContext) {
@@ -147,4 +167,10 @@ function classifyOriginalOrder({ text, messageType = 'text', isVoiceOrder = fals
   return { classification: 'review', reason: 'insufficient-order-evidence', deliveryDetails };
 }
 
-module.exports = { classifyOriginalOrder, extractDeliveryOrderDetails, extractFreeRouteAreas, normalizeOrderText };
+module.exports = {
+  classifyOriginalOrder,
+  extractDeliveryOrderDetails,
+  extractFreeRouteAreas,
+  extractNumberedRouteAreaCandidates,
+  normalizeOrderText,
+};

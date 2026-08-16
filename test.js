@@ -263,6 +263,12 @@ const originalOrderClassificationTests = [
     label: 'البيادر والسيتي مول مع أرقام عربية تصبح طلباً مؤهلاً لا مراجعة',
   },
   {
+    input: { text: 'مدينة النصر 5\nالجامعة 3\nاكسسوارات سيارات' },
+    expected: 'valid',
+    expectedReason: 'numeric-value-with-two-free-route-areas',
+    label: 'أي منطقتين غير مدرجتين مسبقاً مع رقم تصبحان طلباً مؤهلاً',
+  },
+  {
     input: { text: 'معك كمان 3 طلبات' },
     expected: 'valid',
     expectedReason: 'additional-order-assignment',
@@ -282,6 +288,11 @@ const originalOrderClassificationTests = [
     input: { text: 'إعلان: خصم ٣ دنانير على خدمة التوصيل' },
     expected: 'invalid',
     label: 'إعلان يذكر قيمة رقمية وتوصيل يبقى مرفوضاً',
+  },
+  {
+    input: { text: 'عرض خصم 3 دنانير على خدمة التوصيل 4' },
+    expected: 'invalid',
+    label: 'نص ترويجي بأرقام متعددة لا يتحول إلى طلب منطقتين',
   },
   {
     input: { text: '٣' },
