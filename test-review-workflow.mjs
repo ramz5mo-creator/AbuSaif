@@ -36,5 +36,9 @@ assert.match(sheetsSource, /const quantity = 1/);
 assert.match(sheetsSource, /قرار 1: أضيفت العملية يدوياً بكمية 1/);
 assert.match(sheetsSource, /قرار 1: العملية مضافة مسبقاً ولم تُكرر/);
 assert.match(sheetsSource, /قرار 2: لم تُضف العملية/);
+assert.match(sheetsSource, /const rowsToDelete = \[\]/);
+assert.match(sheetsSource, /rowsToDelete\s*\.sort\(\(a, b\) => b - a\)/);
+assert.match(sheetsSource, /deleteDimension:/);
+assert.match(sheetsSource, /if \(applied\.success\) \{\s*rowsToDelete\.push\(rowNumber\)/);
 
 console.log('✅ اختبار تدفق مراجعة العمليات: نجح');

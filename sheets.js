@@ -1766,7 +1766,7 @@ async function applyOperationReviewDecision(reviewId, resolution, reviewData = {
   return { success: true, note: resolution.note };
 }
 
-/** يقرأ قرار 1 أو 2 ويطبق الأثر مرة واحدة، ثم يوثق النتيجة في نفس صف المراجعة. */
+/** يقرأ قرار 1 أو 2 ويطبق الأثر مرة واحدة، ثم يزيل صف المراجعة المعالج من القائمة. */
 async function syncOperationReviewResponses() {
   if (!isInitialized) return { updated: 0 };
   const sheetName = getOperationReviewsSheetName();
@@ -1775,12 +1775,21 @@ async function syncOperationReviewResponses() {
     const response = await sheetsApi.spreadsheets.values.get({ spreadsheetId, range: `'${sheetName}'!A2:L` });
     const rows = response.data.values || [];
     let updated = 0;
+    // نحذف من الأسفل إلى الأعلى بعد انتهاء المعالجة، حتى لا تتغير أرقام الصفوف أثناء الحلقة.
+    const rowsToDelete = [];
 
     for (let index = 0; index < rows.length; index++) {
       const row = rows[index];
       const answer = normalizeReviewAnswer(row[6]);
       const resolution = getReviewResolution(answer);
-      if (!resolution || (row[7] === resolution.status && row[9] === resolution.note)) continue;
+      if (!resolution) continue;
+      const rowNumber = index + 2;
+
+      // تنظيف القرارات التي عولجت في إصدار سابق ولم تكن تُحذف من الورقة.
+      if (row[7] === resolution.status) {
+        rowsToDelete.push(rowNumber);
+        continue;
+      }
 
       const applied = await applyOperationReviewDecision(row[0], resolution, {
         timestamp: row[1] || '',
@@ -1791,10 +1800,15 @@ async function syncOperationReviewResponses() {
         producerPhone: row[10] || '',
         captainPhone: row[11] || '',
       });
+      if (applied.success) {
+        rowsToDelete.push(rowNumber);
+        updated++;
+        continue;
+      }
+
       const status = applied.success
         ? resolution.status
         : (resolution.action === 'approve' ? 'تعذر الإضافة' : 'تعذر عدم الإضافة');
-      const rowNumber = index + 2;
       await sheetsApi.spreadsheets.values.update({
         spreadsheetId,
         range: `'${sheetName}'!H${rowNumber}:J${rowNumber}`,
@@ -1802,6 +1816,38 @@ async function syncOperationReviewResponses() {
         requestBody: { values: [[status, formatJordanDateTime(), applied.note || resolution.note]] },
       });
       updated++;
+    }
+
+    if (rowsToDelete.length > 0) {
+      const metadata = await sheetsApi.spreadsheets.get({
+        spreadsheetId,
+        fields: 'sheets.properties(sheetId,title)',
+      });
+      const reviewSheet = (metadata.data.sheets || [])
+        .find((sheet) => sheet.properties?.title === sheetName);
+      const reviewSheetId = reviewSheet?.properties?.sheetId;
+      if (reviewSheetId === undefined) {
+        throw new Error(`تعذر تحديد معرّف ورقة المراجعة: ${sheetName}`);
+      }
+
+      await sheetsApi.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: {
+          requests: rowsToDelete
+            .sort((a, b) => b - a)
+            .map((rowNumber) => ({
+              deleteDimension: {
+                range: {
+                  sheetId: reviewSheetId,
+                  dimension: 'ROWS',
+                  startIndex: rowNumber - 1,
+                  endIndex: rowNumber,
+                },
+              },
+            })),
+        },
+      });
+      logger.info('🧹 حُذفت صفوف مراجعة معالجة', { count: rowsToDelete.length });
     }
     return { updated };
   } catch (error) {
