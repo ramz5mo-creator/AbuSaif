@@ -98,11 +98,13 @@ if (!fullDatePassed) process.exitCode = 1;
 // === اختبار تحويل إيموجيات الأرقام ===
 console.log('🔢 اختبار تحويل إيموجيات الأرقام:');
 const emojiTests = [
+  { input: '2️⃣', expected: 2 },
   { input: '2️⃣2️⃣', expected: 22 },
   { input: '1️⃣5️⃣', expected: 15 },
   { input: '5️⃣', expected: 5 },
   { input: '8️⃣', expected: 8 },
   { input: '🔟', expected: 10 },
+  { input: '1️⃣2️⃣', expected: 12 },
   { input: '3️⃣0️⃣', expected: 30 },
 ];
 
@@ -116,9 +118,11 @@ emojiTests.forEach(({ input, expected }) => {
 console.log('\n📊 اختبار استخراج الكمية:');
 const quantityTests = [
   { input: '👍', expected: 1 },
+  { input: '2️⃣', expected: 2 },
   { input: '15', expected: 15 },
   { input: '2️⃣2️⃣', expected: 22 },
   { input: '8️⃣', expected: 8 },
+  { input: '1️⃣2️⃣', expected: 12 },
   { input: 'تم 5', expected: 5 },
   { input: '', expected: 1 },
   { input: 'هات 10', expected: 10 },
@@ -884,7 +888,9 @@ async function runDirectOrderEmojiStateTest() {
     tamText: 'تمم',
   });
   const replyLink = whatsapp.getLatestReplyForOrder(orderMessageId);
+  const producerTwo = whatsapp.setDirectOrderEmoji(orderMessageId, '962798765432', '2️⃣', parser.extractQuantity('2️⃣'));
   const producerEight = whatsapp.setDirectOrderEmoji(orderMessageId, '962798765432', '8️⃣', parser.extractQuantity('8️⃣'));
+  const producerTwelve = whatsapp.setDirectOrderEmoji(orderMessageId, '962798765432', '1️⃣2️⃣', parser.extractQuantity('1️⃣2️⃣'));
   const finalState = whatsapp.getDirectOrderEmoji(orderMessageId);
   const correct =
     first?.quantity === 1 &&
@@ -892,10 +898,12 @@ async function runDirectOrderEmojiStateTest() {
     replyLink?.replyMessageId === replyMessageId &&
     replyLink?.producer === '962798765432' &&
     replyLink?.context?.tamText === 'تمم' &&
+    producerTwo?.quantity === 2 &&
     producerEight?.quantity === 8 &&
-    finalState?.quantity === 8 &&
-    finalState?.emoji === '8️⃣';
-  console.log(`  ${correct ? '✅' : '❌'} «معك طلب» + رد الكابتن «تمم» + 8️⃣ من المنتج تعني 8 فقط، مع بقاء مفتاح الحركة رد الكابتن`);
+    producerTwelve?.quantity === 12 &&
+    finalState?.quantity === 12 &&
+    finalState?.emoji === '1️⃣2️⃣';
+  console.log(`  ${correct ? '✅' : '❌'} «معك طلب» + «تمم» تقبل 2️⃣ أو 8️⃣ أو 1️⃣2️⃣؛ وآخر إيموجي كمية فقط هو المعتمد`);
   if (!correct) process.exitCode = 1;
   whatsapp.clearDirectOrderEmoji(orderMessageId);
 }
