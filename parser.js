@@ -669,6 +669,7 @@ async function processMessage(msg, sock) {
     quotedText: quotedText.substring(0, 200),
     quotedMessageId,
     orderClassification: orderClassification.classification,
+    confidenceLevel: orderClassification.confidenceLevel || (orderClassification.classification === 'invalid' ? 'blocked' : 'ambiguous'),
     orderClassificationReason: orderClassification.reason,
     deliveryOrderDetails: orderClassification.deliveryDetails || extractDeliveryOrderDetails(quotedText),
     isVoiceReply,

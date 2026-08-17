@@ -17,6 +17,7 @@ const {
   hasOperationReviewQuantityEmoji,
   isAdoptableManualName,
   getTodaySheetName,
+  buildEditAuditRow,
 } = require('./sheets');
 const serverSource = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
 
@@ -56,6 +57,48 @@ const legacyEmojiEvidence = buildReviewEvidenceFields({ emoji: '2️⃣' });
 const legacyEmojiEvidencePassed = legacyEmojiEvidence[2] === '2️⃣';
 console.log(`  ${legacyEmojiEvidencePassed ? '✅' : '❌'} يحفظ حقل emoji القديم في عمود إيموجي الكمية`);
 if (!legacyEmojiEvidencePassed) process.exitCode = 1;
+
+// === اختبار سجل التدقيق التفصيلي للإلغاء والاستبدال ===
+console.log('\n🧾 اختبار سجل تدقيق الإلغاء والاستبدال:');
+const auditRow = buildEditAuditRow({
+  editorPhone: '962799000111',
+  editorName: 'صاحب الطلب',
+  producerPhone: '962799000111',
+  captainPhone: '962788000222',
+  oldQuantity: 2,
+  newQuantity: 0,
+  transactionId: 'TX_AUDIT_1',
+  groupPrefix: 'السيف',
+  originalTimestamp: '2026-08-18T08:30:00.000Z',
+  orderMessageId: 'ORDER_AUDIT_1',
+  tamMessageId: 'TAM_AUDIT_1',
+  orderText: 'الرابية إلى الحسين توصيل 3',
+  captainReplyText: 'تم',
+  oldEmoji: '2️⃣',
+  newEmoji: '🙏',
+  eventType: 'استبدال إيموجي بغير كمي',
+  producerName: 'المنتج',
+  captainName: 'الكابتن',
+  notes: 'استبدال إيموجي كمية بغير كمي | الكمية: 2 → 0',
+}, {}, new Date('2026-08-18T09:00:00.000Z'));
+const auditRowCorrect = auditRow.length === 21 &&
+  auditRow[3] === '962799000111' && auditRow[4] === '962788000222' &&
+  auditRow[5] === 2 && auditRow[6] === 0 && auditRow[7] === -2 &&
+  auditRow[9] === 'TX_AUDIT_1' && auditRow[12] === 'ORDER_AUDIT_1' &&
+  auditRow[13] === 'TAM_AUDIT_1' && auditRow[14].includes('الرابية') &&
+  auditRow[15] === 'تم' && auditRow[16] === '2️⃣' && auditRow[17] === '🙏' &&
+  auditRow[18] === 'استبدال إيموجي بغير كمي' && auditRow[19] === 'المنتج' && auditRow[20] === 'الكابتن';
+console.log(`  ${auditRowCorrect ? '✅' : '❌'} الإزالة والاستبدال يوثقان الأطراف والنصوص والإيموجي والأوقات والكمية قبل/بعد`);
+if (!auditRowCorrect) process.exitCode = 1;
+
+const replacementRaceGuardCorrect = [
+  'EMOJI_REPLACEMENT_GRACE_MS',
+  'pendingEmojiReplace.set(replacementKey',
+  'تجاهل إزالة الإيموجي لأنها جزء من استبدال كمية موثق',
+  'استبدال إيموجي بغير كمي',
+].every(marker => serverSource.includes(marker));
+console.log(`  ${replacementRaceGuardCorrect ? '✅' : '❌'} استبدال 2️⃣ بإيموجي كمي آخر لا يُعكس كحذف ثانٍ، وغير الكمي يصفر بحدث تدقيق`);
+if (!replacementRaceGuardCorrect) process.exitCode = 1;
 
 const conversationSummary = buildConversationSummary({
   producerName: 'أحمد',
@@ -348,6 +391,37 @@ originalOrderClassificationTests.forEach(({ input, expected, expectedReason, lab
   if (result.classification !== expected || (expectedReason && result.reason !== expectedReason)) process.exitCode = 1;
 });
 
+// === اختبار مستويات الثقة الجديدة: النص يحدد الثقة لا وجود السلسلة ===
+console.log('\n🧩 اختبار قاعدة الطلبات متعددة الأدلة ومستويات الثقة:');
+const multiEvidenceConfidenceTests = [
+  {
+    input: { text: '@49560130949346 معك طلب باشا' },
+    expected: { classification: 'valid', confidenceLevel: 'clear' },
+    label: 'تكليف صريح بمستوى واضح',
+  },
+  {
+    input: { text: 'تكسي من رابية الي خدا 4 مقطوع' },
+    expected: { classification: 'valid', confidenceLevel: 'clear' },
+    label: 'صياغة طبيعية مكتملة بمستوى واضح',
+  },
+  {
+    input: { text: 'ماركا الجنوبية المقابلين' },
+    expected: { classification: 'review', confidenceLevel: 'ambiguous' },
+    label: 'نص مبهم لا يُرفض بل يطلب مراجعة عند اكتمال السلسلة',
+  },
+  {
+    input: { text: 'تحذير: ممنوع تأكيد الطلبات من دون رد مباشر' },
+    expected: { classification: 'invalid', confidenceLevel: 'blocked' },
+    label: 'التحذير محظور نهائياً',
+  },
+];
+multiEvidenceConfidenceTests.forEach(({ input, expected, label }) => {
+  const result = classifyOriginalOrder(input);
+  const passed = result.classification === expected.classification && result.confidenceLevel === expected.confidenceLevel;
+  console.log(`  ${passed ? '✅' : '❌'} ${label} (${result.classification}/${result.confidenceLevel})`);
+  if (!passed) process.exitCode = 1;
+});
+
 // === اختبار صيغ التوصيل الطبيعية بلا كلمة «طلب» ===
 console.log('\n🚕 اختبار استخراج صيغ المسار والدفع والتوصيل المختصرة:');
 const naturalDeliveryOrderTests = [
@@ -402,8 +476,9 @@ async function runNaturalDeliveryOrderRuntimeTest() {
 const replyClassificationGuardIsApplied =
   serverSource.includes("result.orderClassification === 'invalid'") &&
   serverSource.includes("result.orderClassification === 'review'") &&
-  serverSource.includes('رد على طلب غير واضح حُفظ للمراجعة بلا رصيد');
-console.log(`  ${replyClassificationGuardIsApplied ? '✅' : '❌'} رد التحذير أو الطلب غير الواضح لا يدخل سجل تم ولا ينشئ رصيداً`);
+  serverSource.includes('AMBIGUOUS_${quotedMsgId}') &&
+  serverSource.includes('طلب مبهم بسلسلة مؤكدة');
+console.log(`  ${replyClassificationGuardIsApplied ? '✅' : '❌'} التحذير يُرفض، والنص المبهم بسلسلة مؤكدة يذهب للمراجعة بلا رصيد`);
 if (!replyClassificationGuardIsApplied) process.exitCode = 1;
 
 // === اختبار صلاحية تفاعل الكمية على رسالة «تم» ===

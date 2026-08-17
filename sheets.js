@@ -1521,6 +1521,7 @@ async function updateOrderDetailStatus(transactionId, updates = {}) {
     while (row.length < ORDER_DETAILS_HEADERS.length) row.push('');
 
     if (updates.quantity !== undefined) row[9] = updates.quantity;
+    if (updates.emoji !== undefined) row[12] = updates.emoji;
     if (updates.status) row[13] = updates.status;
     if (updates.notes) row[17] = updates.notes;
 
@@ -2195,12 +2196,97 @@ async function syncOperationReviewResponses() {
 // سجل التعديلات
 // ====================================================
 
+const EDIT_LOG_HEADERS = [
+  'وقت التعديل', 'رقم المنفذ', 'اسم المنفذ', 'رقم المنتج', 'رقم الكابتن',
+  'الكمية قبل', 'الكمية بعد', 'الفرق', 'سبب التعديل', 'رقم العملية',
+  'الجروب', 'وقت العملية الأصلي', 'معرف رسالة الطلب', 'معرف رد الكابتن',
+  'نص طلب المنتج', 'نص رد الكابتن', 'إيموجي قبل', 'إيموجي بعد', 'نوع الحدث',
+  'اسم المنتج', 'اسم الكابتن'
+];
+
+/** يوسّع رؤوس سجل التعديلات القائم من دون لمس الصفوف أو الحركات التاريخية. */
+async function ensureEditLogHeaders(sheetName) {
+  await sheetsApi.spreadsheets.values.update({
+    spreadsheetId,
+    range: `'${sheetName}'!A1:U1`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [EDIT_LOG_HEADERS] },
+  });
+}
+
+/** يقرأ دليل العملية الأصلي لإلحاقه بسجل التدقيق عند التغيير أو الإلغاء. */
+async function getOrderDetailAuditContext(transactionId) {
+  if (!transactionId) return {};
+  try {
+    const normalizedTransactionId = String(transactionId).replace(/^CANCELLED_/, '');
+    const rowIndex = await findOrderDetailRowByTransactionId(normalizedTransactionId);
+    if (!rowIndex) return { transactionId: normalizedTransactionId };
+
+    const sheetName = config.sheets.sheetNames.orderDetails || 'تفاصيل الطلبات';
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId,
+      range: `'${sheetName}'!A${rowIndex}:R${rowIndex}`,
+    });
+    const row = response.data.values?.[0] || [];
+    return {
+      transactionId: normalizedTransactionId,
+      originalTimestamp: row[1] || '',
+      groupPrefix: row[2] || '',
+      producerName: row[3] || '',
+      producerPhone: row[4] || '',
+      captainName: row[5] || '',
+      captainPhone: row[6] || '',
+      orderText: row[10] || '',
+      captainReplyText: row[11] || '',
+      quantityEmoji: row[12] || '',
+      tamMessageId: row[14] || '',
+      orderMessageId: row[15] || '',
+    };
+  } catch (error) {
+    logger.warn('تعذر قراءة دليل العملية لسجل التدقيق', { error: error.message, transactionId });
+    return { transactionId: String(transactionId).replace(/^CANCELLED_/, '') };
+  }
+}
+
+/** يبني صف سجل التدقيق كاملاً من دون أي استدعاء خارجي، لسهولة اختباره. */
+function buildEditAuditRow(editData = {}, detail = {}, now = new Date()) {
+  const jordanTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
+  const oldQuantity = Number(editData.oldQuantity) || 0;
+  const newQuantity = Number(editData.newQuantity) || 0;
+  return [
+    jordanTime.toISOString().replace('T', ' ').substring(0, 19),
+    editData.editorPhone || '',
+    editData.editorName || '',
+    editData.producerPhone || detail.producerPhone || '',
+    editData.captainPhone || detail.captainPhone || '',
+    oldQuantity,
+    newQuantity,
+    newQuantity - oldQuantity,
+    editData.notes || '',
+    editData.transactionId || detail.transactionId || '',
+    editData.groupPrefix || detail.groupPrefix || '',
+    editData.originalTimestamp || detail.originalTimestamp || '',
+    editData.orderMessageId || detail.orderMessageId || '',
+    editData.tamMessageId || detail.tamMessageId || '',
+    editData.orderText || detail.orderText || '',
+    editData.captainReplyText || detail.captainReplyText || '',
+    editData.oldEmoji || detail.quantityEmoji || '',
+    editData.newEmoji || '',
+    editData.eventType || 'تعديل كمية',
+    editData.producerName || detail.producerName || '',
+    editData.captainName || detail.captainName || '',
+  ];
+}
+
 /**
  * إنشاء ورقة سجل التعديلات إذا لم تكن موجودة
  */
 async function ensureEditLogSheet() {
   const sheetName = config.sheets.sheetNames.editLog || 'سجل التعديلات';
-  if (existingSheets.has(sheetName)) return;
+  if (existingSheets.has(sheetName)) {
+    await ensureEditLogHeaders(sheetName);
+    return;
+  }
   try {
     await sheetsApi.spreadsheets.batchUpdate({
       spreadsheetId,
@@ -2210,16 +2296,17 @@ async function ensureEditLogSheet() {
     });
     await sheetsApi.spreadsheets.values.update({
       spreadsheetId,
-      range: `'${sheetName}'!A1:H1`,
+      range: `'${sheetName}'!A1:U1`,
       valueInputOption: 'RAW',
-      requestBody: {
-        values: [['التاريخ', 'رقم المعدِل', 'اسم المعدِل', 'المنتج', 'الكابتن', 'القيمة القديمة', 'القيمة الجديدة', 'الفرق']],
-      },
+      requestBody: { values: [EDIT_LOG_HEADERS] },
     });
     existingSheets.add(sheetName);
     logger.info(`📝 تم إنشاء ورقة سجل التعديلات`);
   } catch (e) {
-    if (e.message?.includes('already exists')) existingSheets.add(sheetName);
+    if (e.message?.includes('already exists')) {
+      existingSheets.add(sheetName);
+      await ensureEditLogHeaders(sheetName);
+    }
   }
 }
 
@@ -2231,28 +2318,22 @@ async function logEdit(editData) {
   if (!isInitialized) return;
   await ensureEditLogSheet();
   const sheetName = config.sheets.sheetNames.editLog || 'سجل التعديلات';
-  const now = new Date();
-  const jordanTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
-  const row = [
-    jordanTime.toISOString().replace('T', ' ').substring(0, 19),
-    editData.editorPhone || '',
-    editData.editorName || '',
-    editData.producerPhone || '',
-    editData.captainPhone || '',
-    editData.oldQuantity || 0,
-    editData.newQuantity || 0,
-    (editData.newQuantity || 0) - (editData.oldQuantity || 0),
-    editData.notes || '',  // عمود I: السبب / الملاحظة
-  ];
+  const detail = await getOrderDetailAuditContext(editData.transactionId);
+  const oldQuantity = Number(editData.oldQuantity) || 0;
+  const newQuantity = Number(editData.newQuantity) || 0;
+  const row = buildEditAuditRow(editData, detail);
   try {
     await sheetsApi.spreadsheets.values.append({
       spreadsheetId,
-      range: `'${sheetName}'!A:I`,
+      range: `'${sheetName}'!A:U`,
       valueInputOption: 'RAW',
       insertDataOption: 'INSERT_ROWS',
       requestBody: { values: [row] },
     });
-    logger.info(`📝 تعديل: ${editData.editorPhone} غيّر من ${editData.oldQuantity} إلى ${editData.newQuantity}`);
+    logger.info(`📝 تدقيق تعديل: ${editData.editorPhone} غيّر من ${oldQuantity} إلى ${newQuantity}`, {
+      transactionId: editData.transactionId || detail.transactionId || '',
+      eventType: editData.eventType || 'تعديل كمية',
+    });
   } catch (error) {
     logger.error('فشل تسجيل التعديل', { error: error.message });
   }
@@ -2352,7 +2433,7 @@ async function findTransactionByMessageId(messageId, reactorPhone) {
  * @param {string} params.groupPrefix - بادئة الجروب
  * @returns {object} نتيجة العملية {success, message, diff}
  */
-async function processEdit({ messageId, editorPhone, editorName, newQuantity, groupPrefix }) {
+async function processEdit({ messageId, editorPhone, editorName, newQuantity, groupPrefix, newEmoji, reason }) {
   if (!isInitialized) return { success: false, message: 'النظام غير مهيأ' };
 
   // 1. البحث عن العملية الأصلية
@@ -2396,16 +2477,23 @@ async function processEdit({ messageId, editorPhone, editorName, newQuantity, gr
         values: [[
           newQuantity,
           transaction.type,
-          transaction.emoji,
+          newEmoji || transaction.emoji,
           transaction.groupPrefix,
           transaction.status, // عمود I = messageId (نحافظ على قيمته الأصلية من transaction.status الذي يحمل messageId)
-          `تعديل من ${oldQuantity} إلى ${newQuantity} بواسطة ${editorPhone} في ${new Date().toISOString()} | ${transaction.notes || ''}` // عمود J = Notes
+          `${reason || 'استبدال إيموجي كمية'}: ${transaction.emoji || 'غير متوفر'} → ${newEmoji || 'غير متوفر'} | تعديل من ${oldQuantity} إلى ${newQuantity} بواسطة ${editorPhone} في ${new Date().toISOString()} | ${transaction.notes || ''}` // عمود J = Notes
         ]]
       }
     });
   } catch (error) {
     logger.error('فشل تحديث سجل الحركات بعد التعديل', { error: error.message });
   }
+
+  await updateOrderDetailStatus(transaction.transactionId, {
+    quantity: newQuantity,
+    emoji: newEmoji || transaction.emoji,
+    status: 'نشط',
+    notes: `${reason || 'استبدال إيموجي كمية'}: ${transaction.emoji || 'غير متوفر'} → ${newEmoji || 'غير متوفر'} | الكمية: ${oldQuantity} → ${newQuantity}`,
+  });
 
   // 6. تسجيل التعديل في ورقة سجل التعديلات
   await logEdit({
@@ -2415,6 +2503,13 @@ async function processEdit({ messageId, editorPhone, editorName, newQuantity, gr
     captainPhone: transaction.captainPhone,
     oldQuantity,
     newQuantity,
+    transactionId: transaction.transactionId,
+    groupPrefix: groupPrefix || transaction.groupPrefix,
+    originalTimestamp: transaction.timestamp,
+    oldEmoji: transaction.emoji || '',
+    newEmoji: newEmoji || '',
+    eventType: reason || 'استبدال إيموجي كمية',
+    notes: `${reason || 'استبدال إيموجي كمية'}: ${transaction.emoji || 'غير متوفر'} → ${newEmoji || 'غير متوفر'} | الكمية: ${oldQuantity} → ${newQuantity}`,
   });
 
   logger.info(`✏️ تعديل ناجح: ${editorPhone} غيّر من ${oldQuantity} إلى ${newQuantity} (فرق: ${diff})`);
@@ -3680,6 +3775,7 @@ module.exports = {
   updateTransactionStatus,
   canEdit,
   logEdit,
+  buildEditAuditRow,
   // الكشف التفصيلي
   getDetailedReport,
   // لوحة التحكم

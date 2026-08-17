@@ -108,12 +108,12 @@ function extractDeliveryOrderDetails(value) {
 
 function classifyOriginalOrder({ text, messageType = 'text', isVoiceOrder = false } = {}) {
   if (isVoiceOrder || messageType === 'audio') {
-    return { classification: 'valid', reason: 'voice-order' };
+    return { classification: 'valid', confidenceLevel: 'clear', reason: 'voice-order' };
   }
 
   const normalized = normalizeOrderText(text);
   if (!normalized) {
-    return { classification: 'review', reason: 'empty-or-non-text-original' };
+    return { classification: 'review', confidenceLevel: 'ambiguous', reason: 'empty-or-non-text-original' };
   }
 
   const generalPostTerms = [
@@ -122,7 +122,7 @@ function classifyOriginalOrder({ text, messageType = 'text', isVoiceOrder = fals
     'عرض', 'خصم', 'خدمه توصيل',
   ];
   if (/https?:\/\/|www\./i.test(normalized) || generalPostTerms.some(term => normalized.includes(term))) {
-    return { classification: 'invalid', reason: 'general-post-or-announcement' };
+    return { classification: 'invalid', confidenceLevel: 'blocked', reason: 'general-post-or-announcement' };
   }
 
   const hasOrderAssignment = /(?:معك|عندك)\s*(?:\d+\s*)?(?:طلب|طلبات)/.test(normalized);
@@ -146,9 +146,13 @@ function classifyOriginalOrder({ text, messageType = 'text', isVoiceOrder = fals
   );
   const hasNumericOrderContext = hasNumericValue && (hasRouteContext || hasDeliveryOrPaymentKeyword || hasFreeRouteWithNumber);
 
-  if (hasOrderAssignment || hasAdditionalOrderAssignment || deliveryDetails.isComplete || hasDeliveryOrPaymentKeyword || hasNumericOrderContext) {
+  // المستوى الواضح: صياغة الطلب نفسها تقدم دليلاً مكتفياً (تكليف صريح،
+  // مسار كامل مع أجرة، أو منطقتان ورقم). ما زال الرد المباشر والإيموجي
+  // المخوّل شرطين مستقلين في server.js قبل أي أثر مالي.
+  if (hasOrderAssignment || hasAdditionalOrderAssignment || deliveryDetails.isComplete || hasDeliveryOrPaymentKeyword || hasFreeRouteWithNumber) {
     return {
       classification: 'valid',
+      confidenceLevel: 'clear',
       reason: hasAdditionalOrderAssignment
         ? 'additional-order-assignment'
         : hasOrderAssignment
@@ -157,14 +161,27 @@ function classifyOriginalOrder({ text, messageType = 'text', isVoiceOrder = fals
           ? 'complete-route-and-delivery'
           : hasDeliveryOrPaymentKeyword
             ? 'delivery-or-payment-keyword'
-            : hasFreeRouteWithNumber
-              ? 'numeric-value-with-two-free-route-areas'
-              : 'numeric-value-with-route-context',
+            : 'numeric-value-with-two-free-route-areas',
       deliveryDetails,
     };
   }
 
-  return { classification: 'review', reason: 'insufficient-order-evidence', deliveryDetails };
+  // المستوى الطبيعي المختصر: دليلان تشغيليان أو مكانيان مثل «توصيلك 7.5»
+  // أو مسار من/إلى مع قيمة. هذه الصيغ تُعتمد عند اكتمال السلسلة أيضاً.
+  if ((hasDeliveryOrPaymentKeyword && hasNumericValue) || (hasRouteContext && hasNumericValue) || hasNumericOrderContext) {
+    return {
+      classification: 'valid',
+      confidenceLevel: 'natural',
+      reason: hasDeliveryOrPaymentKeyword
+        ? 'natural-operational-evidence'
+        : 'natural-location-and-number-evidence',
+      deliveryDetails,
+    };
+  }
+
+  // لا نسقط الإشارات الضعيفة؛ يُحفظ الرد أولاً، ثم عند اكتمال الرد والإيموجي
+  // يوجّه server.js السلسلة إلى مراجعة تفصيلية بلا تغيير للأرصدة.
+  return { classification: 'review', confidenceLevel: 'ambiguous', reason: 'insufficient-order-evidence', deliveryDetails };
 }
 
 module.exports = {

@@ -75,6 +75,7 @@ const PROCESSED_MSG_MAX = 10000;
 // Map مؤقتة لتخزين الإيموجي الجديد (غير المعتمد) عند تغيير الإيموجي
 // مفتاح: `${phone}_${targetMsgId}` قيمة: { emoji, ts }
 const pendingEmojiReplace = new Map();
+const EMOJI_REPLACEMENT_GRACE_MS = 1200;
 const PENDING_EMOJI_TTL = 5000; // 5 ثوانٍ كافية لربط remove + add
 
 function isAlreadyProcessed(msgId) {
@@ -1262,6 +1263,8 @@ function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone
   const cachedTamText = whatsapp.extractText(targetMessage) || '';
   const orderText = persistedContext?.orderText || cachedOrderText || embeddedOrderText || result.quotedText || 'غير متوفر';
   const deliveryOrderDetails = persistedContext?.deliveryOrderDetails || parser.extractDeliveryOrderDetails(orderText);
+  const orderClassification = persistedContext?.orderClassification || result.orderClassification || classifyOriginalOrder({ text: orderText }).classification;
+  const confidenceLevel = persistedContext?.confidenceLevel || result.confidenceLevel || classifyOriginalOrder({ text: orderText }).confidenceLevel || 'ambiguous';
 
   const producerName = getSafePartyName(producerPhone);
   const captainName = getSafePartyName(captainPhone);
@@ -1269,10 +1272,12 @@ function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone
   const samePerson = normalizePhoneForComparison(producerPhone) &&
     normalizePhoneForComparison(producerPhone) === normalizePhoneForComparison(captainPhone);
 
-  const needsReview = samePerson || identityIncomplete;
+  const needsReview = samePerson || identityIncomplete || confidenceLevel === 'ambiguous';
   const reviewNotes = [
     samePerson ? 'تحذير: رقم المنتج والكابتن متطابقان' : '',
     identityIncomplete ? 'هوية أحد الأطراف غير مكتملة؛ حُفظت العملية للمراجعة ولم تُسقط' : '',
+    confidenceLevel === 'ambiguous' ? 'طلب مبهم بسلسلة مؤكدة؛ بانتظار قرار يدوي من دون تعديل رصيد' : '',
+    `مستوى الثقة: ${confidenceLevel}`,
     formatDeliveryOrderDetails(deliveryOrderDetails),
   ].filter(Boolean).join(' | ');
 
@@ -1294,6 +1299,8 @@ function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone
     tamMessageId: (targetContext || persistedContext) ? quotedMsgId : '',
     orderMessageId,
     source: (targetContext || persistedContext) ? 'تفاعل على رسالة تم' : 'تفاعل على الطلب',
+    orderClassification,
+    confidenceLevel,
     notes: reviewNotes,
   };
 }
@@ -1309,16 +1316,66 @@ async function applyPendingDirectOrderEmoji({ pending, replyMessageId, orderMess
 
   const quantity = Number(pending.quantity);
   if (!Number.isFinite(quantity) || quantity <= 0) return false;
+  const orderContext = whatsapp.getOrderContextByReplyId(replyMessageId) || {};
+  const orderConfidence = orderContext.confidenceLevel || classifyOriginalOrder({ text: orderContext.orderText || '' }).confidenceLevel || 'ambiguous';
+  const syntheticResult = {
+    transactionId: crypto.randomUUID(),
+    timestamp: timestamp || new Date().toISOString(),
+    quantity,
+    text: pending.emoji,
+    quotedText: '',
+    confidenceLevel: orderConfidence,
+  };
+  // يوجد رد كابتن وإيموجي مخوّل، لكن النص غير كافٍ للاعتماد الآلي.
+  // لا نغيّر أي رصيد؛ نوثق السلسلة كاملة في المراجعة ليحسمها المستخدم.
+  if (orderConfidence === 'ambiguous') {
+    const ambiguousDetail = buildOrderDetail({
+      result: syntheticResult,
+      msg,
+      quotedMsgId: replyMessageId,
+      groupPrefix,
+      producerPhone,
+      captainPhone,
+      reactorPhone: pending.senderPhone,
+    });
+    await sheets.upsertOrderDetails(ambiguousDetail);
+    await sheets.upsertOperationReview({
+      reviewId: `AMBIGUOUS_${replyMessageId}`,
+      timestamp: syntheticResult.timestamp,
+      groupPrefix,
+      alertType: 'طلب مبهم بسلسلة مؤكدة',
+      referenceId: replyMessageId,
+      reason: 'اكتملت الأدلة الثابتة (رد كابتن مباشر + إيموجي كمية مخوّل)، لكن نص الطلب غير واضح للاعتماد الآلي',
+      notes: ambiguousDetail.notes,
+      producerPhone,
+      captainPhone,
+      producerName: ambiguousDetail.producerName,
+      captainName: ambiguousDetail.captainName,
+      quantity,
+      orderText: ambiguousDetail.orderText,
+      captainReplyText: ambiguousDetail.tamText,
+      quantityEmoji: pending.emoji,
+      reactorName: ambiguousDetail.reactorName,
+      reactorPhone: pending.senderPhone,
+    });
+    whatsapp.markDirectOrderEmojiApplied(orderMessageId, replyMessageId);
+    logger.info('🔎 كمية مباشرة مؤجلة حُفظت للمراجعة لأن نص الطلب مبهم', {
+      orderId: orderMessageId.substring(0, 8), replyId: replyMessageId.substring(0, 8), quantity,
+    });
+    return true;
+  }
   const existingTransaction = await sheets.findTransactionByMessageId(replyMessageId, producerPhone);
   if (existingTransaction) {
     if (existingTransaction.quantity !== quantity) {
-      const editResult = await sheets.processEdit({
-        messageId: replyMessageId,
-        editorPhone: pending.senderPhone,
-        editorName: sheets.getRegisteredName(pending.senderPhone) || '',
-        newQuantity: quantity,
-        groupPrefix,
-      });
+          const editResult = await sheets.processEdit({
+            messageId: replyMessageId,
+            editorPhone: pending.senderPhone,
+            editorName: sheets.getRegisteredName(pending.senderPhone) || '',
+            newQuantity: quantity,
+            groupPrefix,
+            newEmoji: pending.emoji,
+            reason: 'استبدال إيموجي كمية مباشر',
+          });
       if (!editResult.success) return false;
     }
     whatsapp.markDirectOrderEmojiApplied(orderMessageId, replyMessageId);
@@ -1331,13 +1388,6 @@ async function applyPendingDirectOrderEmoji({ pending, replyMessageId, orderMess
   if (producerParty.recordable) await sheets.updateTotalsProduction(producerPhone, quantity, groupPrefix, getSafePartyName(producerPhone));
   if (captainParty.recordable) await sheets.updateTotalsReception(captainPhone, quantity, groupPrefix, getSafePartyName(captainPhone));
 
-  const syntheticResult = {
-    transactionId: crypto.randomUUID(),
-    timestamp: timestamp || new Date().toISOString(),
-    quantity,
-    text: pending.emoji,
-    quotedText: '',
-  };
   await sheets.recordTransaction({
     transactionId: syntheticResult.transactionId,
     timestamp: syntheticResult.timestamp,
@@ -1443,7 +1493,10 @@ async function start() {
       const _directClassification = (!_captainFromTamEarly && !_captainFromSheetEarly && quotedMsgId)
         ? classifyOriginalOrder({ text: _directTargetText, messageType: whatsapp.getMessageType(_directTargetMsg) })
         : null;
-      const _isQualifiedDirectOrder = result.type === 'accept' && _directClassification?.classification === 'valid';
+      const _reactionCanChangeExistingQuantity = ['accept', 'remove', 'unknown_emoji'].includes(result.type);
+      const _isQualifiedDirectOrder = _reactionCanChangeExistingQuantity &&
+        _directClassification?.confidenceLevel !== 'blocked' &&
+        _directClassification?.classification !== 'invalid';
       const _existingReplyForDirectOrder = _isQualifiedDirectOrder
         ? whatsapp.getLatestReplyForOrder(quotedMsgId)
         : null;
@@ -1476,11 +1529,18 @@ async function start() {
         }
         directOrderMessageId = quotedMsgId;
         directOrderMode = true;
-        whatsapp.setDirectOrderEmoji(directOrderMessageId, producerPhone, result.text || result.reactionText || '', quantity);
+        if (result.type === 'accept') {
+          whatsapp.setDirectOrderEmoji(directOrderMessageId, producerPhone, result.text || result.reactionText || '', quantity);
+        } else {
+          // لا نحتفظ بكمية معلقة بعد إزالة الإيموجي أو استبداله بغير كمي.
+          whatsapp.clearDirectOrderEmoji(directOrderMessageId);
+        }
         if (!_existingReplyForDirectOrder) {
-          logger.info('⏳ حُفظت آخر كمية مباشرة بانتظار رد كابتن مقتبس', {
-            orderId: directOrderMessageId.substring(0, 8), quantity, reactor: producerPhone,
-          });
+          if (result.type === 'accept') {
+            logger.info('⏳ حُفظت آخر كمية مباشرة بانتظار رد كابتن مقتبس', {
+              orderId: directOrderMessageId.substring(0, 8), quantity, reactor: producerPhone,
+            });
+          }
           return;
         }
         // نوجّه المعالجة إلى رد الكابتن ليبقى مفتاح الحركة ثابتاً ولا ينشأ قيد جديد على الطلب الأصلي.
@@ -1867,6 +1927,111 @@ async function start() {
         });
       }
 
+      // إزالة الإيموجي أو استبداله بغير كمي لا يملك أي أثر إلا من صاحب الطلب أو مشرف.
+      if ((result.type === 'remove' || result.type === 'unknown_emoji') && isReactionOnAcceptedReply) {
+        const authorization = authorizeQuantityReaction({
+          reactorPhone: producerPhone,
+          orderOwnerPhone: realProducerPhone,
+          isSupervisor: await sheets.isSupervisor(producerPhone),
+        });
+        if (!authorization.allowed) {
+          logger.warn('⚠️ تجاهل إزالة أو استبدال إيموجي غير مصرح به', {
+            reason: authorization.reason,
+            reactor: producerPhone || 'unknown',
+            msgId: quotedMsgId?.substring(0, 8),
+          });
+          return;
+        }
+      }
+
+      // الإيموجي غير الكمي يلغي الكمية المعتمدة فقط، مع أثر تدقيق كامل بلا حركة جديدة.
+      if (result.type === 'unknown_emoji' && isReactionOnAcceptedReply) {
+        const existingTx = await sheets.findTransactionByMessageIdIncludingCancelled(quotedMsgId, null);
+        if (!existingTx || existingTx.quantity <= 0) {
+          logger.info('⚪ إيموجي غير كمي بلا كمية نشطة — لا أثر مالي', {
+            msgId: quotedMsgId?.substring(0, 8), emoji: result.text || result.reactionText || '',
+          });
+          return;
+        }
+        const oldQuantity = existingTx.quantity;
+        await sheets.updateTotalsProduction(existingTx.producerPhone, -oldQuantity, groupPrefix, getSafePartyName(existingTx.producerPhone));
+        if (existingTx.captainPhone) {
+          await sheets.updateTotalsReception(existingTx.captainPhone, -oldQuantity, groupPrefix, getSafePartyName(existingTx.captainPhone));
+        }
+        await sheets.updateTransactionStatus(existingTx.rowIndex, {
+          status: 'محذوف',
+          quantity: 0,
+          notes: `استبدال إيموجي كمية بغير كمي بواسطة ${producerPhone} | الإيموجي: ${existingTx.emoji || 'غير متوفر'} → ${result.text || result.reactionText || 'غير كمي'} | الكمية: ${oldQuantity} → 0`,
+        });
+        await sheets.logEdit({
+          editorPhone: producerPhone,
+          editorName: sheets.getRegisteredName(producerPhone) || 'مجهول',
+          producerPhone: existingTx.producerPhone,
+          captainPhone: existingTx.captainPhone,
+          oldQuantity,
+          newQuantity: 0,
+          transactionId: existingTx.transactionId,
+          groupPrefix,
+          originalTimestamp: existingTx.timestamp,
+          tamMessageId: quotedMsgId,
+          oldEmoji: existingTx.emoji || '',
+          newEmoji: result.text || result.reactionText || '',
+          eventType: 'استبدال إيموجي بغير كمي',
+          notes: `استبدال إيموجي كمية بغير كمي | الكمية: ${oldQuantity} → 0`,
+        });
+        logger.info('⚪ تم تصفير الكمية بعد استبدال الإيموجي بغير كمي', { msgId: quotedMsgId?.substring(0, 8), oldQuantity });
+        return;
+      }
+
+      // بعد تحقق الرد المباشر والإيموجي المخوّل، يكون النص هو عامل الثقة فقط.
+      // السلسلة المبهمة لا تُسقط ولا تُسجل مالياً: تُحفظ للمراجعة التفصيلية.
+      if (result.type === 'accept' && isReactionOnAcceptedReply) {
+        const persistedOrderContext = quotedMsgId ? whatsapp.getOrderContextByReplyId(quotedMsgId) : null;
+        const targetMessageForEvidence = quotedMsgId ? whatsapp.getCachedMessage(quotedMsgId) : null;
+        const targetContextForEvidence = getCachedMessageContext(targetMessageForEvidence);
+        const evidenceOrderText = persistedOrderContext?.orderText ||
+          getQuotedContextText(targetContextForEvidence) || result.quotedText || '';
+        const evidenceClassification = persistedOrderContext?.confidenceLevel
+          ? { confidenceLevel: persistedOrderContext.confidenceLevel }
+          : classifyOriginalOrder({ text: evidenceOrderText });
+        if (evidenceClassification.confidenceLevel === 'ambiguous') {
+          const ambiguousDetail = buildOrderDetail({
+            result: { ...result, confidenceLevel: 'ambiguous' },
+            msg,
+            quotedMsgId,
+            groupPrefix,
+            producerPhone: realProducerPhone || orderOwnerPhone || '',
+            captainPhone: captainPhone || '',
+            reactorPhone: producerPhone,
+          });
+          await sheets.upsertOrderDetails(ambiguousDetail);
+          await sheets.upsertOperationReview({
+            reviewId: `AMBIGUOUS_${quotedMsgId}`,
+            timestamp: result.timestamp,
+            groupPrefix,
+            alertType: 'طلب مبهم بسلسلة مؤكدة',
+            referenceId: quotedMsgId || result.messageId || '',
+            reason: 'اكتملت الأدلة الثابتة (رد كابتن مباشر + إيموجي كمية مخوّل)، لكن النص غير واضح للاعتماد الآلي',
+            notes: ambiguousDetail.notes,
+            producerPhone: ambiguousDetail.producerPhone,
+            captainPhone: ambiguousDetail.captainPhone,
+            producerName: ambiguousDetail.producerName,
+            captainName: ambiguousDetail.captainName,
+            quantity: ambiguousDetail.quantity,
+            orderText: ambiguousDetail.orderText,
+            captainReplyText: ambiguousDetail.tamText,
+            quantityEmoji: ambiguousDetail.emoji,
+            reactorName: ambiguousDetail.reactorName,
+            reactorPhone: ambiguousDetail.reactorPhone,
+          });
+          if (directOrderMessageId) whatsapp.markDirectOrderEmojiApplied(directOrderMessageId, quotedMsgId);
+          logger.info('🔎 تفاعل كمية مؤكد حُفظ للمراجعة بسبب نص طلب مبهم', {
+            replyId: quotedMsgId?.substring(0, 8), quantity,
+          });
+          return;
+        }
+      }
+
       if (result.type === 'accept') {
         // === فحص هل هذا تعديل (إيموجي جديد على نفس الرسالة المسجلة سابقاً) ===
         const existingTransaction = await sheets.findTransactionByMessageId(quotedMsgId, realProducerPhone || producerPhone);
@@ -1882,18 +2047,31 @@ async function start() {
             msgId: quotedMsgId?.substring(0, 8)
           });
 
+          // قد يصل إشعار الإيموجي الجديد قبل أو بعد إشعار إزالة السابق؛ نربطهما
+          // لفترة قصيرة حتى يبقى الأثر «تغيير كمية» واحداً لا إلغاءين.
+          const replacementKey = `${producerPhone}_${quotedMsgId}`;
+          pendingEmojiReplace.set(replacementKey, {
+            emoji: result.reactionText || result.text || '',
+            quantity,
+            timestamp: Date.now(),
+            kind: 'quantity',
+          });
+
           const editResult = await sheets.processEdit({
             messageId: quotedMsgId,
             editorPhone: producerPhone,
             editorName: producerName || '',
             newQuantity: quantity,
             groupPrefix,
+            newEmoji: result.reactionText || result.text || '',
+            reason: 'استبدال إيموجي كمية',
           });
 
           if (editResult.success) {
             logger.info(`✏️ تعديل ناجح: ${editResult.message}`);
             if (directOrderMessageId) whatsapp.markDirectOrderEmojiApplied(directOrderMessageId, quotedMsgId);
           } else {
+            pendingEmojiReplace.delete(replacementKey);
             logger.warn(`⚠️ فشل التعديل: ${editResult.message} - سيتم تسجيل كعملية جديدة`);
             // إذا فشل التعديل (انتهت المهلة)، لا نسجل عملية جديدة لنفس الرسالة
           }
@@ -2035,6 +2213,12 @@ async function start() {
             captainPhone: result.quotedPhone || '',
             oldQuantity: 0,
             newQuantity: 0,
+            groupPrefix,
+            orderMessageId: result.orderMessageId || '',
+            tamMessageId: quotedMsgId,
+            oldEmoji: '',
+            newEmoji: result.reactionText || result.text || '❌',
+            eventType: 'إلغاء بلا عملية أصلية',
             notes: `إلغاء بلا عملية أصلية — لا تأثير على الرصيد | group:${groupPrefix} | targetMsg:${quotedMsgId} | reactionEvent:${result.messageId}`,
           });
           logger.info('📝 تم توثيق إلغاء بلا عملية أصلية', { msgId: quotedMsgId?.substring(0, 8), reactionId: result.messageId?.substring(0, 8) });
@@ -2101,6 +2285,14 @@ async function start() {
           captainPhone: cancelCaptain,
           oldQuantity: cancelQuantity,
           newQuantity: 0,
+          transactionId: existingTx.transactionId,
+          groupPrefix,
+          originalTimestamp: existingTx.timestamp,
+          tamMessageId: quotedMsgId,
+          oldEmoji: existingTx.emoji || '',
+          newEmoji: result.reactionText || result.text || '❌',
+          eventType: 'إلغاء بواسطة ❌',
+          notes: `إلغاء بواسطة ${cancellerPhone} | الإيموجي: ${existingTx.emoji || 'غير متوفر'} → ${result.reactionText || result.text || '❌'} | الكمية: ${cancelQuantity} → 0`,
         });
 
       } else if (result.type === 'remove') {
@@ -2120,6 +2312,24 @@ async function start() {
           logger.info('🗑️ حذف إيموجي — لا توجد عملية مسجلة', { msgId: quotedMsgId?.substring(0, 8) });
           return;
         }
+
+        // عند تغيير 👍 إلى 2️⃣ قد تصل رسالة إزالة 👍 قبل أو بعد رسالة 2️⃣.
+        // ننتظر نافذة قصيرة للحدث المرافق ثم نتجاهل الإزالة لأن processEdit
+        // سجّل تغيير الكمية فعلاً؛ أما الإزالة المستقلة فتستمر كما كانت.
+        const replacementKey = `${producerPhone}_${quotedMsgId}`;
+        let pendingReplacement = pendingEmojiReplace.get(replacementKey);
+        if (!pendingReplacement) {
+          await new Promise(resolve => setTimeout(resolve, EMOJI_REPLACEMENT_GRACE_MS));
+          pendingReplacement = pendingEmojiReplace.get(replacementKey);
+        }
+        if (pendingReplacement && Date.now() - pendingReplacement.timestamp <= EMOJI_REPLACEMENT_GRACE_MS * 2) {
+          pendingEmojiReplace.delete(replacementKey);
+          logger.info('↔️ تجاهل إزالة الإيموجي لأنها جزء من استبدال كمية موثق', {
+            msgId: quotedMsgId?.substring(0, 8), newEmoji: pendingReplacement.emoji,
+          });
+          return;
+        }
+        if (pendingReplacement) pendingEmojiReplace.delete(replacementKey);
 
         const isCancelled = existingTx.transactionId?.startsWith('CANCELLED_') || 
                              existingTx.notes?.includes('ملغى');
@@ -2188,6 +2398,14 @@ async function start() {
             captainPhone: restoreCaptain,
             oldQuantity: 0,
             newQuantity: originalQuantity,
+            transactionId: existingTx.transactionId,
+            groupPrefix,
+            originalTimestamp: existingTx.timestamp,
+            tamMessageId: quotedMsgId,
+            oldEmoji: '❌',
+            newEmoji: existingTx.emoji || '',
+            eventType: 'استرجاع بعد إزالة ❌',
+            notes: `إزالة إيموجي الإلغاء واسترجاع العملية | الكمية: 0 → ${originalQuantity}`,
           });
 
         } else {
@@ -2263,6 +2481,13 @@ async function start() {
               captainPhone: removeCaptain || '',
               oldQuantity: removeQuantity,
               newQuantity: 0,
+              transactionId: existingTx.transactionId,
+              groupPrefix,
+              originalTimestamp: existingTx.timestamp,
+              tamMessageId: quotedMsgId,
+              oldEmoji: result.reactionText || existingTx.emoji || '',
+              newEmoji: _pendingReplace?.emoji || '',
+              eventType: _pendingReplace ? 'استبدال إيموجي كمية — إزالة القيمة السابقة' : 'إزالة إيموجي كمية',
               notes: _deleteNotes,
             });
             logger.info('📝 تم تسجيل الحذف في سجل التعديلات', {
@@ -2367,31 +2592,13 @@ async function start() {
         });
         return;
       }
-      // الصيغة غير الواضحة لا تسقط: تُحفظ للمراجعة فقط بلا tamCache وبلا حركة مالية.
+      // الصيغة غير الواضحة لا تُسقط: نحفظ رد الكابتن فقط، ثم عند وصول إيموجي كمية
+      // يُنشأ صف مراجعة مفصل. لا يمكن إنشاء المراجعة الآن لأنها بلا إيموجي كمية.
       if (result.orderClassification === 'review') {
-        const reviewGroup = (config.whatsapp.targetGroups || []).find(group => group.id === result.groupId);
-        const reviewReason = 'الرسالة الأصلية لا تحمل مؤشرات كافية لطلب؛ لم يُنشأ قيد تلقائي';
-        await sheets.upsertOperationReview({
-          reviewId: `NON_ORDER_${result.messageId}`,
-          timestamp: result.timestamp,
-          groupPrefix: reviewGroup?.prefix || '',
-          alertType: 'طلب غير واضح',
-          referenceId: result.quotedMessageId || result.messageId || '',
-          reason: reviewReason,
-          notes: `سبب التصنيف: ${result.orderClassificationReason || 'غير محدد'} | النص: ${(result.quotedText || '').substring(0, 160)}`,
-          producerPhone: result.orderOwnerPhone || '',
-          captainPhone: result.phone || '',
-          producerName: sheets.getRegisteredName(result.orderOwnerPhone) || 'مجهول',
-          captainName: sheets.getRegisteredName(result.phone) || whatsapp.getPushName(msg) || 'مجهول',
-          quantity: result.quantity || '',
-          orderText: result.quotedText || '',
-          captainReplyText: result.text || '',
-        });
-        logger.warn('🔎 رد على طلب غير واضح حُفظ للمراجعة بلا رصيد', {
+        logger.info('🔎 حُفظ رد كابتن على نص مبهم بانتظار إيموجي كمية للمراجعة التفصيلية', {
           reason: result.orderClassificationReason,
           replyId: (result.messageId || '').substring(0, 8),
         });
-        return;
       }
       let captainPhone = result.phone;
       const tamMessageId = result.messageId;
@@ -2498,6 +2705,7 @@ async function start() {
             orderText: whatsapp.extractText(originalOrderMessage) || result.quotedText || '',
             tamText: whatsapp.extractText(msg) || '',
             orderClassification: result.orderClassification || 'valid',
+            confidenceLevel: result.confidenceLevel || (result.orderClassification === 'review' ? 'ambiguous' : 'clear'),
             deliveryOrderDetails: result.deliveryOrderDetails || null,
             isVoiceOrder: isVoiceAcceptance,
             voiceMessageId: isVoiceAcceptance ? result.voiceMessageId : '',
