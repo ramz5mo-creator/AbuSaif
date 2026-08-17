@@ -101,6 +101,7 @@ const emojiTests = [
   { input: '2️⃣2️⃣', expected: 22 },
   { input: '1️⃣5️⃣', expected: 15 },
   { input: '5️⃣', expected: 5 },
+  { input: '8️⃣', expected: 8 },
   { input: '🔟', expected: 10 },
   { input: '3️⃣0️⃣', expected: 30 },
 ];
@@ -117,6 +118,7 @@ const quantityTests = [
   { input: '👍', expected: 1 },
   { input: '15', expected: 15 },
   { input: '2️⃣2️⃣', expected: 22 },
+  { input: '8️⃣', expected: 8 },
   { input: 'تم 5', expected: 5 },
   { input: '', expected: 1 },
   { input: 'هات 10', expected: 10 },
@@ -878,20 +880,22 @@ async function runDirectOrderEmojiStateTest() {
   whatsapp.setOrderForReply(replyMessageId, '962798765432', {
     orderMessageId,
     orderClassification: 'valid',
-    orderText: 'من الرابية إلى الحسين توصيل 3',
+    orderText: 'معك طلب ب 25.00',
+    tamText: 'تمم',
   });
   const replyLink = whatsapp.getLatestReplyForOrder(orderMessageId);
-  const supervisorReplacement = whatsapp.setDirectOrderEmoji(orderMessageId, '962799999999', '2️⃣', 2);
+  const producerEight = whatsapp.setDirectOrderEmoji(orderMessageId, '962798765432', '8️⃣', parser.extractQuantity('8️⃣'));
   const finalState = whatsapp.getDirectOrderEmoji(orderMessageId);
   const correct =
     first?.quantity === 1 &&
     replacement?.quantity === 3 &&
     replyLink?.replyMessageId === replyMessageId &&
     replyLink?.producer === '962798765432' &&
-    supervisorReplacement?.quantity === 2 &&
-    finalState?.quantity === 2 &&
-    finalState?.emoji === '2️⃣';
-  console.log(`  ${correct ? '✅' : '❌'} 👍 ثم 3️⃣ ثم 2️⃣ تعني 2 فقط، مع بقاء مفتاح الحركة رد الكابتن`);
+    replyLink?.context?.tamText === 'تمم' &&
+    producerEight?.quantity === 8 &&
+    finalState?.quantity === 8 &&
+    finalState?.emoji === '8️⃣';
+  console.log(`  ${correct ? '✅' : '❌'} «معك طلب» + رد الكابتن «تمم» + 8️⃣ من المنتج تعني 8 فقط، مع بقاء مفتاح الحركة رد الكابتن`);
   if (!correct) process.exitCode = 1;
   whatsapp.clearDirectOrderEmoji(orderMessageId);
 }

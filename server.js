@@ -2538,10 +2538,10 @@ async function start() {
         });
 
         // ====================================================
-        // رد كمي (6️⃣ وما فوق) على رسالة "تم"
+        // رد كمي (مثل 6️⃣ أو 8️⃣ أو أي إيموجي كمية صالح) على رسالة "تم"
         // ====================================================
         // المنطق:
-        // - من أرسل 6️⃣ = result.phone = صاحب الطلب (المنتج)
+        // - من أرسل إيموجي الكمية = result.phone = صاحب الطلب (المنتج)
         // - صاحب رسالة "تم" = الكابتن (محفوظ في tamCache)
         //
         // إذا لم يتحدَّد الكابتن وصاحب الطلب بشكل موثوق:
@@ -2573,7 +2573,7 @@ async function start() {
             const producerFromCache = whatsapp.getOrderByReplyId(quotedMsgIdKmi);
             if (captainFromCache) {
               realCaptain = captainFromCache;
-              // صاحب الطلب: من orderCache أو من أرسل 6️⃣
+              // صاحب الطلب: من orderCache أو من أرسل إيموجي الكمية
               realProducer = producerFromCache || result.phone;
               rolesConfirmed = true;
               logger.info('✅ أدوار الرد الكمي من tamCache', {
@@ -2587,7 +2587,7 @@ async function start() {
           // الخطوة 2: إذا لم يُعثر في tamCache — نحاول من result مباشرة
           if (!rolesConfirmed) {
             // result.orderOwnerPhone = صاحب رسالة "تم" = الكابتن
-            // result.phone = من أرسل 6️⃣ = صاحب الطلب
+            // result.phone = من أرسل إيموجي الكمية = صاحب الطلب
             if (result.orderOwnerPhone && result.phone && result.orderOwnerPhone !== result.phone) {
               realCaptain = result.orderOwnerPhone;
               realProducer = result.phone;
