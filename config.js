@@ -29,6 +29,16 @@ module.exports = {
     authPath: `${VOLUME_PATH}/session`,
   },
 
+  // === مراقبة تيليجرام ===
+  // اختيارية بالكامل: تعذرها لا يوقف واتساب ولا يغير Sheets أو الأرصدة.
+  telegramMonitor: {
+    enabled: process.env.TELEGRAM_MONITOR_ENABLED === 'true',
+    botToken: process.env.TELEGRAM_MONITOR_BOT_TOKEN || '',
+    chatId: process.env.TELEGRAM_MONITOR_CHAT_ID || '',
+    botUsername: process.env.TELEGRAM_MONITOR_BOT_USERNAME || '',
+    forwardMessages: process.env.TELEGRAM_MONITOR_FORWARD_MESSAGES !== 'false',
+  },
+
   // === إعدادات Google Sheets ===
   sheets: {
     // معرف الجدول (Spreadsheet ID)

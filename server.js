@@ -32,6 +32,7 @@ const { authorizeQuantityReaction } = require('./reaction-authorization');
 const { validateQuantityReactionTarget } = require('./reaction-target-validation');
 const { classifyOriginalOrder } = require('./order-classification');
 const messageLog = require('./message-log');
+const telegramMonitor = require('./telegram-monitor');
 
 // ============================================================
 // تنظيف السجلات عند بدء التشغيل — يفرّغ كل ملف >10MB فوراً
@@ -286,6 +287,9 @@ const httpServer = http.createServer(async (req, res) => {
       cacheStats: whatsapp.getCacheStats(),
       connectionManager: cm ? { connected: cm.isConnected() } : null,
       recovery: recoveryStats,
+      telegramMonitor: telegramMonitor.getStatus(),
+      groupMonitoring: whatsapp.getGroupMonitoringStatus ? whatsapp.getGroupMonitoringStatus() : {},
+      incompleteMessageReviews: whatsapp.getIncompleteMessageReviews ? whatsapp.getIncompleteMessageReviews().length : 0,
       uptime: process.uptime(),
       timestamp: new Date().toISOString()
     }, null, 2));
@@ -1460,6 +1464,16 @@ async function start() {
   } catch (error) {
     logger.warn('⚠️ Google Sheets غير متاح', { error: error.message });
   }
+
+  // تيليجرام اختياري: نتحقق من الرمز عند التشغيل ولا نوقف البوت إذا تعذر الاتصال به.
+  const telegramVerification = await telegramMonitor.verifyBot();
+  if (telegramVerification.ok) {
+    logger.info(`✅ بوت تيليجرام للمراقبة جاهز: @${telegramVerification.username}`);
+  } else if (telegramVerification.reason !== 'missing-token') {
+    logger.warn('⚠️ تعذر التحقق من بوت تيليجرام؛ يستمر واتساب بصورة مستقلة', { error: telegramVerification.reason });
+  } else {
+    logger.info('ℹ️ مراقبة تيليجرام غير مفعلة بعد');
+  }
   // 2. معالج الرسائل
   whatsapp.setMessageHandler(async (msg, sock) => {
 
@@ -2604,7 +2618,7 @@ async function start() {
     // لا ينشئ هذا السجل أي صف Google Sheets ولا يغيّر رصيداً.
     if (result.type === 'order') {
       if (result.orderClassification !== 'invalid' && result.orderClassification !== 'blocked') {
-        messageLog.trackOrderCandidate({
+        const incompleteReview = messageLog.trackOrderCandidate({
           messageId: result.messageId,
           groupId: result.groupId,
           timestamp: Date.parse(result.timestamp) || Date.now(),
@@ -2612,6 +2626,10 @@ async function start() {
           orderText: result.text || '',
           classification: result.orderClassification,
           reason: result.orderClassificationReason || '',
+        });
+        telegramMonitor.notifyIncompleteOrder({
+          ...incompleteReview,
+          groupName: (config.whatsapp.targetGroups || []).find(group => group.id === result.groupId)?.name || result.groupId,
         });
       }
       return;
@@ -2748,12 +2766,18 @@ async function start() {
             voiceReplyCount: voiceReplyStatus?.replyCount || 0,
             voiceReplyInvalidated: Boolean(voiceReplyStatus?.invalidated),
           });
-          messageLog.markCaptainReply({
+          const updatedIncompleteReview = messageLog.markCaptainReply({
             orderMessageId: result.quotedMessageId || '',
             replyMessageId: tamMessageId,
             captainPhone,
             captainReplyText: whatsapp.extractText(msg) || result.text || '',
           });
+          if (updatedIncompleteReview?.status === 'waiting_quantity') {
+            telegramMonitor.notifyIncompleteOrder({
+              ...updatedIncompleteReview,
+              groupName: (config.whatsapp.targetGroups || []).find(group => group.id === result.groupId)?.name || result.groupId,
+            });
+          }
 
           // قد يضع صاحب الطلب أو المشرف آخر إيموجي كمية قبل وصول رد الكابتن.
           // بعد أن ثبتنا الرد وصاحبه، نطبّق هذه الكمية مرة واحدة على مفتاح الرد نفسه.

@@ -26,6 +26,7 @@ const connectionManager = require('./connection-manager');
 const recoveryService   = require('./recovery-service');
 const healthMonitor     = require('./health-monitor');
 const messageLog        = require('./message-log');
+const telegramMonitor   = require('./telegram-monitor');
 
 // ====================================================
 // الكاشات (تبقى في الذاكرة — Cache فقط وليست مصدر بيانات)
@@ -299,6 +300,13 @@ function _groupMonitorAlert(group, code, details) {
   if (previous?.code === code && now - previous.at < GROUP_ALERT_THROTTLE_MS) return;
   groupMonitorAlerts.set(group.id, { code, at: now });
   logger.warn(`[WA] ⚠️ GROUP_MONITOR_${code} | ${group.name || group.id}`, details);
+  // تيليجرام قناة مراقبة فقط؛ لا ننتظرها ولا نسمح لفشلها بالتأثير في واتساب.
+  telegramMonitor.notifySystemAlert(
+    `تنبيه جروب: ${group.name || group.id} (${code})`,
+    code === 'SILENT'
+      ? `لا توجد رسالة جديدة منذ ${details?.minutesSilent ?? '?'} دقيقة.`
+      : `تعذر الوصول إلى الجروب: ${details?.error || 'سبب غير معروف'}`,
+  );
 }
 
 /**
@@ -418,6 +426,10 @@ async function _handleMessagesUpsert({ messages, type }, sock) {
       continue;
     }
 
+    // نسخة مراقبة مستقلة بعد الحفظ الدائم، ولا تنتظر الشبكة ولا تعطل المعالجة.
+    const targetGroup = targetGroups.find(group => group.id === remoteJid);
+    telegramMonitor.notifyIncomingMessage({ msg, groupName: targetGroup?.name || remoteJid });
+
     // حجز مؤقت يمنع السباق، من دون وسم الرسالة كمكتملة.
     if (!msgId || inFlightMessageIds.has(msgId)) {
       logger.debug(`[WA] ⏳ رسالة قيد المعالجة: ${msgId?.substring(0, 8) || 'N/A'}`);
@@ -514,6 +526,12 @@ async function _handleMessagesUpsert({ messages, type }, sock) {
       try { messageLog.markFailed(msgId, error, { groupId: remoteJid, source: 'live' }); }
       catch (logError) { logger.error('[WA] ❌ تعذر تسجيل فشل معالجة الرسالة', { error: logError.message, msgId }); }
       logger.error('[WA] ❌ MESSAGE_PROCESSING_FAILED | ستعاد المحاولة', { error: error.message, msgId });
+      telegramMonitor.notifyProcessingStatus({
+        status: 'failed',
+        messageId: msgId,
+        groupName: targetGroups.find(group => group.id === remoteJid)?.name || remoteJid,
+        detail: error.message,
+      });
     } finally {
       inFlightMessageIds.delete(msgId);
     }
@@ -1693,6 +1711,7 @@ module.exports = {
   healthMonitor,
   monitorTargetGroups,
   getGroupMonitoringStatus,
+  getTelegramMonitorStatus: telegramMonitor.getStatus,
   getIncompleteMessageReviews: () => recoveryService.getIncompleteReviews({ limit: 100 }),
 };
 

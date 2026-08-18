@@ -13,6 +13,7 @@ const { validateQuantityReactionTarget } = require('./reaction-target-validation
 const { classifyOriginalOrder, extractDeliveryOrderDetails } = require('./order-classification');
 const messageLog = require('./message-log');
 const recoveryService = require('./recovery-service');
+const telegramMonitor = require('./telegram-monitor');
 const {
   buildReviewEvidenceFields,
   buildConversationSummary,
@@ -25,6 +26,7 @@ const serverSource = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
 const whatsappSource = fs.readFileSync(path.join(__dirname, 'whatsapp.js'), 'utf8');
 const recoverySource = fs.readFileSync(path.join(__dirname, 'recovery-service.js'), 'utf8');
 const parserSource = fs.readFileSync(path.join(__dirname, 'parser.js'), 'utf8');
+const telegramMonitorSource = fs.readFileSync(path.join(__dirname, 'telegram-monitor.js'), 'utf8');
 
 console.log('═══════════════════════════════════════');
 console.log('   اختبار نظام AbuSaif');
@@ -108,6 +110,30 @@ const groupMonitoringCorrect = whatsappSource.includes('async function monitorTa
   whatsappSource.includes('retryPendingMessages(connectionManager.getSocket())');
 console.log(`  ${groupMonitoringCorrect ? '✅' : '❌'} مراقبة الجروبات وإعادة المحاولة الدوريان مفعلان تشغيلياً دون أثر مالي`);
 if (!groupMonitoringCorrect) process.exitCode = 1;
+
+// === اختبار بوت تيليجرام للمراقبة (بلا طلب شبكة) ===
+console.log('📨 اختبار مراقبة تيليجرام المعزولة:');
+const telegramIncomingPreview = telegramMonitor.formatIncomingMessage({
+  groupName: 'جروب الاختبار',
+  msg: {
+    key: { id: 'TG_MONITOR_TEST_1', remoteJid: 'telegram-test@g.us', participant: '962799999991@s.whatsapp.net' },
+    message: { conversation: 'الرابية إلى الحسين توصيل 3' },
+  },
+});
+const telegramFailurePreview = telegramMonitor.formatProcessingStatus({
+  status: 'failed', messageId: 'TG_MONITOR_TEST_1', groupName: 'جروب الاختبار', detail: 'فشل تجريبي',
+});
+const telegramIsolatedCorrect = telegramIncomingPreview.includes('رسالة واتساب واردة') &&
+  telegramIncomingPreview.includes('الرابية إلى الحسين') &&
+  telegramFailurePreview.includes('فشلت معالجة رسالة') &&
+  telegramMonitorSource.includes('لا تقرأ أوامر تيليجرام') &&
+  telegramMonitorSource.includes('لا تعدّل Google Sheets أو الأرصدة') &&
+  whatsappSource.includes('telegramMonitor.notifyIncomingMessage') &&
+  whatsappSource.includes('telegramMonitor.notifyProcessingStatus') &&
+  serverSource.includes('telegramMonitor.verifyBot()') &&
+  serverSource.includes('telegramMonitor.notifyIncompleteOrder');
+console.log(`  ${telegramIsolatedCorrect ? '✅' : '❌'} تيليجرام ينسخ المراقبة ويعزل إخفاقه عن واتساب والجرد`);
+if (!telegramIsolatedCorrect) process.exitCode = 1;
 
 // === اختبار حارس مراجعة العمليات بلا إيموجي كمية ===
 console.log('🧹 اختبار منع مراجعة العمليات بلا إيموجي كمية:');
