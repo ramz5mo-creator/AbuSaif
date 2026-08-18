@@ -20,6 +20,7 @@ const fs   = require('fs');
 const path = require('path');
 const config = require('./config');
 const logger = require('./logger');
+const messageLog = require('./message-log');
 
 // ====================================================
 // الثوابت
@@ -87,6 +88,8 @@ async function runRecovery(sock) {
 
   // تحميل المؤشرات من القرص
   loadCursors();
+  const resetStale = messageLog.resetStaleProcessing();
+  const retried = await retryPendingMessages(sock);
 
   const targetGroups = config.whatsapp.targetGroups || [];
   const results = {};
@@ -103,10 +106,10 @@ async function runRecovery(sock) {
   const totalSkipped   = Object.values(results).reduce((s, r) => s + (r.skipped  || 0), 0);
   const endTs = new Date().toISOString();
 
-  logger.info(`[Recovery] ✅ RECOVERY_COMPLETED | ${endTs} | مسترجع: ${totalRecovered} | مكرر متجاهل: ${totalSkipped}`);
+  logger.info(`[Recovery] ✅ RECOVERY_COMPLETED | ${endTs} | مسترجع: ${totalRecovered} | مكرر متجاهل: ${totalSkipped} | محاولات معلقة: ${retried.succeeded}/${retried.attempted} | معلقة أعيد ضبطها: ${resetStale}`);
 
   _isRunning = false;
-  return { results, totalRecovered, totalSkipped, ts, endTs };
+  return { results, totalRecovered, totalSkipped, retried, resetStale, ts, endTs };
 }
 
 /**
@@ -150,15 +153,18 @@ async function runHistoricalRecovery(sock, { groupId, fromTimestamp, toTimestamp
     for (const msg of candidates) {
       const msgId = msg.key?.id;
       if (!msgId || !msg.message) continue;
-      if (_processedIds.has(msgId)) {
+      if (isProcessed(msgId)) {
         skipped++;
         continue;
       }
 
       try {
-        _processedIds.add(msgId);
         await _messageHandler({ messages: [msg], type: 'notify' }, sock);
-        recovered++;
+        if (isProcessed(msgId)) recovered++;
+        else {
+          errors++;
+          logger.warn(`[Recovery] ⚠️ HISTORICAL_RECOVERY_PENDING | ${group.name} | ${msgId.substring(0, 8)}`);
+        }
       } catch (error) {
         errors++;
         logger.error(`[Recovery] ❌ HISTORICAL_RECOVERY_ERROR | ${group.name} | ${msgId.substring(0, 8)}`, { error: error.message });
@@ -213,7 +219,7 @@ function markProcessed(messageId) {
  * @returns {boolean}
  */
 function isProcessed(messageId) {
-  return _processedIds.has(messageId);
+  return _processedIds.has(messageId) || messageLog.isDone(messageId);
 }
 
 /**
@@ -231,7 +237,37 @@ function getStats() {
     processedIds: _processedIds.size,
     cursors: Object.keys(_cursors).length,
     isRunning: _isRunning,
+    messageLog: messageLog.getStats(),
+    incompleteReviews: messageLog.getIncompleteReviews({ limit: 100 }),
   };
+}
+
+/**
+ * يعيد الرسائل التي حفظت دائماً ولكن لم تكتمل، عبر المعالج نفسه فقط.
+ * لا ينشئ سجلاً مالياً مباشرة ولا يتجاوز قواعد التصنيف أو منع التكرار.
+ */
+async function retryPendingMessages(sock, { limit = 100 } = {}) {
+  const candidates = messageLog.getRetryCandidates({ limit });
+  let attempted = 0;
+  let succeeded = 0;
+  let failed = 0;
+  if (!_messageHandler || !sock || candidates.length === 0) return { attempted, succeeded, failed };
+
+  for (const record of candidates) {
+    if (!record.rawMessage?.message || !record.messageId) continue;
+    attempted++;
+    try {
+      await _messageHandler({ messages: [record.rawMessage], type: 'notify' }, sock);
+      if (isProcessed(record.messageId)) succeeded++;
+      else failed++;
+    } catch (error) {
+      failed++;
+      logger.error(`[Recovery] ❌ RETRY_FAILED | ${record.messageId.substring(0, 8)}`, { error: error.message });
+    }
+  }
+
+  if (attempted > 0) logger.info(`[Recovery] 🔁 RETRY_QUEUE | نجح: ${succeeded}/${attempted} | بقي فاشلاً: ${failed}`);
+  return { attempted, succeeded, failed };
 }
 
 // ====================================================
@@ -288,8 +324,8 @@ async function _recoverGroup(sock, group) {
         continue;
       }
 
-      // منع Duplicate Processing
-      if (_processedIds.has(msgId)) {
+      // منع Duplicate Processing بعد تأكيد الحفظ والمعالجة فقط
+      if (isProcessed(msgId)) {
         skipped++;
         logger.debug(`[Recovery] ⏭️ ${groupName} | تكرار: ${msgId.substring(0, 8)}`);
         continue;
@@ -298,15 +334,17 @@ async function _recoverGroup(sock, group) {
       // تمرير الرسالة عبر نفس Pipeline
       try {
         if (_messageHandler) {
-          // نضع علامة قبل المعالجة لمنع التكرار حتى لو فشلت
-          _processedIds.add(msgId);
           await _messageHandler({ messages: [msg], type: 'notify' }, sock);
-          recovered++;
-
-          // تحديث المؤشر
-          if (msgTs > lastMsgTs) {
-            lastMsgId = msgId;
-            lastMsgTs = msgTs;
+          if (isProcessed(msgId)) {
+            recovered++;
+            // لا يتقدم المؤشر إلا بعد تأكيد اكتمال الرسالة.
+            if (msgTs > lastMsgTs) {
+              lastMsgId = msgId;
+              lastMsgTs = msgTs;
+            }
+          } else {
+            errors++;
+            logger.warn(`[Recovery] ⚠️ ${groupName} | بقيت الرسالة في طابور المحاولة: ${msgId.substring(0, 8)}`);
           }
         }
       } catch (err) {
@@ -491,4 +529,6 @@ module.exports = {
   saveCursors,
   getCursors,
   getStats,
+  retryPendingMessages,
+  getIncompleteReviews: messageLog.getIncompleteReviews,
 };

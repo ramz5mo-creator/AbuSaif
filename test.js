@@ -11,6 +11,8 @@ const path = require('path');
 const { authorizeQuantityReaction } = require('./reaction-authorization');
 const { validateQuantityReactionTarget } = require('./reaction-target-validation');
 const { classifyOriginalOrder, extractDeliveryOrderDetails } = require('./order-classification');
+const messageLog = require('./message-log');
+const recoveryService = require('./recovery-service');
 const {
   buildReviewEvidenceFields,
   buildConversationSummary,
@@ -20,10 +22,92 @@ const {
   buildEditAuditRow,
 } = require('./sheets');
 const serverSource = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+const whatsappSource = fs.readFileSync(path.join(__dirname, 'whatsapp.js'), 'utf8');
+const recoverySource = fs.readFileSync(path.join(__dirname, 'recovery-service.js'), 'utf8');
+const parserSource = fs.readFileSync(path.join(__dirname, 'parser.js'), 'utf8');
 
 console.log('═══════════════════════════════════════');
 console.log('   اختبار نظام AbuSaif');
 console.log('═══════════════════════════════════════\n');
+
+// === اختبارات طبقة الحماية: الحفظ أولاً ثم التأكيد المتأخر ===
+console.log('🛡️ اختبار سجل الرسائل الدائم والتأكيد المتأخر:');
+messageLog._resetForTests();
+const reliableTestMessage = {
+  key: { id: 'RELIABILITY_TEST_MESSAGE_1', remoteJid: 'reliability-test@g.us', fromMe: false },
+  messageTimestamp: Math.floor(Date.now() / 1000),
+  message: { conversation: 'الرابية إلى الحسين توصيل 3' },
+};
+const savedIncoming = messageLog.recordIncoming(reliableTestMessage, { source: 'test' });
+const reservedMessage = messageLog.beginProcessing(reliableTestMessage.key.id);
+const failedMessage = messageLog.markFailed(reliableTestMessage.key.id, new Error('فشل تجريبي بعد الحفظ'));
+const failureKeepsRetryable = savedIncoming.status === 'pending' && reservedMessage.acquired === true &&
+  failedMessage.status === 'failed' && messageLog.isDone(reliableTestMessage.key.id) === false &&
+  messageLog.getRetryCandidates().some(item => item.messageId === reliableTestMessage.key.id) &&
+  fs.existsSync(messageLog.LOG_PATH);
+console.log(`  ${failureKeepsRetryable ? '✅' : '❌'} الفشل بعد الاستلام لا يؤكد الرسالة ويبقيها في طابور المحاولة الدائم`);
+if (!failureKeepsRetryable) process.exitCode = 1;
+
+const secondReservation = messageLog.beginProcessing(reliableTestMessage.key.id);
+messageLog.markDone(reliableTestMessage.key.id, { source: 'test' });
+const lateAcknowledgementCorrect = secondReservation.acquired === true && messageLog.isDone(reliableTestMessage.key.id) === true &&
+  !messageLog.getRetryCandidates().some(item => item.messageId === reliableTestMessage.key.id);
+console.log(`  ${lateAcknowledgementCorrect ? '✅' : '❌'} لا تُغلق الرسالة إلا بعد إتمام المعالجة ثم تختفي من طابور الإعادة`);
+if (!lateAcknowledgementCorrect) process.exitCode = 1;
+
+const incompleteOrder = messageLog.trackOrderCandidate({
+  messageId: 'INCOMPLETE_ORDER_REVIEW_1',
+  groupId: 'reliability-test@g.us',
+  ownerPhone: '962799999991',
+  orderText: 'الرابية إلى الحسين توصيل 3',
+  classification: 'valid',
+  reason: 'صيغة اختبار',
+});
+const waitingCaptainReview = messageLog.getIncompleteReviews().find(item => item.orderMessageId === incompleteOrder.orderMessageId);
+const waitingQuantity = messageLog.markCaptainReply({
+  orderMessageId: incompleteOrder.orderMessageId,
+  replyMessageId: 'INCOMPLETE_ORDER_REPLY_1',
+  captainPhone: '962799999992',
+  captainReplyText: 'تم',
+});
+const completeOrderReview = messageLog.markOrderQuantity({
+  orderMessageId: incompleteOrder.orderMessageId,
+  emoji: '2️⃣',
+  quantity: 2,
+});
+const nonFinancialReviewCorrect = waitingCaptainReview?.reviewType === 'incomplete-order' &&
+  waitingCaptainReview.status === 'waiting_captain' && waitingQuantity?.status === 'waiting_quantity' &&
+  completeOrderReview?.status === 'complete' &&
+  !messageLog.getIncompleteReviews().some(item => item.orderMessageId === incompleteOrder.orderMessageId) &&
+  fs.existsSync(messageLog.ORDER_REVIEW_LOG_PATH);
+console.log(`  ${nonFinancialReviewCorrect ? '✅' : '❌'} سلسلة الطلب الناقصة تُحفظ للمراجعة محلياً وتُغلق فقط بعد رد كابتن وإيموجي كمية`);
+if (!nonFinancialReviewCorrect) process.exitCode = 1;
+
+const parserDefersOwnDeduplication = parserSource.includes('markProcessed: addProcessedId') &&
+  !parserSource.includes('addProcessedId(messageId);\n    return {\n      type: \'order\'') &&
+  !parserSource.includes('addProcessedId(messageId);\n\n  logger.info(\'🎯 رد استلام');
+console.log(`  ${parserDefersOwnDeduplication ? '✅' : '❌'} محلل الرسائل لا يمنع إعادة التحليل قبل تأكيد طبقة واتساب للنجاح`);
+if (!parserDefersOwnDeduplication) process.exitCode = 1;
+
+const liveAwaitIndex = whatsappSource.indexOf('await messageHandler(msg, sock || connectionManager.getSocket())');
+const liveConfirmIndex = whatsappSource.indexOf('messageLog.markDone(msgId');
+const recoveryAwaitIndex = recoverySource.indexOf('await _messageHandler({ messages: [msg], type: \'notify\' }, sock);');
+const recoveryCursorIndex = recoverySource.indexOf('if (isProcessed(msgId)) {\n            recovered++');
+const durablePipelineCorrect = liveAwaitIndex >= 0 && liveConfirmIndex > liveAwaitIndex &&
+  whatsappSource.indexOf('parser.markProcessed(msgId)') > liveAwaitIndex &&
+  recoveryAwaitIndex >= 0 && recoveryCursorIndex > recoveryAwaitIndex &&
+  recoverySource.includes('async function retryPendingMessages') &&
+  recoverySource.includes('incompleteReviews: messageLog.getIncompleteReviews');
+console.log(`  ${durablePipelineCorrect ? '✅' : '❌'} المساران الحي والاستعادة يؤكدان النجاح بعد المعالج ويعرضان الفشل للمراجعة غير المالية`);
+if (!durablePipelineCorrect) process.exitCode = 1;
+
+const groupMonitoringCorrect = whatsappSource.includes('async function monitorTargetGroups()') &&
+  whatsappSource.includes('GROUP_MONITOR_UNREACHABLE') === false &&
+  whatsappSource.includes("_groupMonitorAlert(group, 'UNREACHABLE'") &&
+  whatsappSource.includes('GROUP_SILENCE_ALERT_MS') &&
+  whatsappSource.includes('retryPendingMessages(connectionManager.getSocket())');
+console.log(`  ${groupMonitoringCorrect ? '✅' : '❌'} مراقبة الجروبات وإعادة المحاولة الدوريان مفعلان تشغيلياً دون أثر مالي`);
+if (!groupMonitoringCorrect) process.exitCode = 1;
 
 // === اختبار حارس مراجعة العمليات بلا إيموجي كمية ===
 console.log('🧹 اختبار منع مراجعة العمليات بلا إيموجي كمية:');
@@ -528,7 +612,6 @@ phoneTests.forEach(({ input, expected }) => {
 
 // === اختبار Recovery بعد التشغيل الأولي ===
 console.log('\n🔄 اختبار Recovery بعد الاتصال الأولي:');
-const whatsappSource = fs.readFileSync(path.join(__dirname, 'whatsapp.js'), 'utf8');
 const connectionManagerSource = fs.readFileSync(path.join(__dirname, 'connection-manager.js'), 'utf8');
 const connectedHandler = whatsappSource.match(/connectionManager\.on\('CONNECTED',[\s\S]*?\n  \}\);/);
 const initialConnectionRunsRecovery = Boolean(
@@ -545,7 +628,6 @@ if (!persistentDuplicateIsIgnored) process.exitCode = 1;
 
 // === اختبار الاستعادة التاريخية المقيدة ===
 console.log('\n🕓 اختبار الاستعادة التاريخية المقيدة:');
-const recoverySource = fs.readFileSync(path.join(__dirname, 'recovery-service.js'), 'utf8');
 const historicalWindowIsBounded = recoverySource.includes('runHistoricalRecovery') &&
   recoverySource.includes('timestamp <= toTimestamp') &&
   recoverySource.includes('_cursors = cursorsBefore');
@@ -595,7 +677,6 @@ if (!restartRequiredSavesNewAuth) process.exitCode = 1;
 // === اختبار عدم ضياع الطرف غير المسجل ===
 console.log('\n🧾 اختبار الطرف غير المسجل:');
 const sheetsSource = fs.readFileSync(path.join(__dirname, 'sheets.js'), 'utf8');
-const parserSource = fs.readFileSync(path.join(__dirname, 'parser.js'), 'utf8');
 const unknownPartyFallbackIsSafe = serverSource.includes('async function queueUnknownParty(phone, role)') &&
   serverSource.includes("return sheets.getRegisteredName(phone) || 'مجهول';") &&
   serverSource.includes("await sheets.logUnregisteredNumber(normalizedPhone, 'مجهول');") &&

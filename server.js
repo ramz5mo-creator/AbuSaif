@@ -31,6 +31,7 @@ const { createOneTimeBroadcastProcessor } = require('./one-time-broadcast');
 const { authorizeQuantityReaction } = require('./reaction-authorization');
 const { validateQuantityReactionTarget } = require('./reaction-target-validation');
 const { classifyOriginalOrder } = require('./order-classification');
+const messageLog = require('./message-log');
 
 // ============================================================
 // تنظيف السجلات عند بدء التشغيل — يفرّغ كل ملف >10MB فوراً
@@ -1535,6 +1536,11 @@ async function start() {
           // لا نحتفظ بكمية معلقة بعد إزالة الإيموجي أو استبداله بغير كمي.
           whatsapp.clearDirectOrderEmoji(directOrderMessageId);
         }
+        messageLog.markOrderQuantity({
+          orderMessageId: directOrderMessageId,
+          emoji: result.type === 'accept' ? (result.text || result.reactionText || '') : '',
+          quantity: result.type === 'accept' ? quantity : 0,
+        });
         if (!_existingReplyForDirectOrder) {
           if (result.type === 'accept') {
             logger.info('⏳ حُفظت آخر كمية مباشرة بانتظار رد كابتن مقتبس', {
@@ -1612,6 +1618,19 @@ async function start() {
             });
             return;
           }
+        }
+      }
+
+      // عند التفاعل على رد كابتن موثق، نعيد ربطه بالطلب الأصلي لسجل المتابعة فقط.
+      // لا ينشئ هذا السجل أي رصيد أو صف في Google Sheets.
+      if (!directOrderMode) {
+        const reviewOrderContext = quotedMsgId ? whatsapp.getOrderContextByReplyId(quotedMsgId) : null;
+        if (reviewOrderContext?.orderMessageId) {
+          messageLog.markOrderQuantity({
+            orderMessageId: reviewOrderContext.orderMessageId,
+            emoji: result.type === 'accept' ? (result.text || result.reactionText || '') : '',
+            quantity: result.type === 'accept' ? quantity : 0,
+          });
         }
       }
 
@@ -2581,6 +2600,23 @@ async function start() {
     const result = await parser.processMessage(msg, sock);
     if (!result) return;
 
+    // الطلب المؤهل يُعرض محلياً كمراجعة غير مالية إلى أن يكتمل برد كابتن وإيموجي كمية.
+    // لا ينشئ هذا السجل أي صف Google Sheets ولا يغيّر رصيداً.
+    if (result.type === 'order') {
+      if (result.orderClassification !== 'invalid' && result.orderClassification !== 'blocked') {
+        messageLog.trackOrderCandidate({
+          messageId: result.messageId,
+          groupId: result.groupId,
+          timestamp: Date.parse(result.timestamp) || Date.now(),
+          ownerPhone: result.phone || '',
+          orderText: result.text || '',
+          classification: result.orderClassification,
+          reason: result.orderClassificationReason || '',
+        });
+      }
+      return;
+    }
+
     if (result.type === 'accept') {
       // لا يدخل رد على تحذير/إعلان/رسالة عامة إلى tamCache أو سجل «تم»،
       // وبالتالي لا يمكن أن ينشئ لاحقاً تفاعل الكمية رصيداً خاطئاً.
@@ -2711,6 +2747,12 @@ async function start() {
             voiceMessageId: isVoiceAcceptance ? result.voiceMessageId : '',
             voiceReplyCount: voiceReplyStatus?.replyCount || 0,
             voiceReplyInvalidated: Boolean(voiceReplyStatus?.invalidated),
+          });
+          messageLog.markCaptainReply({
+            orderMessageId: result.quotedMessageId || '',
+            replyMessageId: tamMessageId,
+            captainPhone,
+            captainReplyText: whatsapp.extractText(msg) || result.text || '',
           });
 
           // قد يضع صاحب الطلب أو المشرف آخر إيموجي كمية قبل وصول رد الكابتن.

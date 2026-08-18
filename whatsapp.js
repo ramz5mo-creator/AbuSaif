@@ -25,6 +25,7 @@ const logger = require('./logger');
 const connectionManager = require('./connection-manager');
 const recoveryService   = require('./recovery-service');
 const healthMonitor     = require('./health-monitor');
+const messageLog        = require('./message-log');
 
 // ====================================================
 // الكاشات (تبقى في الذاكرة — Cache فقط وليست مصدر بيانات)
@@ -96,6 +97,14 @@ function getSheets() {
 }
 
 const discoveredGroups = new Map();
+// حجز داخل العملية فقط؛ المصدر الدائم لحالة الحجز هو message-processing-log.json.
+const inFlightMessageIds = new Set();
+const groupMonitorStatus = new Map();
+const groupMonitorAlerts = new Map();
+let groupMonitoringStartedAt = 0;
+const GROUP_MONITOR_INTERVAL_MS = 10 * 60 * 1000;
+const GROUP_SILENCE_ALERT_MS = 3 * 60 * 60 * 1000;
+const GROUP_ALERT_THROTTLE_MS = 60 * 60 * 1000;
 
 let membersDbModule = null;
 function getMembersDb() {
@@ -205,6 +214,7 @@ function _bindConnectionEvents() {
 
 async function _onConnected(sock, shouldRecover = true) {
   logger.info(`📦 tamCache: ${tamCache.size} | msgCache: ${messageCache.size}`);
+  if (!groupMonitoringStartedAt) groupMonitoringStartedAt = Date.now();
 
   // ربط أحداث الجروبات على Socket الجديد
   sock.ev.on('group-participants.update', _handleGroupParticipantsUpdate);
@@ -259,6 +269,17 @@ async function _onConnected(sock, shouldRecover = true) {
       const s = getSheets();
       if (s && s.loadRegisteredUsers) s.loadRegisteredUsers(true).catch(() => {});
     }, 30 * 60 * 1000);
+    setInterval(() => {
+      if (!connectionManager.isConnected()) return;
+      recoveryService.retryPendingMessages(connectionManager.getSocket())
+        .catch(error => logger.error('[WA] ❌ فشل طابور إعادة المحاولة الدوري', { error: error.message }));
+      monitorTargetGroups().catch(error => logger.error('[WA] ❌ فشل فحص الجروبات الدوري', { error: error.message }));
+    }, GROUP_MONITOR_INTERVAL_MS);
+    setTimeout(() => {
+      if (connectionManager.isConnected()) {
+        monitorTargetGroups().catch(error => logger.error('[WA] ❌ فشل فحص الجروبات الأولي', { error: error.message }));
+      }
+    }, 15 * 1000);
     logger.info('[WA] ✅ تم تسجيل setInterval للتحديث الدوري (مرة واحدة)');
   }
 
@@ -270,6 +291,63 @@ async function _onConnected(sock, shouldRecover = true) {
     }, 90 * 1000);
     logger.info('[WA] ✅ تم جدولة startAutoResolveLids (مرة واحدة)');
   }
+}
+
+function _groupMonitorAlert(group, code, details) {
+  const now = Date.now();
+  const previous = groupMonitorAlerts.get(group.id);
+  if (previous?.code === code && now - previous.at < GROUP_ALERT_THROTTLE_MS) return;
+  groupMonitorAlerts.set(group.id, { code, at: now });
+  logger.warn(`[WA] ⚠️ GROUP_MONITOR_${code} | ${group.name || group.id}`, details);
+}
+
+/**
+ * فحص الجروبات المعتمدة. التنبيه تشغيلي فقط: لا يرسل رسالة ولا يغيّر Sheets أو الأرصدة.
+ */
+async function monitorTargetGroups() {
+  const sock = connectionManager.getSocket();
+  const targetGroups = config.whatsapp.targetGroups || [];
+  const now = Date.now();
+  const result = {};
+
+  for (const group of targetGroups) {
+    const discovered = discoveredGroups.get(group.id);
+    const persisted = messageLog.getLatestGroupActivity(group.id);
+    const inMemoryAt = discovered?.lastMessage ? Date.parse(discovered.lastMessage) : 0;
+    const lastActivityAt = Math.max(inMemoryAt || 0, persisted?.timestamp || 0);
+    const silenceFrom = lastActivityAt || groupMonitoringStartedAt || now;
+    const status = {
+      groupId: group.id,
+      groupName: group.name || group.id,
+      checkedAt: now,
+      lastActivityAt: lastActivityAt || null,
+      minutesSilent: Math.floor((now - silenceFrom) / 60000),
+      reachable: false,
+      issue: null,
+    };
+    try {
+      if (!sock) throw new Error('Socket غير متاح');
+      const metadata = await sock.groupMetadata(group.id);
+      if (!metadata?.id) throw new Error('لم تعد بيانات الجروب متاحة');
+      status.reachable = true;
+      status.participants = Array.isArray(metadata.participants) ? metadata.participants.length : 0;
+      if (now - silenceFrom >= GROUP_SILENCE_ALERT_MS) {
+        status.issue = 'SILENT';
+        _groupMonitorAlert(group, 'SILENT', { lastActivityAt: status.lastActivityAt, minutesSilent: status.minutesSilent });
+      }
+    } catch (error) {
+      status.issue = 'UNREACHABLE';
+      status.error = error.message;
+      _groupMonitorAlert(group, 'UNREACHABLE', { error: error.message, lastActivityAt: status.lastActivityAt });
+    }
+    groupMonitorStatus.set(group.id, status);
+    result[group.id] = { ...status };
+  }
+  return result;
+}
+
+function getGroupMonitoringStatus() {
+  return Object.fromEntries([...groupMonitorStatus.entries()].map(([groupId, status]) => [groupId, { ...status }]));
 }
 
 // ====================================================
@@ -332,86 +410,112 @@ async function _handleMessagesUpsert({ messages, type }, sock) {
       }
     }
 
-    // تسجيل الرسالة كمعالجة (منع التكرار)
-    if (msgId) {
-      recoveryService.markProcessed(msgId);
-      // تحديث مؤشر Recovery
-      const msgTs = (msg.messageTimestamp || 0) * 1000;
-      recoveryService.updateCursor(remoteJid, msgId, msgTs);
+    // حفظ دائم قبل أي تحليل أو تصنيف. إذا تعذر الحفظ لا نكمل ولا نؤكد الرسالة.
+    try {
+      messageLog.recordIncoming(msg, { source: 'live' });
+    } catch (error) {
+      logger.error('[WA] ❌ لم يُحفظ سجل الرسالة قبل المعالجة؛ ستبقى للاستعادة', { error: error.message, msgId });
+      continue;
     }
 
-    // سجل تشخيصي
-    const senderJid = getSenderJid(msg);
-    logger.info('📨 رسالة', {
-      id: msgId?.substring(0, 8),
-      from: senderJid?.split('@')[0] || 'N/A',
-      type: msg.message.reactionMessage ? 'reaction' : Object.keys(msg.message)[0],
-      name: msg.pushName || '',
-    });
+    // حجز مؤقت يمنع السباق، من دون وسم الرسالة كمكتملة.
+    if (!msgId || inFlightMessageIds.has(msgId)) {
+      logger.debug(`[WA] ⏳ رسالة قيد المعالجة: ${msgId?.substring(0, 8) || 'N/A'}`);
+      continue;
+    }
+    const processingLock = messageLog.beginProcessing(msgId);
+    if (!processingLock.acquired) {
+      logger.debug(`[WA] ⏭️ رسالة ${processingLock.reason === 'done' ? 'مكتملة' : 'محجوزة'}: ${msgId.substring(0, 8)}`);
+      continue;
+    }
+    inFlightMessageIds.add(msgId);
 
-    // حل LID من pushName
-    if (msg.pushName) {
-      const currentSock = connectionManager.getSocket();
-      const s = getSheets();
-      if (senderJid && senderJid.includes('@s.whatsapp.net')) {
-        const phoneNum = senderJid.replace('@s.whatsapp.net', '');
-        if (s && s.updateWhatsappName) {
-          s.updateWhatsappName(phoneNum, msg.pushName).catch(() => {});
-        }
-      } else if (senderJid && senderJid.includes('@lid')) {
-        const resolved = resolvePhoneByPushName(msg.pushName);
-        if (resolved) {
-          addLidMapping(senderJid, resolved);
-          const phoneNum = resolved.replace('@s.whatsapp.net', '');
+    try {
+      // سجل تشخيصي
+      const senderJid = getSenderJid(msg);
+      logger.info('📨 رسالة', {
+        id: msgId?.substring(0, 8),
+        from: senderJid?.split('@')[0] || 'N/A',
+        type: msg.message.reactionMessage ? 'reaction' : Object.keys(msg.message)[0],
+        name: msg.pushName || '',
+      });
+
+      // حل LID من pushName
+      if (msg.pushName) {
+        const currentSock = sock || connectionManager.getSocket();
+        const s = getSheets();
+        if (senderJid && senderJid.includes('@s.whatsapp.net')) {
+          const phoneNum = senderJid.replace('@s.whatsapp.net', '');
           if (s && s.updateWhatsappName) {
             s.updateWhatsappName(phoneNum, msg.pushName).catch(() => {});
           }
-        } else {
-          const rawSenderPn = msg.key?.senderPn || msg.key?.participantPn;
-          if (rawSenderPn) {
-            const pnJid = rawSenderPn.includes('@') ? rawSenderPn : `${rawSenderPn}@s.whatsapp.net`;
-            addLidMapping(senderJid, pnJid);
+        } else if (senderJid && senderJid.includes('@lid')) {
+          const resolved = resolvePhoneByPushName(msg.pushName);
+          if (resolved) {
+            addLidMapping(senderJid, resolved);
+            const phoneNum = resolved.replace('@s.whatsapp.net', '');
+            if (s && s.updateWhatsappName) {
+              s.updateWhatsappName(phoneNum, msg.pushName).catch(() => {});
+            }
           } else {
-            logger.warn(`⚠️ LID غير محلول: ${msg.pushName}`, { lid: senderJid?.substring(0, 15) });
-            queueLidForResolve(senderJid);
-            if (currentSock && remoteJid && senderJid && senderJid.includes('@lid')) {
-              (async () => {
-                try {
-                  const meta = await currentSock.groupMetadata(remoteJid);
-                  if (meta?.participants) {
-                    for (const p of meta.participants) {
-                      const pLid = p.lid || '';
-                      const pId = p.id || '';
-                      const sLid = senderJid.split(':')[0];
-                      const pLidBase = pLid.split(':')[0];
-                      if (pLid === senderJid || pLidBase === sLid) {
-                        if (pId && pId.includes('@s.whatsapp.net')) {
-                          addLidMapping(senderJid, pId);
-                          if (s && s.updateWhatsappName && msg.pushName) {
-                            s.updateWhatsappName(pId.replace('@s.whatsapp.net', ''), msg.pushName).catch(() => {});
+            const rawSenderPn = msg.key?.senderPn || msg.key?.participantPn;
+            if (rawSenderPn) {
+              const pnJid = rawSenderPn.includes('@') ? rawSenderPn : `${rawSenderPn}@s.whatsapp.net`;
+              addLidMapping(senderJid, pnJid);
+            } else {
+              logger.warn(`⚠️ LID غير محلول: ${msg.pushName}`, { lid: senderJid?.substring(0, 15) });
+              queueLidForResolve(senderJid);
+              if (currentSock && remoteJid && senderJid && senderJid.includes('@lid')) {
+                (async () => {
+                  try {
+                    const meta = await currentSock.groupMetadata(remoteJid);
+                    if (meta?.participants) {
+                      for (const p of meta.participants) {
+                        const pLid = p.lid || '';
+                        const pId = p.id || '';
+                        const sLid = senderJid.split(':')[0];
+                        const pLidBase = pLid.split(':')[0];
+                        if (pLid === senderJid || pLidBase === sLid) {
+                          if (pId && pId.includes('@s.whatsapp.net')) {
+                            addLidMapping(senderJid, pId);
+                            if (s && s.updateWhatsappName && msg.pushName) {
+                              s.updateWhatsappName(pId.replace('@s.whatsapp.net', ''), msg.pushName).catch(() => {});
+                            }
                           }
+                          break;
                         }
-                        break;
                       }
                     }
+                  } catch (e) {
+                    logger.debug('فشل جلب groupMetadata لحل LID', { error: e.message });
                   }
-                } catch (e) {
-                  logger.debug('فشل جلب groupMetadata لحل LID', { error: e.message });
-                }
-              })();
+                })();
+              }
             }
           }
         }
       }
-    }
 
-    // تمرير الرسالة لمعالج server.js
-    if (messageHandler) {
-      try {
-        await messageHandler(msg, connectionManager.getSocket());
-      } catch (error) {
-        logger.error('خطأ في المعالجة', { error: error.message, msgId });
-      }
+      // تمرير الرسالة لمعالج server.js. يجب أن يصل أي فشل إلى catch أدناه.
+      if (!messageHandler) throw new Error('معالج الرسائل غير مسجل بعد');
+      await messageHandler(msg, sock || connectionManager.getSocket());
+
+      // التأكيد المتأخر: لا تعليم ولا تقدم للمؤشر إلا بعد نجاح جميع الخطوات السابقة.
+      // محلل الرسائل لا يضع العلامة بنفسه؛ لو فشلت خطوة في server.js يجب أن يبقى
+      // قابلاً لإعادة التحليل عند المحاولة التالية، لا أن يرجع null كمكرر.
+      const parser = require('./parser');
+      if (typeof parser.markProcessed === 'function') parser.markProcessed(msgId);
+      messageLog.markDone(msgId, { groupId: remoteJid, source: 'live' });
+      recoveryService.markProcessed(msgId);
+      const msgTs = (msg.messageTimestamp || 0) * 1000;
+      recoveryService.updateCursor(remoteJid, msgId, msgTs);
+      logger.info(`[WA] ✅ MESSAGE_CONFIRMED | ${msgId.substring(0, 8)}`);
+    } catch (error) {
+      try { messageLog.markFailed(msgId, error, { groupId: remoteJid, source: 'live' }); }
+      catch (logError) { logger.error('[WA] ❌ تعذر تسجيل فشل معالجة الرسالة', { error: logError.message, msgId }); }
+      logger.error('[WA] ❌ MESSAGE_PROCESSING_FAILED | ستعاد المحاولة', { error: error.message, msgId });
+    } finally {
+      inFlightMessageIds.delete(msgId);
     }
   }
 }
@@ -1587,6 +1691,9 @@ module.exports = {
   connectionManager,
   recoveryService,
   healthMonitor,
+  monitorTargetGroups,
+  getGroupMonitoringStatus,
+  getIncompleteMessageReviews: () => recoveryService.getIncompleteReviews({ limit: 100 }),
 };
 
 // دوال مساعدة للوصول من server.js

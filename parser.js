@@ -317,7 +317,6 @@ async function processMessage(msg, sock) {
     }
 
     const transactionId = uuidv4();
-    addProcessedId(messageId);
 
     // جلب بيانات الرسالة الأصلية (صاحب رسالة "تم")
     const originalMsg = whatsapp.getCachedMessage(targetMessageId);
@@ -424,9 +423,8 @@ async function processMessage(msg, sock) {
   const msgType = whatsapp.getMessageType(msg); // 'text' | 'audio' | 'image' | 'video' | 'other'
 
   // قاعدة صريحة: الملصقات ليست طلبات، ولا يجوز أن تكون مرجعاً لعملية.
-  // نضيف المعرّف كمعالج كي لا يعاد فحصه أثناء الاستعادة، من دون إنشاء cache أو رصيد.
+  // وسم الرسالة يُؤجّل إلى أن تنجح طبقة واتساب في إتمام المعالجة كاملة.
   if (msgType === 'sticker') {
-    addProcessedId(messageId);
     logger.info('⚠️ تجاهل ملصق: لا يُحتسب كطلب أو حركة', {
       phone: effectiveSenderPhone,
       msgId: messageId.substring(0, 8),
@@ -452,7 +450,6 @@ async function processMessage(msg, sock) {
 
   // حتى لو كان الرد نصاً مثل «تم»، لا نسمح بتحويل الرد على ملصق إلى استلام.
   if (contextInfo?.quotedMessage?.stickerMessage) {
-    addProcessedId(messageId);
     logger.info('⚠️ تجاهل رد على ملصق: لا يُحتسب كاستلام أو حركة', {
       phone: effectiveSenderPhone,
       msgId: messageId.substring(0, 8),
@@ -468,7 +465,6 @@ async function processMessage(msg, sock) {
     // «تم» أو أي كلمة استلام مستقلة ليست طلباً ولا تُحفظ كمرجع لعملية.
     // يحمي ذلك من احتساب تفاعل الشخص على رسالة «تم» كتبها بنفسه.
     if (isStandaloneAcceptWithoutOrder(text, isReply)) {
-      addProcessedId(messageId);
       logger.info('⚠️ تجاهل رسالة استلام مستقلة بلا طلب مقتبس', {
         phone: effectiveSenderPhone,
         text: (text || '').substring(0, 30),
@@ -484,7 +480,6 @@ async function processMessage(msg, sock) {
     }
 
     const orderClassification = classifyOriginalOrder({ text, messageType: msgType });
-    addProcessedId(messageId);
     return {
       type: 'order',
       messageId,
@@ -646,7 +641,6 @@ async function processMessage(msg, sock) {
   const quantity = isQuantityEmoji(text) ? emojiToNumber(text) : 0;
 
   const transactionId = uuidv4();
-  addProcessedId(messageId);
 
   logger.info('🎯 رد استلام (محاولة)', {
     id: transactionId.substring(0, 8),
@@ -682,6 +676,7 @@ async function processMessage(msg, sock) {
 
 module.exports = {
   processMessage,
+  markProcessed: addProcessedId,
   updateAcceptWords,
   getAcceptWords,
   extractQuantity,
