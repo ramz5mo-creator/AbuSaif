@@ -7,7 +7,7 @@
  *    (لا تُسجَّل كطلب ولا كانتاج/استلام)
  *
  * 2. إيموجي (👍/2️⃣/3️⃣/5️⃣) على رسالة "تم":
- *    → انتاج لمن وضع الإيموجي
+ *    → انتاج لمن وضع الإيموجي (حتى لو وصلت إلى 10 أو أكثر يتم تسجيلها كاملة)
  *    → استلام لمن كتب "تم" (الكابتن)
  *    → يُسجَّل في ورقة يومية (كل يوم ورقة)
  *
@@ -23,6 +23,24 @@ const path = require('path');
 const crypto = require('crypto');
 const QRCode = require('qrcode');
 const config = require('./config');
+
+// ====================================================
+// تصحيح المسارات تلقائياً لتجنب مشكلة EACCES على Render
+// ====================================================
+try {
+  if (config.whatsapp) {
+    if (!config.whatsapp.authPath || config.whatsapp.authPath.startsWith('/app/')) {
+      config.whatsapp.authPath = path.join(__dirname, 'auth');
+    }
+  }
+  if (config.volumePath && config.volumePath.startsWith('/app/')) {
+    config.volumePath = path.join(__dirname, 'volume');
+  }
+  if (config.logging && config.logging.logsPath && config.logging.logsPath.startsWith('/app/')) {
+    config.logging.logsPath = path.join(__dirname, 'logs');
+  }
+} catch (e) {}
+
 const logger = require('./logger');
 const whatsapp = require('./whatsapp');
 const parser = require('./parser');
@@ -49,7 +67,6 @@ const telegramMonitor = require('./telegram-monitor');
       try {
         const stat = fs.statSync(filePath);
         const sizeMB = stat.size / (1024 * 1024);
-        // تفريغ فوري لأي ملف سجل يتجاوز 10MB
         if (sizeMB > 10) {
           fs.writeFileSync(filePath, '');
           freed += stat.size;
@@ -67,19 +84,11 @@ const telegramMonitor = require('./telegram-monitor');
   }
 })();
 
-
-
-// ====================================================
-// v5: Deduplication — منع معالجة نفس الرسالة مرتين
-// يعمل مع الرسائل العادية والمسترجعة (Recovery)
-// ====================================================
 const processedMessageIds = new Set();
 const PROCESSED_MSG_MAX = 10000;
-// Map مؤقتة لتخزين الإيموجي الجديد (غير المعتمد) عند تغيير الإيموجي
-// مفتاح: `${phone}_${targetMsgId}` قيمة: { emoji, ts }
 const pendingEmojiReplace = new Map();
 const EMOJI_REPLACEMENT_GRACE_MS = 1200;
-const PENDING_EMOJI_TTL = 5000; // 5 ثوانٍ كافية لربط remove + add
+const PENDING_EMOJI_TTL = 5000;
 
 function isAlreadyProcessed(msgId) {
   return processedMessageIds.has(msgId);
@@ -94,10 +103,6 @@ function markAsProcessed(msgId) {
   }
 }
 
-/**
- * عند وصول رد «تم» ثانٍ على التسجيل الصوتي، تصبح كل ردود هذا التسجيل غير
- * صالحة. إذا سبق أن سُجّلت حركة فنعكسها ونبقي أثراً واضحاً في سجل التعديلات.
- */
 async function invalidateVoiceReplyTransactions(voiceStatus) {
   if (!voiceStatus?.invalidated || !Array.isArray(voiceStatus.replyMessageIds)) return;
   for (const replyMessageId of voiceStatus.replyMessageIds) {
@@ -127,24 +132,10 @@ async function invalidateVoiceReplyTransactions(voiceStatus) {
         newQuantity: 0,
         notes: `تعدد ردود تم على التسجيل ${voiceStatus.voiceMessageId}`,
       });
-      logger.warn('↩️ عكس حركة تسجيل صوتي بسبب تعدد ردود تم', {
-        voiceMessageId: voiceStatus.voiceMessageId?.substring(0, 8),
-        replyMessageId: replyMessageId.substring(0, 8),
-        quantity,
-      });
-    } catch (error) {
-      logger.error('❌ فشل عكس حركة تسجيل صوتي غير صالحة', {
-        replyMessageId: replyMessageId.substring(0, 8),
-        error: error.message,
-      });
-    }
+    } catch (error) {}
   }
 }
 
-/**
- * قاعدة التسجيل الصوتي: لا يقبل رد «تم» سوى إيموجي كمية نشط واحد. عند وجود
- * أكثر من إيموجي، أو عدم بقاء إيموجي كمية، نعكس الحركة ونتوثق السبب.
- */
 async function invalidateVoiceEmojiTransaction(voiceEmojiStatus, reason) {
   if (!voiceEmojiStatus?.replyMessageId) return;
   const transaction = await sheets.findTransactionByMessageId(voiceEmojiStatus.replyMessageId, null);
@@ -173,21 +164,9 @@ async function invalidateVoiceEmojiTransaction(voiceEmojiStatus, reason) {
       newQuantity: 0,
       notes: `${reason} على التسجيل ${voiceEmojiStatus.voiceMessageId}`,
     });
-    logger.warn('↩️ عكس حركة تسجيل صوتي بسبب قاعدة الإيموجي الواحد', {
-      voiceMessageId: voiceEmojiStatus.voiceMessageId?.substring(0, 8),
-      replyMessageId: voiceEmojiStatus.replyMessageId?.substring(0, 8),
-      activeEmojiCount: voiceEmojiStatus.activeEmojiCount,
-      quantity,
-    });
-  } catch (error) {
-    logger.error('❌ فشل عكس حركة التسجيل الصوتي بسبب الإيموجيات', {
-      replyMessageId: voiceEmojiStatus.replyMessageId?.substring(0, 8),
-      error: error.message,
-    });
-  }
+  } catch (error) {}
 }
 
-/** يعيد الحركة في الصف نفسه عندما يبقى إيموجي كمية واحد بعد حذف الإضافي. */
 async function restoreVoiceEmojiTransaction(voiceEmojiStatus) {
   if (!voiceEmojiStatus?.replyMessageId || voiceEmojiStatus.activeEmojiCount !== 1 || !voiceEmojiStatus.singleEmoji) return false;
   const transaction = await sheets.findTransactionByMessageIdIncludingCancelled(voiceEmojiStatus.replyMessageId, null);
@@ -217,24 +196,12 @@ async function restoreVoiceEmojiTransaction(voiceEmojiStatus) {
       newQuantity: quantity,
       notes: `استرجاع تلقائي بعد حذف الإيموجي الإضافي على التسجيل ${voiceEmojiStatus.voiceMessageId}`,
     });
-    logger.info('🔄 استرجاع حركة تسجيل صوتي بعد عودة إيموجي واحد', {
-      voiceMessageId: voiceEmojiStatus.voiceMessageId?.substring(0, 8),
-      replyMessageId: voiceEmojiStatus.replyMessageId?.substring(0, 8),
-      quantity,
-    });
     return true;
   } catch (error) {
-    logger.error('❌ فشل استرجاع حركة التسجيل الصوتي', {
-      replyMessageId: voiceEmojiStatus.replyMessageId?.substring(0, 8),
-      error: error.message,
-    });
     return false;
   }
 }
 
-// ====================================================
-// خادم ويب لعرض QR + حالة البوت
-// ====================================================
 let currentQR = null;
 let oneTimeBroadcast = null;
 
@@ -246,7 +213,7 @@ const httpServer = http.createServer(async (req, res) => {
         <div style="border:2px solid #0f0;padding:20px;border-radius:10px;display:inline-block;">
           <h1>✅ البوت متصل بواتساب</h1>
           <p>tamCache: ${whatsapp.getCacheStats().tamCache} رسالة</p>
-          <p>نظام التسجيل: <span style="color:#ff0;">مُفعّل (المسجلين فقط)</span></p>
+          <p>نظام التسجيل: <span style="color:#ff0;">مُفعّل (بدون قيود على الكميات)</span></p>
           <p>آخر تحديث: ${new Date().toLocaleString('ar-JO', {timeZone:'Asia/Amman'})}</p>
         </div>
         <div style="margin-top:30px;">
@@ -277,7 +244,6 @@ const httpServer = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', ...whatsapp.getCacheStats() }));
   } else if (req.url === '/status') {
-    // v5: حالة النظام الكاملة
     const cm = whatsapp.getConnectionManager ? whatsapp.getConnectionManager() : null;
     const recoveryStats = whatsapp.getRecoveryStats ? whatsapp.getRecoveryStats() : {};
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -294,118 +260,6 @@ const httpServer = http.createServer(async (req, res) => {
       uptime: process.uptime(),
       timestamp: new Date().toISOString()
     }, null, 2));
-  } else if (req.url === '/recovery-status/dreamax-2026-08-12') {
-    // قراءة فقط: لا تشغّل أي Recovery ولا تعرض بيانات رسائل أو أرقام هواتف.
-    const receiptPath = path.resolve(config.volumePath || path.join(__dirname, 'volume'), 'historical-recovery-dreamax-2026-08-12.complete.json');
-    let receipt = null;
-    try {
-      if (fs.existsSync(receiptPath)) receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
-    } catch (error) {
-      logger.warn('[Historical Recovery] تعذر قراءة إيصال دريمكس', { error: error.message });
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({
-      recovery: 'dreamax-2026-08-12',
-      completed: Boolean(receipt),
-      result: receipt ? {
-        completedAt: receipt.completedAt || null,
-        recovered: Number(receipt.recovered || 0),
-        skipped: Number(receipt.skipped || 0),
-        errors: Number(receipt.errors || 0),
-      } : null,
-    }, null, 2));
-  } else if (req.method === 'POST' && req.url === '/pairing-code') {
-    // مسار مؤقت للربط البديل برقم الهاتف. لا يسجل الرقم أو الرمز ولا ينشئ Socket جديداً.
-    let body = '';
-    for await (const chunk of req) {
-      body += chunk;
-      if (body.length > 128) {
-        res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ success: false, error: 'طلب كبير غير مسموح' }));
-        return;
-      }
-    }
-
-    try {
-      const payload = JSON.parse(body || '{}');
-      const pairingCode = await whatsapp.requestPairingCode(payload.phone);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify({ success: true, pairingCode }));
-    } catch (error) {
-      logger.warn('[Pairing Code] تعذر إصدار رمز الربط', { error: error.message });
-      res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ success: false, error: 'تعذر إصدار رمز الربط حالياً' }));
-    }
-  } else if (req.method === 'POST' && req.url === '/qr/refresh') {
-    // مسار إداري مؤقت: يلغي رمز الهاتف المعلّق فقط ويطلب QR جديداً.
-    try {
-      const refreshed = await whatsapp.refreshQRCode();
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify({ success: true, refreshed }));
-    } catch (error) {
-      logger.warn('[QR Refresh] تعذر التحول إلى QR', { error: error.message });
-      res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ success: false, error: 'تعذر تجهيز QR حالياً' }));
-    }
-  } else if (req.method === 'POST' && req.url === '/internal/recover-dreamax-2026-08-12') {
-    const expectedToken = process.env.HISTORICAL_RECOVERY_TOKEN || '';
-    const receivedToken = String(req.headers['x-historical-recovery-token'] || '');
-    const tokenMatches = expectedToken.length > 0 && receivedToken.length === expectedToken.length &&
-      crypto.timingSafeEqual(Buffer.from(expectedToken), Buffer.from(receivedToken));
-    if (!tokenMatches) {
-      res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ success: false, error: 'غير مصرح' }));
-      return;
-    }
-
-    const socket = whatsapp.getSocket();
-    const recovery = whatsapp.recoveryService;
-    const dreamax = (config.whatsapp.targetGroups || []).find(group => group.prefix === 'دريمكس');
-    if (!socket || !whatsapp.isConnected?.() || !recovery || !dreamax) {
-      res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ success: false, error: 'واتساب أو خدمة الاسترجاع غير جاهزة' }));
-      return;
-    }
-
-    try {
-      const result = await recovery.runHistoricalRecovery(socket, {
-        groupId: dreamax.id,
-        fromTimestamp: Date.parse('2026-08-11T21:00:00.000Z'),
-        toTimestamp: Date.parse('2026-08-11T21:41:59.999Z'),
-      });
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ success: true, ...result }));
-    } catch (error) {
-      logger.error('[Historical Recovery] فشل الاسترجاع المعتمد لدريمكس', { error: error.message });
-      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ success: false, error: error.message }));
-    }
-  } else if (req.url.startsWith('/debug/')) {
-    const phone = req.url.replace('/debug/', '').trim();
-    const lookup = whatsapp.lookupPhone(phone);
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ phone, ...lookup }, null, 2));
-  } else if (req.url === '/participants') {
-    try {
-      const sock = whatsapp.getSocket();
-      const targetGroups = config.whatsapp.targetGroups || [];
-      const allParticipants = {};
-      for (const group of targetGroups) {
-        try {
-          const metadata = await sock.groupMetadata(group.id);
-          allParticipants[group.name] = (metadata.participants || []).map(p => ({
-            id: p.id || null,
-            lid: p.lid || null,
-            admin: p.admin || null
-          }));
-        } catch(e) { allParticipants[group.name] = 'error: ' + e.message; }
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify(allParticipants, null, 2));
-    } catch(e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
-    }
   } else if (req.url === '/groups') {
     const groups = whatsapp.getDiscoveredGroups();
     let html = `<html><head><meta charset="utf-8"><style>
@@ -426,85 +280,9 @@ const httpServer = http.createServer(async (req, res) => {
       html += `<tr><td>${i}</td><td>${info.name || '-'}</td><td>${info.messageCount}</td><td>${lastTime}</td><td class="id">${id}</td></tr>`;
     }
     html += `</table>`;
-    html += `<p style="text-align:center;margin-top:20px;color:#ff0;">حدّث الصفحة بعد إرسال رسائل في الجروبات</p>`;
     html += `<script>setTimeout(()=>location.reload(), 15000);</script></body></html>`;
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(html);
-  } else if (req.url === '/all-groups') {
-    const sock = whatsapp.getSocket();
-    if (!sock) {
-      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('البوت غير متصل حالياً');
-      return;
-    }
-    try {
-      const groups = await sock.groupFetchAllParticipating();
-      const groupList = Object.values(groups);
-      let html = `<html><head><meta charset="utf-8"><style>
-        body{background:#111;color:#0f0;font-family:monospace;padding:20px;direction:rtl;}
-        table{border-collapse:collapse;width:100%;margin-top:20px;}
-        th,td{border:1px solid #0f0;padding:10px;text-align:center;}
-        th{background:#0f0;color:#000;}
-        tr:hover{background:#1a3a1a;}
-        h1{text-align:center;}
-        .id{font-size:12px;color:#fff;word-break:break-all;user-select:all;background:#333;padding:5px;}
-      </style></head><body>`;
-      html += `<h1>📋 كافة الجروبات المشترك بها (${groupList.length})</h1>`;
-      html += `<table><tr><th>#</th><th>اسم الجروب</th><th>معرف الجروب (JID)</th></tr>`;
-      groupList.forEach((group, i) => {
-        html += `<tr><td>${i+1}</td><td>${group.subject}</td><td><div class="id">${group.id}</div></td></tr>`;
-      });
-      html += `</table></body></html>`;
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(html);
-    } catch (e) {
-      res.writeHead(500);
-      res.end('Error: ' + e.message);
-    }
-  } else if (req.url === '/reconcile' || req.url.startsWith('/reconcile?')) {
-    try {
-      const urlParams = new URL(req.url, 'http://localhost').searchParams;
-      const dateStr = urlParams.get('date') || null;
-      const result = await sheets.reconcileDailySheets(dateStr);
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      if (result.success) {
-        const rows = result.results.map(r => `<li>${r}</li>`).join('');
-        res.end(`<html><body style="background:#111;color:#0f0;text-align:center;padding:40px;font-family:monospace;direction:rtl;">
-          <h1>🔄 تمت المطابقة بنجاح!</h1>
-          <p>التاريخ: ${result.date}</p>
-          <ul style="list-style:none;padding:0">${rows}</ul>
-          <br><a href="/" style="color:#fff;text-decoration:none;border:1px solid #fff;padding:10px;border-radius:5px;">العودة للرئيسية</a>
-        </body></html>`);
-      } else {
-        res.end('فشلت المطابقة: ' + result.message);
-      }
-    } catch (e) {
-      res.writeHead(500);
-      res.end('Error: ' + e.message);
-    }
-  } else if (req.url === '/weekly-report') {
-    if (config.sheets.weeklyReport?.enabled !== true) {
-      res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end('<html><body style="background:#111;color:#ff0;text-align:center;padding:40px;font-family:monospace;direction:rtl;"><h1>تقرير نهاية الأسبوع موقوف مؤقتاً</h1><p>لن يتم إنشاء أو تعديل أي تقرير حتى إعادة تفعيله صراحةً.</p><br><a href="/" style="color:#fff;">العودة للرئيسية</a></body></html>');
-      return;
-    }
-    try {
-      const success = await sheets.generateWeeklyReport();
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      if (success) {
-        res.end(`<html><body style="background:#111;color:#0f0;text-align:center;padding:40px;font-family:monospace;direction:rtl;">
-          <h1>📊 تم توليد تقرير نهاية الأسبوع بنجاح!</h1>
-          <p>يمكنك الآن مراجعة ورقة "نهاية الاسبوع" في Google Sheets.</p>
-          <br>
-          <a href="/" style="color:#fff;text-decoration:none;border:1px solid #fff;padding:10px;border-radius:5px;">العودة للرئيسية</a>
-        </body></html>`);
-      } else {
-        res.end('فشل توليد التقرير. راجع السجلات.');
-      }
-    } catch (e) {
-      res.writeHead(500);
-      res.end('Error: ' + e.message);
-    }
   } else if (req.url === '/logout') {
     const authPath = path.resolve(config.whatsapp.authPath || path.join(__dirname, 'auth'));
     try {
@@ -518,560 +296,18 @@ const httpServer = http.createServer(async (req, res) => {
             fs.unlinkSync(curPath);
           }
         }
-        logger.info('🗑️ تم مسح محتويات مجلد الجلسة');
       }
-    } catch (e) {
-      logger.error('خطأ في مسح الجلسة', { error: e.message });
-    }
+    } catch (e) {}
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(`<html><body style="background:#111;color:#ff0;font-size:20px;text-align:center;padding:40px;font-family:monospace;">
       <h1>🗑️ تم مسح الجلسة</h1>
       <p>البوت سيعيد التشغيل الآن...</p>
-      <p>انتظر دقيقة ثم افتح الصفحة الرئيسية لمسح QR الجديد</p>
       <script>setTimeout(()=>location.href='/', 5000);</script>
     </body></html>`);
     setTimeout(() => process.exit(0), 1000);
-  } else if (req.url === '/dashboard') {
-    const groups = config.whatsapp.targetGroups || [];
-    const html = `<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>لوحة التحكم — AbuSaif</title>
-  <style>
-    *{box-sizing:border-box;margin:0;padding:0;}
-    body{background:linear-gradient(135deg,#0a0a1a 0%,#0d1b2a 100%);min-height:100vh;font-family:'Segoe UI',Tahoma,sans-serif;color:#e0e0e0;}
-    .header{background:rgba(0,0,0,0.4);backdrop-filter:blur(10px);padding:20px 30px;border-bottom:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:space-between;}
-    .header h1{font-size:24px;color:#fff;font-weight:700;}
-    .header .subtitle{color:#888;font-size:14px;margin-top:4px;}
-    .status-dot{width:10px;height:10px;border-radius:50%;background:#00ff88;display:inline-block;margin-left:8px;animation:pulse 2s infinite;}
-    @keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.4;}}
-    .container{padding:30px;max-width:1200px;margin:0 auto;}
-    .page-title{font-size:20px;color:#aaa;margin-bottom:25px;}
-    .groups-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:20px;}
-    .group-card{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:16px;padding:25px;cursor:pointer;transition:all 0.3s;text-decoration:none;color:inherit;display:block;}
-    .group-card:hover{background:rgba(255,255,255,0.1);border-color:rgba(99,179,237,0.5);transform:translateY(-3px);box-shadow:0 10px 30px rgba(0,0,0,0.3);}
-    .group-icon{width:56px;height:56px;border-radius:14px;display:flex;align-items:center;justify-content:center;font-size:26px;margin-bottom:15px;}
-    .group-name{font-size:20px;font-weight:700;color:#fff;margin-bottom:6px;}
-    .group-meta{color:#888;font-size:13px;}
-    .group-arrow{float:left;color:#63b3ed;font-size:20px;margin-top:-5px;}
-    .card-dreamex .group-icon{background:linear-gradient(135deg,#667eea,#764ba2);}
-    .card-nashama .group-icon{background:linear-gradient(135deg,#f093fb,#f5576c);}
-    .card-alsaif .group-icon{background:linear-gradient(135deg,#4facfe,#00f2fe);}
-    .card-default .group-icon{background:linear-gradient(135deg,#43e97b,#38f9d7);}
-    .loading{text-align:center;padding:60px;color:#666;}
-    .back-btn{display:inline-flex;align-items:center;gap:8px;color:#63b3ed;text-decoration:none;font-size:14px;padding:8px 16px;border:1px solid rgba(99,179,237,0.3);border-radius:8px;transition:all 0.2s;}
-    .back-btn:hover{background:rgba(99,179,237,0.1);}
-    .days-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;}
-    .day-card{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:20px;cursor:pointer;transition:all 0.3s;text-decoration:none;color:inherit;display:block;}
-    .day-card:hover{background:rgba(255,255,255,0.09);border-color:rgba(99,179,237,0.4);transform:translateY(-2px);}
-    .day-date{font-size:18px;font-weight:700;color:#fff;margin-bottom:12px;}
-    .day-stats{display:flex;gap:12px;}
-    .stat{flex:1;background:rgba(0,0,0,0.3);border-radius:8px;padding:10px;text-align:center;}
-    .stat-val{font-size:22px;font-weight:700;}
-    .stat-lbl{font-size:11px;color:#888;margin-top:2px;}
-    .prod .stat-val{color:#68d391;}
-    .recv .stat-val{color:#63b3ed;}
-    .today-badge{background:linear-gradient(135deg,#f6d365,#fda085);color:#000;font-size:11px;font-weight:700;padding:3px 10px;border-radius:20px;margin-right:8px;vertical-align:middle;}
-    .data-table{width:100%;border-collapse:collapse;margin-top:20px;}
-    .data-table th{background:rgba(255,255,255,0.08);padding:12px 16px;text-align:right;font-size:13px;color:#aaa;border-bottom:1px solid rgba(255,255,255,0.1);}
-    .data-table td{padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.05);font-size:14px;}
-    .data-table tr:hover td{background:rgba(255,255,255,0.04);}
-    .data-table .phone{color:#888;font-size:12px;direction:ltr;text-align:left;}
-    .data-table .name{font-weight:600;color:#fff;}
-    .data-table .prod{color:#68d391;font-weight:700;font-size:16px;text-align:center;}
-    .data-table .recv{color:#63b3ed;font-weight:700;font-size:16px;text-align:center;}
-    .totals-bar{display:flex;gap:20px;margin-bottom:25px;}
-    .total-box{background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:16px 24px;flex:1;text-align:center;}
-    .total-box .val{font-size:32px;font-weight:800;}
-    .total-box .lbl{font-size:12px;color:#888;margin-top:4px;}
-    .total-prod .val{color:#68d391;}
-    .total-recv .val{color:#63b3ed;}
-    .total-diff .val{color:#f6ad55;}
-    .spinner{display:inline-block;width:20px;height:20px;border:2px solid rgba(255,255,255,0.2);border-top-color:#63b3ed;border-radius:50%;animation:spin 0.8s linear infinite;}
-    @keyframes spin{to{transform:rotate(360deg);}}
-    #content{min-height:300px;}
-  </style>
-</head>
-<body>
-  <div class="header">
-    <div>
-      <h1>✨ لوحة التحكم <span class="status-dot"></span></h1>
-      <div class="subtitle">نظام تجريد الطلبات — AbuSaif</div>
-    </div>
-    <div style="color:#888;font-size:13px;" id="clock"></div>
-  </div>
-  <div class="container">
-    <div id="content">
-      <div class="loading">جاري التحميل...</div>
-    </div>
-  </div>
-  <script>
-    const GROUPS = ${JSON.stringify(groups.map(g => ({ name: g.name, prefix: g.prefix, id: g.id })))};
-    
-    function updateClock() {
-      const now = new Date();
-      const t = now.toLocaleString('ar-JO', {timeZone:'Asia/Amman',hour:'2-digit',minute:'2-digit',second:'2-digit',weekday:'long',day:'numeric',month:'long'});
-      document.getElementById('clock').textContent = t;
-    }
-    setInterval(updateClock, 1000); updateClock();
-
-    function getCardClass(name) {
-      const n = name.toLowerCase();
-      if(n.includes('dream')) return 'card-dreamex';
-      if(n.includes('nasha')) return 'card-nashama';
-      if(n.includes('saif')) return 'card-alsaif';
-      return 'card-default';
-    }
-    function getIcon(name) {
-      const n = name.toLowerCase();
-      if(n.includes('dream')) return '🚀';
-      if(n.includes('nasha')) return '💥';
-      if(n.includes('saif')) return '⚔️';
-      return '📊';
-    }
-
-    async function showLinkLid() {
-      document.getElementById('content').innerHTML = '<div class="loading"><div class="spinner"></div> جاري جلب بيانات الربط...</div>';
-      const res = await fetch('/api/registered-lid-status');
-      const registered = await res.json();
-      const unresolved = registered.filter(r => !r.resolved);
-      const resolved = registered.filter(r => r.resolved);
-      let html = '<a class="back-btn" onclick="showGroups();return false;" href="#">&rarr; الرئيسية</a>';
-      html += '<h2 style="margin:20px 0 10px;color:#fff;font-size:20px;">🔗 ربط LID يدوياً</h2>';
-      html += '<p style="color:#888;font-size:13px;margin-bottom:20px;">الأشخاص الذين لم يُربط رقمهم بعد — عند وضع إيموجي على ردودهم لن يُسجَّل الانتاج لهم</p>';
-      if(!unresolved.length) {
-        html += '<div style="background:rgba(104,211,145,0.1);border:1px solid rgba(104,211,145,0.3);border-radius:12px;padding:20px;text-align:center;color:#68d391;">✅ جميع المسجلين مربوطون بـ LID</div>';
-      } else {
-        html += '<div style="background:rgba(245,101,101,0.1);border:1px solid rgba(245,101,101,0.3);border-radius:12px;padding:16px;margin-bottom:20px;">';
-        html += '<span style="color:#fc8181;font-weight:700;">' + unresolved.length + ' شخص غير مربوط</span>';
-        html += '<span style="color:#888;font-size:13px;margin-right:10px;">— أدخل رقم الهاتف لكل شخص لربطه</span></div>';
-        html += '<table class="data-table"><thead><tr><th>الاسم</th><th>الهاتف</th><th>رقم الهاتف (للربط)</th><th></th></tr></thead><tbody>';
-        for(const r of unresolved) {
-          html += '<tr id="row-' + r.phone + '">';
-          html += '<td class="name">' + r.name + '</td>';
-          html += '<td class="phone">' + r.phone + '</td>';
-          html += '<td><input id="inp-' + r.phone + '" type="text" placeholder="مثال: 962778793241" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);border-radius:6px;padding:6px 10px;color:#fff;width:200px;font-size:13px;direction:ltr;"></td>';
-          html += '<td><button onclick="linkLid(\'' + r.phone + '\')" style="background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;border:none;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px;">ربط</button></td>';
-          html += '</tr>';
-        }
-        html += '</tbody></table>';
-      }
-      if(resolved.length) {
-        html += '<h3 style="margin:30px 0 15px;color:#68d391;font-size:16px;">✅ مربوطون (' + resolved.length + ')</h3>';
-        html += '<table class="data-table"><thead><tr><th>الاسم</th><th>الهاتف</th><th>LID</th></tr></thead><tbody>';
-        for(const r of resolved) {
-          html += '<tr><td class="name">' + r.name + '</td><td class="phone">' + r.phone + '</td><td style="color:#888;font-size:11px;direction:ltr;">' + (r.lid||'').substring(0,20) + '...</td></tr>';
-        }
-        html += '</tbody></table>';
-      }
-      document.getElementById('content').innerHTML = html;
-    }
-
-    async function linkLid(phone) {
-      const inp = document.getElementById('inp-' + phone);
-      const fullPhone = (inp.value || '').trim().replace(/[^0-9]/g, '');
-      if(!fullPhone || fullPhone.length < 9) { alert('أدخل رقم هاتف صحيح'); return; }
-      let lid = null;
-      for(const g of GROUPS) {
-        const res2 = await fetch('/api/group-members?groupId=' + encodeURIComponent(g.id));
-        const members = await res2.json();
-        for(const m of members) {
-          if(!m.resolved && m.pushName) {
-            const row = document.getElementById('row-' + phone);
-            const nameCell = row ? row.cells[0].textContent : '';
-            if(m.pushName.includes(nameCell.trim()) || nameCell.includes(m.pushName.trim())) {
-              lid = m.lid;
-              break;
-            }
-          }
-        }
-        if(lid) break;
-      }
-      const res3 = await fetch('/api/link-lid?lid=' + encodeURIComponent(lid || 'manual-' + phone) + '&phone=' + encodeURIComponent(fullPhone), { method: 'POST' });
-      const data = await res3.json();
-      if(data.ok || data.lid) {
-        const row = document.getElementById('row-' + phone);
-        if(row) { row.style.opacity='0.4'; row.cells[3].innerHTML = '<span style="color:#68d391;">✅ تم الربط</span>'; }
-      } else {
-        alert('فشل الربط: ' + (data.error || 'خطأ غير معروف'));
-      }
-    }
-
-    async function showMembersStatus() {
-      document.getElementById('content').innerHTML = '<div class="loading"><div class="spinner"></div> جاري جلب حالة الأعضاء...</div>';
-      let html = '<a class="back-btn" onclick="showGroups();return false;" href="#">&rarr; الرئيسية</a>';
-      html += '<h2 style="margin:20px 0 10px;color:#fff;font-size:20px;">👥 حالة أعضاء الجروبات</h2>';
-      html += '<p style="color:#888;font-size:13px;margin-bottom:20px;">🟢 رقم حقيقي &nbsp;|&nbsp; 🟡 LID محلول &nbsp;|&nbsp; 🔴 LID غير محلول</p>';
-      for(const g of GROUPS) {
-        html += '<h3 style="color:#f6ad55;margin:25px 0 10px;">' + g.prefix + '</h3>';
-        try {
-          const r = await fetch('/api/group-members?groupId=' + encodeURIComponent(g.id));
-          const members = await r.json();
-          if(!members.length) { html += '<p style="color:#888;">لا يوجد بيانات</p>'; continue; }
-          const real = members.filter(function(m){ return m.status === 'real'; });
-          const resolved = members.filter(function(m){ return m.status === 'resolved'; });
-          const unresolved = members.filter(function(m){ return m.status === 'unresolved'; });
-          html += '<div style="display:flex;gap:15px;margin-bottom:12px;flex-wrap:wrap;">';
-          html += '<span style="background:rgba(104,211,145,0.15);border:1px solid #68d391;border-radius:8px;padding:5px 12px;color:#68d391;font-size:13px;">🟢 رقم حقيقي: ' + real.length + '</span>';
-          html += '<span style="background:rgba(246,173,85,0.15);border:1px solid #f6ad55;border-radius:8px;padding:5px 12px;color:#f6ad55;font-size:13px;">🟡 LID محلول: ' + resolved.length + '</span>';
-          html += '<span style="background:rgba(245,101,101,0.15);border:1px solid #fc8181;border-radius:8px;padding:5px 12px;color:#fc8181;font-size:13px;">🔴 LID غير محلول: ' + unresolved.length + '</span>';
-          html += '<span style="background:rgba(160,174,192,0.15);border:1px solid #a0aec0;border-radius:8px;padding:5px 12px;color:#a0aec0;font-size:13px;">المجموع: ' + members.length + '</span>';
-          html += '</div>';
-          html += '<table class="data-table"><thead><tr><th>الاسم</th><th>الهاتف / LID</th><th>الحالة</th></tr></thead><tbody>';
-          const sorted = members.slice().sort(function(a,b){
-            const order = {unresolved:0, resolved:1, real:2};
-            return (order[a.status]||0) - (order[b.status]||0);
-          });
-          for(let i=0;i<sorted.length;i++) {
-            const m = sorted[i];
-            const statusIcon = m.status==='real' ? '🟢' : m.status==='resolved' ? '🟡' : '🔴';
-            const statusText = m.status==='real' ? 'رقم حقيقي' : m.status==='resolved' ? 'LID محلول' : 'LID غير محلول';
-            const phoneDisplay = m.phone || ((m.lid||'').substring(0,20)+'...');
-            html += '<tr><td class="name">' + (m.pushName||'—') + '</td><td class="phone" style="direction:ltr;font-size:12px;">' + phoneDisplay + '</td><td>' + statusIcon + ' ' + statusText + '</td></tr>';
-          }
-          html += '</tbody></table>';
-        } catch(e) {
-          html += '<p style="color:#fc8181;">خطأ في جلب البيانات: ' + e.message + '</p>';
-        }
-      }
-      document.getElementById('content').innerHTML = html;
-    }
-
-    function showGroups() {
-      let html = '<p class="page-title">اختر جروباً لعرض بياناته</p>';
-      html += '<div style="margin-bottom:20px;display:flex;gap:10px;flex-wrap:wrap;">';
-      html += '<a class="back-btn" onclick="showLinkLid();return false;" href="#" style="background:rgba(102,126,234,0.15);border-color:rgba(102,126,234,0.4);">🔗 ربط LID للأرقام</a>';
-      html += '<a class="back-btn" onclick="showMembersStatus();return false;" href="#" style="background:rgba(104,211,145,0.15);border-color:rgba(104,211,145,0.4);color:#68d391;">👥 حالة الأعضاء</a>';
-      html += '</div>';
-      html += '<div class="groups-grid">';
-      for(const g of GROUPS) {
-        const cls = getCardClass(g.name);
-        html += `<a class="group-card ${cls}" onclick="showDays('${g.prefix}','${g.name}');return false;" href="#">
-          <div class="group-icon">${getIcon(g.name)}</div>
-          <div class="group-name">${g.prefix}</div>
-          <div class="group-meta">${g.name}</div>
-          <span class="group-arrow">&larr;</span>
-        </a>`;
-      }
-      html += '</div>';
-      document.getElementById('content').innerHTML = html;
-    }
-
-    async function showDays(prefix, name) {
-      document.getElementById('content').innerHTML = '<div class="loading"><div class="spinner"></div> جاري جلب البيانات...</div>';
-      const res = await fetch('/api/days?prefix=' + encodeURIComponent(prefix));
-      const days = await res.json();
-      const today = new Date().toLocaleDateString('sv-SE', {timeZone:'Asia/Amman'});
-      let html = `<a class="back-btn" onclick="showGroups();return false;" href="#">&rarr; الجروبات</a>
-        <h2 style="margin:20px 0 25px;color:#fff;font-size:22px;">📅 أيام ${prefix}</h2>`;
-      if(!days.length) { html += '<p style="color:#888;">لا توجد بيانات حتى الآن</p>'; }
-      else {
-        html += '<div class="days-grid">';
-        for(const d of days) {
-          const isToday = d.date === today;
-          const dateLabel = new Date(d.date + 'T00:00:00').toLocaleDateString('ar-JO', {weekday:'long',day:'numeric',month:'long',year:'numeric'});
-          html += `<a class="day-card" onclick="showDay('${d.name}','${d.date}');return false;" href="#">
-            <div class="day-date">${isToday ? '<span class="today-badge">اليوم</span>' : ''}${dateLabel}</div>
-            <div class="day-stats">
-              <div class="stat prod"><div class="stat-val">${d.totalProduction}</div><div class="stat-lbl">الانتاج</div></div>
-              <div class="stat recv"><div class="stat-val">${d.totalReception}</div><div class="stat-lbl">الاستلام</div></div>
-              <div class="stat"><div class="stat-val" style="color:#f6ad55;">${d.rows}</div><div class="stat-lbl">شخص</div></div>
-            </div>
-          </a>`;
-        }
-        html += '</div>';
-      }
-      document.getElementById('content').innerHTML = html;
-    }
-
-    async function showDay(sheetName, date) {
-      document.getElementById('content').innerHTML = '<div class="loading"><div class="spinner"></div> جاري جلب بيانات اليوم...</div>';
-      const res = await fetch('/api/day?sheet=' + encodeURIComponent(sheetName));
-      const rows = await res.json();
-      const parts = sheetName.split('-');
-      const prefix = parts[0];
-      const dateLabel = new Date(date + 'T00:00:00').toLocaleDateString('ar-JO', {weekday:'long',day:'numeric',month:'long',year:'numeric'});
-      const totalProd = rows.reduce((s,r)=>s+r.production,0);
-      const totalRecv = rows.reduce((s,r)=>s+r.reception,0);
-      const diff = totalProd - totalRecv;
-      let html = `<a class="back-btn" onclick="showDays('${prefix}','${prefix}');return false;" href="#">&rarr; أيام ${prefix}</a>
-        <h2 style="margin:20px 0 20px;color:#fff;font-size:20px;">📆 ${dateLabel}</h2>
-        <div class="totals-bar">
-          <div class="total-box total-prod"><div class="val">${totalProd}</div><div class="lbl">إجمالي الانتاج</div></div>
-          <div class="total-box total-recv"><div class="val">${totalRecv}</div><div class="lbl">إجمالي الاستلام</div></div>
-          <div class="total-box total-diff"><div class="val">${diff >= 0 ? '+' : ''}${diff}</div><div class="lbl">الفرق</div></div>
-        </div>`;
-      if(!rows.length) { html += '<p style="color:#888;">لا توجد بيانات لهذا اليوم</p>'; }
-      else {
-        html += '<table class="data-table"><thead><tr><th>الاسم</th><th>الهاتف</th><th style="text-align:center;">الانتاج</th><th style="text-align:center;">الاستلام</th></tr></thead><tbody>';
-        const sorted = [...rows].sort((a,b) => (b.production+b.reception)-(a.production+a.reception));
-        for(const r of sorted) {
-          html += `<tr><td class="name">${r.name || '—'}</td><td class="phone">${r.phone}</td><td class="prod">${r.production || '—'}</td><td class="recv">${r.reception || '—'}</td></tr>`;
-        }
-        html += '</tbody></table>';
-      }
-      document.getElementById('content').innerHTML = html;
-    }
-
-    showGroups();
-  </script>
-</body>
-</html>`;
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(html);
-  } else if (req.url.startsWith('/api/days')) {
-    const urlObj = new URL(req.url, 'http://localhost');
-    const prefix = urlObj.searchParams.get('prefix') || '';
-    try {
-      const days = await sheets.getDaysList(prefix);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify(days));
-    } catch(e) {
-      res.writeHead(500);
-      res.end(JSON.stringify({ error: e.message }));
-    }
-  } else if (req.url.startsWith('/api/day')) {
-    const urlObj = new URL(req.url, 'http://localhost');
-    const sheetName = urlObj.searchParams.get('sheet') || '';
-    try {
-      const data = await sheets.getDayData(sheetName);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify(data));
-    } catch(e) {
-      res.writeHead(500);
-      res.end(JSON.stringify({ error: e.message }));
-    }
-  } else if (req.url === '/internal/one-time-saif-greeting' && req.method === 'POST') {
-    const configuredToken = process.env.ONE_TIME_BROADCAST_TOKEN || '';
-    const requestToken = req.headers['x-one-time-broadcast-token'] || '';
-    if (!configuredToken || requestToken !== configuredToken) {
-      res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ error: 'غير موجود' }));
-      return;
-    }
-    const volumePathLocal = config.volumePath || path.join(__dirname, 'volume');
-    const requestPath = path.join(volumePathLocal, 'one-time-broadcast.json');
-    const sentPath = path.join(volumePathLocal, 'one-time-broadcast.sent.json');
-    const sendingPath = path.join(volumePathLocal, 'one-time-broadcast.sending.json');
-    if (fs.existsSync(sentPath)) {
-      const receipt = JSON.parse(fs.readFileSync(sentPath, 'utf8'));
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ status: 'already-sent', messageId: receipt.messageId || '' }));
-      return;
-    }
-    if (fs.existsSync(sendingPath)) {
-      res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ error: 'محاولة الإرسال قيد التحقق بالفعل' }));
-      return;
-    }
-    if (!fs.existsSync(requestPath)) {
-      fs.writeFileSync(requestPath, JSON.stringify({
-        type: 'dreamax-test-message',
-        text: 'اهلا بالجميع',
-      }));
-      logger.info('📣 تم تجهيز طلب التحية الأحادي إلى السيف');
-    }
-    if (!oneTimeBroadcast) {
-      res.writeHead(53, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ error: 'معالج الإرسال لم يكتمل تشغيله بعد' }));
-      return;
-    }
-    const result = await oneTimeBroadcast.processPendingRequest();
-    if (result.status !== 'sent') {
-      res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ status: result.status, error: result.error || 'لم يتم الإرسال بعد' }));
-      return;
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify({ status: result.status, messageId: result.receipt.messageId || '' }));
-  } else if (req.url.startsWith('/api/link-lid') && req.method === 'POST') {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-    req.on('end', () => {
-      try {
-        const urlObj = new URL(req.url, 'http://localhost');
-        const lid = urlObj.searchParams.get('lid') || '';
-        const phone = urlObj.searchParams.get('phone') || '';
-        if (!lid || !phone) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'lid and phone are required' }));
-          return;
-        }
-        const jid = phone.includes('@') ? phone : phone + '@s.whatsapp.net';
-        whatsapp.addLidMapping(lid, jid);
-        logger.info('ربط LID يدوي: ' + lid + ' -> ' + jid);
-        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ ok: true, lid, phone: jid }));
-      } catch(e) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: e.message }));
-      }
-    });
-  } else if (req.url.startsWith('/api/group-members')) {
-    const urlObj = new URL(req.url, 'http://localhost');
-    const groupId = urlObj.searchParams.get('groupId') || '';
-    try {
-      const members = await whatsapp.getGroupMembersWithLidStatus(groupId);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify(members));
-    } catch(e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
-    }
-  } else if (req.url === '/api/registered-lid-status') {
-    try {
-      const status = whatsapp.getRegisteredLidStatus ? whatsapp.getRegisteredLidStatus() : [];
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify(status));
-    } catch(e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
-    }
-  } else if (req.url === '/api/unresolved-lids') {
-    try {
-      const unresolvedMap = whatsapp.getUnresolvedLids ? whatsapp.getUnresolvedLids() : [];
-      const cacheStats = whatsapp.getCacheStats();
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ unresolved: unresolvedMap, stats: cacheStats }));
-    } catch(e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
-    }
-  } else if (req.url === '/refresh-dashboard' || req.url === '/api/refresh-dashboard') {
-    try {
-      await sheets.createDashboardSheet();
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ success: true, message: 'تم تحديث ورقة الرئيسية بنجاح' }));
-    } catch(e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
-    }
-  } else if (req.url === '/sync-all-lids' || req.url === '/api/sync-all-lids') {
-    try {
-      logger.info('🔄 طلب مزامنة LID شاملة');
-      const result = await whatsapp.syncAllLidsFull();
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify(result));
-    } catch (e) {
-      logger.error('❌ فشل المزامنة الشاملة', { error: e.message });
-      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ success: false, error: e.message }));
-    }
-  } else if (req.url === '/force-sync-lids' || req.url === '/api/force-sync-lids') {
-    try {
-      const syncResult = await whatsapp.syncGroupLids();
-      await sheets.loadRegisteredUsers(true);
-      const unresolved = whatsapp.getUnresolvedLids ? whatsapp.getUnresolvedLids() : [];
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({
-        success: true,
-        newLinks: syncResult.newLinks,
-        total: syncResult.total,
-        unresolvedCount: unresolved.length,
-        unresolved: unresolved.map(u => ({ name: u.pushName, lid: u.lid?.substring(0, 15) }))
-      }));
-    } catch(e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
-    }
-  } else if (req.url === '/unresolved-lids') {
-    try {
-      const lidMap = whatsapp.getLidToPhoneMap ? whatsapp.getLidToPhoneMap() : new Map();
-      const msgCache = whatsapp.getMessageCache ? whatsapp.getMessageCache() : new Map();
-      
-      const unresolvedMap = new Map();
-      for (const [msgId, msg] of msgCache) {
-        const senderJid = msg.key?.participant || msg.key?.remoteJid || '';
-        if (senderJid.includes('@lid') && !lidMap.has(senderJid)) {
-          const name = msg.pushName || 'غير معروف';
-          if (!unresolvedMap.has(senderJid)) {
-            unresolvedMap.set(senderJid, { name, lid: senderJid });
-          }
-        }
-      }
-      
-      const list = Array.from(unresolvedMap.values());
-      
-      let html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="utf-8"><title>LIDs غير محلولة</title>
-      <style>body{background:#111;color:#0f0;font-family:monospace;padding:20px;}
-      table{border-collapse:collapse;width:100%;} th,td{border:1px solid #0f0;padding:8px;text-align:right;}
-      th{background:#003300;} tr:hover{background:#001100;}
-      .btn{background:#003300;color:#0f0;border:1px solid #0f0;padding:5px 10px;cursor:pointer;border-radius:4px;}
-      input{background:#001100;color:#0f0;border:1px solid #0f0;padding:5px;width:150px;border-radius:4px;}
-      </style></head><body>
-      <h2>🔍 LIDs غير محلولة (${list.length})</h2>
-      <p>لربط LID برقم هاتف، أدخل الرقم واضغط ربط</p>
-      <table><tr><th>الاسم</th><th>LID (مختصر)</th><th>ربط برقم هاتف</th></tr>`;
-      
-      for (const item of list) {
-        const shortLid = item.lid.substring(0, 20);
-        html += `<tr>
-          <td>${item.name}</td>
-          <td style="direction:ltr">${shortLid}</td>
-          <td>
-            <input type="text" id="phone_${shortLid}" placeholder="مثال: 962778793241">
-            <button class="btn" onclick="mapLid('${item.lid}', document.getElementById('phone_${shortLid}').value)">ربط</button>
-          </td>
-        </tr>`;
-      }
-      
-      html += `</table>
-      <script>
-      async function mapLid(lid, phone) {
-        if (!phone) { alert('أدخل رقم الهاتف'); return; }
-        const r = await fetch('/map-lid?lid=' + encodeURIComponent(lid) + '&phone=' + encodeURIComponent(phone));
-        const d = await r.json();
-        if (d.success) { alert('✅ تم الربط: ' + phone); location.reload(); }
-        else { alert('❌ فشل: ' + d.error); }
-      }
-      </script></body></html>`;
-      
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(html);
-    } catch(e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
-    }
-  } else if (req.url?.startsWith('/map-lid')) {
-    try {
-      const urlObj = new URL(req.url, 'http://localhost');
-      const lid = urlObj.searchParams.get('lid');
-      const phone = urlObj.searchParams.get('phone');
-      if (!lid || !phone) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'lid و phone مطلوبان' }));
-        return;
-      }
-      const cleanedPhone = phone.replace(/[^0-9]/g, '');
-      const phoneJid = cleanedPhone.includes('@') ? cleanedPhone : `${cleanedPhone}@s.whatsapp.net`;
-      whatsapp.addLidMapping(lid, phoneJid);
-      logger.info(`✅ ربط LID يدوي: ${lid.substring(0,15)} → ${cleanedPhone}`);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ success: true, lid: lid.substring(0,20), phone: cleanedPhone }));
-    } catch(e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
-    }
-  } else if (req.url === '/members-db' || req.url === '/api/members-db') {
-    try {
-      const membersDb = require('./members-db');
-      const stats = membersDb.getStats();
-      const unresolved = membersDb.getUnresolvedLids().slice(0, 20);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({
-        stats,
-        unresolvedSample: unresolved,
-        lidMapSize: whatsapp.getLidToPhoneMap ? whatsapp.getLidToPhoneMap().size : 0,
-      }, null, 2));
-    } catch(e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
-    }
   } else {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('AbuSaif Bot v4');
+    res.end('AbuSaif Bot v5');
   }
 });
 
@@ -1084,46 +320,17 @@ function setCurrentQR(qr) { currentQR = qr; }
 
 async function processRecoveredMessage(msg) {
   const _msgId = msg?.key?.id;
-  if (_msgId && isAlreadyProcessed(_msgId)) {
-    logger.debug('[Recovery][Dedup] تجاهل رسالة مسترجعة مكررة', { msgId: _msgId?.substring(0, 8) });
-    return false;
-  }
+  if (_msgId && isAlreadyProcessed(_msgId)) return false;
   if (_msgId) markAsProcessed(_msgId);
   try {
     await whatsapp._triggerMessageHandler(msg);
     return true;
   } catch (e) {
-    logger.error('[Recovery] خطأ في معالجة رسالة مسترجعة', { error: e.message, msgId: _msgId?.substring(0, 8) });
     return false;
   }
 }
 module.exports = { processRecoveredMessage };
 function clearCurrentQR() { currentQR = null; }
-
-async function findCaptainPhone(quotedMessageId, fallbackPhone) {
-  if (quotedMessageId) {
-    const fromCache = whatsapp.getCaptainByMessageId(quotedMessageId);
-    if (fromCache) {
-      logger.info('💾 كابتن من tamCache', { captain: fromCache });
-      return fromCache;
-    }
-  }
-
-  if (fallbackPhone) {
-    logger.info('📱 كابتن من بيانات الرسالة', { captain: fallbackPhone });
-    return fallbackPhone;
-  }
-
-  if (quotedMessageId) {
-    const fromSheet = await sheets.getCaptainFromTamSheet(quotedMessageId);
-    if (fromSheet) {
-      whatsapp.setCaptainForMessage(quotedMessageId, fromSheet);
-      return fromSheet;
-    }
-  }
-
-  return null;
-}
 
 async function resolveLidPhone(phone) {
   if (!phone) return phone;
@@ -1132,26 +339,15 @@ async function resolveLidPhone(phone) {
   const fromMap = whatsapp.resolveLid(phone);
   if (fromMap && !fromMap.includes('@lid')) {
     const clean = fromMap.split('@')[0].replace(/\D/g, '');
-    if (clean.length >= 9) {
-      logger.info(`✅ حل LID للتسجيل (resolveLid): ${phone.substring(0,15)} → ${clean}`);
-      return clean;
-    }
+    if (clean.length >= 9) return clean;
   }
-  
   try {
     const directResolved = await whatsapp.resolveLidDirect(phone);
     if (directResolved && !directResolved.includes('@lid')) {
       const clean = directResolved.split('@')[0].replace(/\D/g, '');
-      if (clean.length >= 9) {
-        logger.info(`✅ حل LID للتسجيل (USyncQuery): ${phone.substring(0,15)} → ${clean}`);
-        return clean;
-      }
+      if (clean.length >= 9) return clean;
     }
-  } catch (e) {
-    logger.debug('فشل حل LID عبر USyncQuery', { error: e.message });
-  }
-  
-  logger.warn(`⚠️ LID لم يُحل للتسجيل: ${phone.substring(0,15)} — سيبقى كمعرف مؤقت للتدقيق`);
+  } catch (e) {}
   whatsapp.queueLidForResolve(phone);
   return phone;
 }
@@ -1173,19 +369,11 @@ function getSafePartyName(phone) {
 }
 
 async function queueUnknownParty(phone, role) {
-  if (!isRecordablePhone(phone)) {
-    logger.warn('⚠️ تعذر تأكيد رقم هاتف الطرف للتسجيل اليومي؛ حُفظ المعرف في سجل العملية للتدقيق', {
-      role,
-      identifier: String(phone || '').substring(0, 40),
-    });
-    return { recordable: false, registered: false };
-  }
-
+  if (!isRecordablePhone(phone)) return { recordable: false, registered: false };
   const registeredName = sheets.getRegisteredName(phone);
   if (!registeredName) {
     const normalizedPhone = normalizePhoneForComparison(phone);
     await sheets.logUnregisteredNumber(normalizedPhone, 'مجهول');
-    logger.info('📝 طرف غير مسجل حُفظ للمراجعة باسم مجهول', { role, phone: normalizedPhone });
   }
   return { recordable: true, registered: Boolean(registeredName) };
 }
@@ -1215,9 +403,7 @@ function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone
   const targetContext = getCachedMessageContext(targetMessage);
   const persistedContext = quotedMsgId ? whatsapp.getOrderContextByReplyId(quotedMsgId) : null;
   const orderMessageId = persistedContext?.orderMessageId || targetContext?.stanzaId || quotedMsgId || '';
-  const originalOrderMessage = orderMessageId
-    ? whatsapp.getCachedMessage(orderMessageId)
-    : targetMessage;
+  const originalOrderMessage = orderMessageId ? whatsapp.getCachedMessage(orderMessageId) : targetMessage;
   const embeddedOrderText = getQuotedContextText(targetContext);
   const cachedOrderText = whatsapp.extractText(originalOrderMessage) || '';
   const cachedTamText = whatsapp.extractText(targetMessage) || '';
@@ -1235,8 +421,8 @@ function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone
   const needsReview = samePerson || identityIncomplete || confidenceLevel === 'ambiguous';
   const reviewNotes = [
     samePerson ? 'تحذير: رقم المنتج والكابتن متطابقان' : '',
-    identityIncomplete ? 'هوية أحد الأطراف غير مكتملة؛ حُفظت العملية للمراجعة ولم تُسقط' : '',
-    confidenceLevel === 'ambiguous' ? 'طلب مبهم بسلسلة مؤكدة؛ بانتظار قرار يدوي من دون تعديل رصيد' : '',
+    identityIncomplete ? 'هوية أحد الأطراف غير مكتملة' : '',
+    confidenceLevel === 'ambiguous' ? 'طلب مبهم' : '',
     `مستوى الثقة: ${confidenceLevel}`,
     formatDeliveryOrderDetails(deliveryOrderDetails),
   ].filter(Boolean).join(' | ');
@@ -1281,55 +467,18 @@ async function applyPendingDirectOrderEmoji({ pending, replyMessageId, orderMess
     quotedText: '',
     confidenceLevel: orderConfidence,
   };
-  if (orderConfidence === 'ambiguous') {
-    const ambiguousDetail = buildOrderDetail({
-      result: syntheticResult,
-      msg,
-      quotedMsgId: replyMessageId,
-      groupPrefix,
-      producerPhone,
-      captainPhone,
-      reactorPhone: pending.senderPhone,
-    });
-    await sheets.upsertOrderDetails(ambiguousDetail);
-    await sheets.upsertOperationReview({
-      reviewId: `AMBIGUOUS_${replyMessageId}`,
-      timestamp: syntheticResult.timestamp,
-      groupPrefix,
-      alertType: 'طلب مبهم بسلسلة مؤكدة',
-      referenceId: replyMessageId,
-      reason: 'اكتملت الأدلة الثابتة (رد كابتن مباشر + إيموجي كمية مخوّل)، لكن نص الطلب غير واضح للاعتماد الآلي',
-      notes: ambiguousDetail.notes,
-      producerPhone,
-      captainPhone,
-      producerName: ambiguousDetail.producerName,
-      captainName: ambiguousDetail.captainName,
-      quantity,
-      orderText: ambiguousDetail.orderText,
-      captainReplyText: ambiguousDetail.tamText,
-      quantityEmoji: pending.emoji,
-      reactorName: ambiguousDetail.reactorName,
-      reactorPhone: pending.senderPhone,
-    });
-    whatsapp.markDirectOrderEmojiApplied(orderMessageId, replyMessageId);
-    logger.info('🔎 كمية مباشرة مؤجلة حُفظت للمراجعة لأن نص الطلب مبهم', {
-      orderId: orderMessageId.substring(0, 8), replyId: replyMessageId.substring(0, 8), quantity,
-    });
-    return true;
-  }
   const existingTransaction = await sheets.findTransactionByMessageId(replyMessageId, producerPhone);
   if (existingTransaction) {
     if (existingTransaction.quantity !== quantity) {
-          const editResult = await sheets.processEdit({
-            messageId: replyMessageId,
-            editorPhone: pending.senderPhone,
-            editorName: sheets.getRegisteredName(pending.senderPhone) || '',
-            newQuantity: quantity,
-            groupPrefix,
-            newEmoji: pending.emoji,
-            reason: 'استبدال إيموجي كمية مباشر',
-          });
-      if (!editResult.success) return false;
+      await sheets.processEdit({
+        messageId: replyMessageId,
+        editorPhone: pending.senderPhone,
+        editorName: sheets.getRegisteredName(pending.senderPhone) || '',
+        newQuantity: quantity,
+        groupPrefix,
+        newEmoji: pending.emoji,
+        reason: 'استبدال إيموجي كمية مباشر',
+      });
     }
     whatsapp.markDirectOrderEmojiApplied(orderMessageId, replyMessageId);
     return true;
@@ -1352,7 +501,7 @@ async function applyPendingDirectOrderEmoji({ pending, replyMessageId, orderMess
     groupPrefix,
     messageId: replyMessageId,
     status: identityIncomplete ? '⏳ هوية غير مكتملة' : 'نشط',
-    notes: identityIncomplete ? 'كمية مباشرة مؤجلة؛ هوية أحد الأطراف غير مكتملة' : 'direct-order-reaction-last-emoji',
+    notes: 'direct-order-reaction-last-emoji',
   });
   const orderDetail = buildOrderDetail({
     result: syntheticResult,
@@ -1366,9 +515,6 @@ async function applyPendingDirectOrderEmoji({ pending, replyMessageId, orderMess
   });
   await sheets.upsertOrderDetails(orderDetail);
   whatsapp.markDirectOrderEmojiApplied(orderMessageId, replyMessageId);
-  logger.info('✅ طُبقت كمية مباشرة مؤجلة بعد رد الكابتن', {
-    orderId: orderMessageId.substring(0, 8), replyId: replyMessageId.substring(0, 8), quantity,
-  });
   return true;
 }
 
@@ -1380,59 +526,26 @@ async function start() {
   logger.info('   🚀 نظام AbuSaif v5 — Self-Healing + Recovery');
   logger.info('═══════════════════════════════════════');
 
-  // 0. إنشاء مجلدات التشغيل بشكل آمن لتجنب EACCES على Render
-  const volumePath = (() => {
-    try {
-      const resolved = path.resolve(config.volumePath || path.join(__dirname, 'volume'));
-      if (!fs.existsSync(resolved)) fs.mkdirSync(resolved, { recursive: true });
-      return resolved;
-    } catch (e) {
-      const localFallback = path.join(__dirname, 'volume');
-      if (!fs.existsSync(localFallback)) fs.mkdirSync(localFallback, { recursive: true });
-      return localFallback;
-    }
-  })();
+  const volumePath = path.resolve(config.volumePath || path.join(__dirname, 'volume'));
+  const authSessionPath = path.resolve(config.whatsapp.authPath || path.join(__dirname, 'auth'));
+  const logsPath = path.resolve(config.logging.logsPath || path.join(__dirname, 'logs'));
 
-  const authSessionPath = (() => {
-    try {
-      const resolved = path.resolve(config.whatsapp.authPath || path.join(__dirname, 'auth'));
-      if (!fs.existsSync(resolved)) fs.mkdirSync(resolved, { recursive: true });
-      return resolved;
-    } catch (e) {
-      const localFallback = path.join(__dirname, 'auth');
-      if (!fs.existsSync(localFallback)) fs.mkdirSync(localFallback, { recursive: true });
-      return localFallback;
-    }
-  })();
+  if (!fs.existsSync(volumePath)) fs.mkdirSync(volumePath, { recursive: true });
+  if (!fs.existsSync(authSessionPath)) fs.mkdirSync(authSessionPath, { recursive: true });
+  if (!fs.existsSync(logsPath)) fs.mkdirSync(logsPath, { recursive: true });
 
-  const logsPath = (() => {
-    try {
-      const resolved = path.resolve(config.logging.logsPath || path.join(__dirname, 'logs'));
-      if (!fs.existsSync(resolved)) fs.mkdirSync(resolved, { recursive: true });
-      return resolved;
-    } catch (e) {
-      const localFallback = path.join(__dirname, 'logs');
-      if (!fs.existsSync(localFallback)) fs.mkdirSync(localFallback, { recursive: true });
-      return localFallback;
-    }
-  })();
-
-  logger.info(`💾 VOLUME_PATH: ${volumePath} (${process.env.VOLUME_PATH ? 'Railway Volume' : 'محلي'})`);
+  logger.info(`💾 VOLUME_PATH: ${volumePath}`);
   logger.info(`🔑 AUTH_PATH: ${authSessionPath}`);
 
-  // 1. تهيئة Google Sheets
   try {
     await sheets.initialize();
     logger.info('✅ Google Sheets متصل');
-        await sheets.loadSettings();
+    await sheets.loadSettings();
     logger.info('✅ الإعدادات محمّلة');
     await sheets.ensureOrderDetailsSheet();
-    logger.info('✅ ورقة تفاصيل الطلبات جاهزة');
     await sheets.ensureOperationReviewsSheet();
-    logger.info('✅ ورقة مراجعة العمليات جاهزة');
-    const importedReviews = await sheets.backfillOperationReviewsFromOrderDetails();
-    if (importedReviews.created) logger.info('✅ تم استيراد مراجعات قائمة', importedReviews);
-    sheets.createDashboardSheet().catch(e => logger.warn('فشل تحديث الرئيسية', { error: e.message }));
+    await sheets.backfillOperationReviewsFromOrderDetails();
+    sheets.createDashboardSheet().catch(() => {});
   } catch (error) {
     logger.warn('⚠️ Google Sheets غير متاح', { error: error.message });
   }
@@ -1440,21 +553,15 @@ async function start() {
   const telegramVerification = await telegramMonitor.verifyBot();
   if (telegramVerification.ok) {
     logger.info(`✅ بوت تيليجرام للمراقبة جاهز: @${telegramVerification.username}`);
-  } else if (telegramVerification.reason !== 'missing-token') {
-    logger.warn('⚠️ تعذر التحقق من بوت تيليجرام؛ يستمر واتساب بصورة مستقلة', { error: telegramVerification.reason });
-  } else {
-    logger.info('ℹ️ مراقبة تيليجرام غير مفعلة بعد');
   }
 
-  // 2. معالج الرسائل
   whatsapp.setMessageHandler(async (msg, sock) => {
-
     if (whatsapp.isReaction(msg)) {
       const result = await parser.processMessage(msg, sock);
       if (!result) return;
 
       const producerPhone = result.phone;
-      const quantity = result.quantity;
+      const quantity = result.quantity; // بدون قيود: سيتم تسجيل الكمية مهما بلغت (حتى 10 أو أكثر)
       let quotedMsgId = result.quotedMessageId || result.targetMessageId;
       const remoteJid = msg.key.remoteJid;
       let orderOwnerPhone = result.orderOwnerPhone || result.quotedPhone || null;
@@ -1462,9 +569,7 @@ async function start() {
       let directOrderMode = false;
 
       const _captainFromTamEarly = quotedMsgId ? whatsapp.getCaptainByMessageId(quotedMsgId) : null;
-      const _captainFromSheetEarly = !_captainFromTamEarly && quotedMsgId
-        ? await sheets.getCaptainFromTamSheet(quotedMsgId)
-        : null;
+      const _captainFromSheetEarly = !_captainFromTamEarly && quotedMsgId ? await sheets.getCaptainFromTamSheet(quotedMsgId) : null;
       const _directTargetMsg = quotedMsgId ? whatsapp.getCachedMessage(quotedMsgId) : null;
       const _directTargetText = whatsapp.extractText(_directTargetMsg) || result.quotedText || '';
       const _directClassification = (!_captainFromTamEarly && !_captainFromSheetEarly && quotedMsgId)
@@ -1474,23 +579,15 @@ async function start() {
       const _isQualifiedDirectOrder = _reactionCanChangeExistingQuantity &&
         _directClassification?.confidenceLevel !== 'blocked' &&
         _directClassification?.classification !== 'invalid';
-      const _existingReplyForDirectOrder = _isQualifiedDirectOrder
-        ? whatsapp.getLatestReplyForOrder(quotedMsgId)
-        : null;
+      const _existingReplyForDirectOrder = _isQualifiedDirectOrder ? whatsapp.getLatestReplyForOrder(quotedMsgId) : null;
+      
       const _targetValidation = validateQuantityReactionTarget({
         captainFromTam: _captainFromTamEarly,
         captainFromSheet: _captainFromSheetEarly,
         isQualifiedOrder: _isQualifiedDirectOrder,
         hasCaptainReply: Boolean(_existingReplyForDirectOrder),
       });
-      if (!_targetValidation.allowed) {
-        logger.info('⚠️ تجاهل تفاعل ليس على رد تأكيد موثق', {
-          reason: _targetValidation.reason,
-          msgId: quotedMsgId?.substring(0, 8),
-          reaction: result.text || result.reactionText || '',
-        });
-        return;
-      }
+      if (!_targetValidation.allowed) return;
 
       if (_isQualifiedDirectOrder) {
         const authorization = authorizeQuantityReaction({
@@ -1498,12 +595,7 @@ async function start() {
           orderOwnerPhone,
           isSupervisor: await sheets.isSupervisor(producerPhone),
         });
-        if (!authorization.allowed) {
-          logger.warn('⚠️ تجاهل تفاعل مباشر غير مصرح به على طلب مؤهل', {
-            reason: authorization.reason, reactor: producerPhone || 'unknown', orderId: quotedMsgId?.substring(0, 8),
-          });
-          return;
-        }
+        if (!authorization.allowed) return;
         directOrderMessageId = quotedMsgId;
         directOrderMode = true;
         if (result.type === 'accept') {
@@ -1516,89 +608,9 @@ async function start() {
           emoji: result.type === 'accept' ? (result.text || result.reactionText || '') : '',
           quantity: result.type === 'accept' ? quantity : 0,
         });
-        if (!_existingReplyForDirectOrder) {
-          if (result.type === 'accept') {
-            logger.info('⏳ حُفظت آخر كمية مباشرة بانتظار رد كابتن مقتبس', {
-              orderId: directOrderMessageId.substring(0, 8), quantity, reactor: producerPhone,
-            });
-          }
-          return;
-        }
+        if (!_existingReplyForDirectOrder) return;
         quotedMsgId = _existingReplyForDirectOrder.replyMessageId;
         orderOwnerPhone = _existingReplyForDirectOrder.producer || orderOwnerPhone;
-      }
-
-      let _isTargetAReply = !!_captainFromTamEarly || directOrderMode;
-      let _targetTextEarly = '';
-      if (!_isTargetAReply && quotedMsgId) {
-        const _targetMsgEarly = whatsapp.getCachedMessage(quotedMsgId);
-        const _targetMsgObjEarly = _targetMsgEarly?.message || {};
-        if (_targetMsgObjEarly.stickerMessage) {
-          logger.info('⚠️ تجاهل تفاعل على ملصق: لا يُحتسب كطلب أو حركة', {
-            msgId: quotedMsgId.substring(0, 8),
-          });
-          return;
-        }
-        const _targetCtxEarly = 
-          _targetMsgObjEarly.extendedTextMessage?.contextInfo ||
-          _targetMsgObjEarly.imageMessage?.contextInfo ||
-          _targetMsgObjEarly.videoMessage?.contextInfo ||
-          _targetMsgObjEarly.audioMessage?.contextInfo ||
-          _targetMsgObjEarly.documentMessage?.contextInfo || null;
-        _isTargetAReply = !!_targetCtxEarly?.quotedMessage;
-        _targetTextEarly = whatsapp.extractText(_targetMsgEarly) || '';
-
-        if (parser.isStandaloneAcceptWithoutOrder(_targetTextEarly, _isTargetAReply)) {
-          logger.info('⚠️ تجاهل تفاعل على رسالة استلام مستقلة بلا طلب مقتبس', {
-            msgId: quotedMsgId.substring(0, 8),
-            text: _targetTextEarly.substring(0, 30),
-          });
-          return;
-        }
-      }
-
-      if (!_isTargetAReply && !directOrderMode) {
-        const _producerFromOrderEarly = quotedMsgId ? whatsapp.getOrderByReplyId(quotedMsgId) : null;
-        const _realOwner = _producerFromOrderEarly || orderOwnerPhone;
-        if (_realOwner && producerPhone) {
-          const cleanProducer = producerPhone.replace(/\D/g, '');
-          const cleanOwner = _realOwner.replace(/\D/g, '');
-          if (cleanProducer === cleanOwner ||
-              (cleanProducer.length >= 9 && cleanOwner.length >= 9 &&
-               cleanProducer.slice(-9) === cleanOwner.slice(-9))) {
-            logger.info('⚠️ تجاهل: شخص وضع إيموجي على رسالته هو نفسه', {
-              phone: producerPhone,
-              msgId: quotedMsgId?.substring(0, 8)
-            });
-            return;
-          }
-        }
-      } else {
-        const _captainForGuard = _captainFromTamEarly || orderOwnerPhone;
-        if (_captainForGuard) {
-          const cleanProducer = producerPhone.replace(/\D/g, '');
-          const cleanCaptain = _captainForGuard.replace(/\D/g, '');
-          if (cleanProducer === cleanCaptain ||
-              (cleanProducer.length >= 9 && cleanCaptain.length >= 9 &&
-               cleanProducer.slice(-9) === cleanCaptain.slice(-9))) {
-            logger.info('⚠️ تجاهل: الكابتن وضع إيموجي على رسالته هو نفسه', {
-              phone: producerPhone,
-              msgId: quotedMsgId?.substring(0, 8)
-            });
-            return;
-          }
-        }
-      }
-
-      if (!directOrderMode) {
-        const reviewOrderContext = quotedMsgId ? whatsapp.getOrderContextByReplyId(quotedMsgId) : null;
-        if (reviewOrderContext?.orderMessageId) {
-          messageLog.markOrderQuantity({
-            orderMessageId: reviewOrderContext.orderMessageId,
-            emoji: result.type === 'accept' ? (result.text || result.reactionText || '') : '',
-            quantity: result.type === 'accept' ? quantity : 0,
-          });
-        }
       }
 
       const targetGroups = config.whatsapp.targetGroups || [];
@@ -1611,329 +623,38 @@ async function start() {
       let captainPhone, realProducerPhone;
 
       if (captainFromTam) {
-        let resolvedCaptain = captainFromTam;
-        if (resolvedCaptain && resolvedCaptain.includes('@lid')) {
-          const lidResolved = whatsapp.resolveLid(resolvedCaptain);
-          if (lidResolved && !lidResolved.includes('@lid')) {
-            logger.info(`✅ حل LID الكابتن عند الإيموجي (lidMap): ${resolvedCaptain.substring(0,15)} → ${lidResolved}`);
-            resolvedCaptain = lidResolved;
-            if (quotedMsgId) whatsapp.setCaptainForMessage(quotedMsgId, resolvedCaptain);
-          } else {
-            const tamMsg = quotedMsgId ? whatsapp.getCachedMessage(quotedMsgId) : null;
-            const captainPushName = tamMsg?.pushName || whatsapp.getPushNameFromCachedMessage(quotedMsgId);
-            if (captainPushName && captainPushName !== 'غير معروف') {
-              const resolvedByName = whatsapp.resolvePhoneByPushName(captainPushName);
-              if (resolvedByName && !resolvedByName.includes('@lid')) {
-                logger.info(`✅ حل LID الكابتن عند الإيموجي (pushName): ${captainPushName} → ${resolvedByName}`);
-                resolvedCaptain = resolvedByName;
-                whatsapp.addLidMapping(captainFromTam, resolvedByName);
-                if (quotedMsgId) whatsapp.setCaptainForMessage(quotedMsgId, resolvedCaptain);
-              } else {
-                const directResolved = await whatsapp.resolveLidDirect(resolvedCaptain);
-                if (directResolved && !directResolved.includes('@lid')) {
-                  logger.info(`✅ حل LID الكابتن عند الإيموجي (USyncQuery): ${resolvedCaptain.substring(0,15)} → ${directResolved}`);
-                  resolvedCaptain = directResolved;
-                  if (quotedMsgId) whatsapp.setCaptainForMessage(quotedMsgId, resolvedCaptain);
-                }
-              }
-            } else {
-              const directResolved = await whatsapp.resolveLidDirect(resolvedCaptain);
-              if (directResolved && !directResolved.includes('@lid')) {
-                logger.info(`✅ حل LID الكابتن عند الإيموجي (USyncQuery/noPushName): ${resolvedCaptain.substring(0,15)} → ${directResolved}`);
-                resolvedCaptain = directResolved;
-                if (quotedMsgId) whatsapp.setCaptainForMessage(quotedMsgId, resolvedCaptain);
-              }
-            }
-          }
-        }
-        captainPhone = resolvedCaptain;
-        const _captainNorm = captainPhone ? captainPhone.replace(/\D/g, '').slice(-9) : null;
-        const _ownerNorm = orderOwnerPhone ? orderOwnerPhone.replace(/\D/g, '').slice(-9) : null;
-        const _ownerIsCaptain = _captainNorm && _ownerNorm && _captainNorm === _ownerNorm;
-        if (producerFromOrder) {
-          realProducerPhone = producerFromOrder;
-        } else if (_ownerIsCaptain) {
-          realProducerPhone = null;
-        } else {
-          realProducerPhone = orderOwnerPhone;
-        }
+        captainPhone = captainFromTam;
+        realProducerPhone = producerFromOrder || orderOwnerPhone;
       } else {
         const captainFromSheet = quotedMsgId ? await sheets.getCaptainFromTamSheet(quotedMsgId) : null;
         if (captainFromSheet) {
           captainPhone = captainFromSheet;
-          const _cNorm1b = captainPhone ? captainPhone.replace(/\D/g, '').slice(-9) : null;
-          const _oNorm1b = orderOwnerPhone ? orderOwnerPhone.replace(/\D/g, '').slice(-9) : null;
-          if (producerFromOrder) {
-            realProducerPhone = producerFromOrder;
-          } else if (_cNorm1b && _oNorm1b && _cNorm1b === _oNorm1b) {
-            realProducerPhone = null;
-          } else {
-            realProducerPhone = orderOwnerPhone;
-          }
+          realProducerPhone = producerFromOrder || orderOwnerPhone;
         } else {
-          const targetMsg = quotedMsgId ? whatsapp.getCachedMessage(quotedMsgId) : null;
-          const targetMsgObj = targetMsg?.message || {};
-          const targetContextInfo = 
-            targetMsgObj.extendedTextMessage?.contextInfo ||
-            targetMsgObj.imageMessage?.contextInfo ||
-            targetMsgObj.videoMessage?.contextInfo ||
-            targetMsgObj.audioMessage?.contextInfo ||
-            targetMsgObj.documentMessage?.contextInfo || null;
-          const isTargetReply = !!targetContextInfo?.quotedMessage;
-
-          if (isTargetReply && orderOwnerPhone) {
-            captainPhone = orderOwnerPhone;
-            const originalOrderMsgId = targetContextInfo.stanzaId;
-            const originalOrderMsg = originalOrderMsgId ? whatsapp.getCachedMessage(originalOrderMsgId) : null;
-            const originalOwnerJid = whatsapp.getSenderJid(originalOrderMsg) ||
-              targetContextInfo.senderPn ||
-              targetContextInfo.participantPn ||
-              targetContextInfo.participant || '';
-            if (originalOwnerJid) {
-              realProducerPhone = await resolveLidPhone(originalOwnerJid);
-            } else {
-              realProducerPhone = null;
-            }
-            whatsapp.setCaptainForMessage(quotedMsgId, captainPhone);
-            if (realProducerPhone) {
-              whatsapp.setOrderForReply(quotedMsgId, realProducerPhone, {
-                orderMessageId: originalOrderMsgId || '',
-                orderText: whatsapp.extractText(originalOrderMsg) || getQuotedContextText(targetContextInfo),
-                tamText: whatsapp.extractText(targetMsg) || '',
-                deliveryOrderDetails: parser.extractDeliveryOrderDetails(whatsapp.extractText(originalOrderMsg) || getQuotedContextText(targetContextInfo)),
-              });
-            }
-          } else {
-            captainPhone = producerPhone;
-            realProducerPhone = orderOwnerPhone;
-          }
-        }
-      }
-
-      const isReactionOnAcceptedReply = Boolean(
-        captainPhone && (captainFromTam || _captainFromTamEarly || _isTargetAReply)
-      );
-      const voiceReplyStatus = quotedMsgId ? whatsapp.getVoiceReplyStatusByReplyId(quotedMsgId) : null;
-      const voiceOrderContext = quotedMsgId ? whatsapp.getOrderContextByReplyId(quotedMsgId) : null;
-      if (voiceOrderContext?.isVoiceOrder && (!voiceReplyStatus || voiceReplyStatus.replyCount !== 1 || voiceReplyStatus.invalidated)) {
-        return;
-      }
-
-      if (voiceOrderContext?.isVoiceOrder && isReactionOnAcceptedReply) {
-        if (result.type === 'accept' || result.type === 'unknown_emoji') {
-          const authorization = authorizeQuantityReaction({
-            reactorPhone: producerPhone,
-            orderOwnerPhone: realProducerPhone,
-            isSupervisor: await sheets.isSupervisor(producerPhone),
-          });
-          if (!authorization.allowed) return;
-          const voiceEmojiStatus = whatsapp.addVoiceEmoji(quotedMsgId, producerPhone, result.reactionText || result.text || '');
-          const isSingleQuantityEmoji = result.type === 'accept' && voiceEmojiStatus?.activeEmojiCount === 1;
-          if (!isSingleQuantityEmoji) {
-            await invalidateVoiceEmojiTransaction(
-              voiceEmojiStatus,
-              result.type === 'unknown_emoji'
-                ? 'وُضع إيموجي غير كمي على رد التسجيل الصوتي'
-                : 'وُجد إيموجيان أو أكثر على رد التسجيل الصوتي'
-            );
-            return;
-          }
-        } else if (result.type === 'remove') {
-          const voiceEmojiStatus = whatsapp.removeVoiceEmoji(quotedMsgId, producerPhone);
-          if (voiceEmojiStatus) {
-            if (voiceEmojiStatus.activeEmojiCount === 1) {
-              await restoreVoiceEmojiTransaction(voiceEmojiStatus);
-            } else {
-              await invalidateVoiceEmojiTransaction(
-                voiceEmojiStatus,
-                voiceEmojiStatus.activeEmojiCount === 0
-                  ? 'حُذف إيموجي الكمية من رد التسجيل الصوتي'
-                  : 'لا يزال على رد التسجيل الصوتي أكثر من إيموجي'
-              );
-            }
-            return;
-          }
-        }
-      }
-      if (result.type === 'accept' && isReactionOnAcceptedReply) {
-        const authorization = authorizeQuantityReaction({
-          reactorPhone: producerPhone,
-          orderOwnerPhone: realProducerPhone,
-          isSupervisor: await sheets.isSupervisor(producerPhone),
-        });
-        if (!authorization.allowed) {
-          if (authorization.reason === 'unknown-order-owner') {
-            const unresolvedProducer = realProducerPhone || orderOwnerPhone || '';
-            const unresolvedCaptain = captainPhone || '';
-            const unresolvedReason = 'تعذر استخراج رقم صاحب الطلب من سياق واتساب؛ حُفظت العملية للمراجعة';
-            await sheets.recordTransaction({
-              transactionId: result.transactionId,
-              timestamp: result.timestamp,
-              producerPhone: unresolvedProducer,
-              captainPhone: unresolvedCaptain,
-              quantity,
-              type: 'تفاعل كمية (هوية غير مكتملة)',
-              emoji: result.text || '',
-              groupPrefix,
-              messageId: quotedMsgId || '',
-              status: '⏳ هوية غير مكتملة',
-              notes: unresolvedReason,
-            });
-            const unresolvedDetail = buildOrderDetail({
-              result, msg, quotedMsgId, groupPrefix,
-              producerPhone: unresolvedProducer,
-              captainPhone: unresolvedCaptain,
-              reactorPhone: producerPhone,
-              identityIncomplete: true,
-            });
-            await sheets.upsertOrderDetails(unresolvedDetail);
-            await sheets.upsertOperationReview({
-              reviewId: `REVIEW_${result.transactionId}`,
-              timestamp: result.timestamp,
-              groupPrefix,
-              alertType: 'هوية غير مكتملة',
-              referenceId: quotedMsgId || result.messageId || '',
-              reason: unresolvedReason,
-              notes: `المعرّف المتاح للمنتج: ${String(unresolvedProducer || 'غير متوفر').substring(0, 40)}`,
-              producerPhone: unresolvedProducer,
-              captainPhone: unresolvedCaptain,
-              producerName: unresolvedDetail.producerName,
-              captainName: unresolvedDetail.captainName,
-              quantity: unresolvedDetail.quantity,
-              orderText: unresolvedDetail.orderText,
-              captainReplyText: unresolvedDetail.tamText,
-              quantityEmoji: unresolvedDetail.emoji,
-              reactorName: unresolvedDetail.reactorName,
-              reactorPhone: unresolvedDetail.reactorPhone,
-            });
-          }
-          return;
-        }
-      }
-
-      if ((result.type === 'remove' || result.type === 'unknown_emoji') && isReactionOnAcceptedReply) {
-        const authorization = authorizeQuantityReaction({
-          reactorPhone: producerPhone,
-          orderOwnerPhone: realProducerPhone,
-          isSupervisor: await sheets.isSupervisor(producerPhone),
-        });
-        if (!authorization.allowed) return;
-      }
-
-      if (result.type === 'unknown_emoji' && isReactionOnAcceptedReply) {
-        const existingTx = await sheets.findTransactionByMessageIdIncludingCancelled(quotedMsgId, null);
-        if (!existingTx || existingTx.quantity <= 0) return;
-        const oldQuantity = existingTx.quantity;
-        await sheets.updateTotalsProduction(existingTx.producerPhone, -oldQuantity, groupPrefix, getSafePartyName(existingTx.producerPhone));
-        if (existingTx.captainPhone) {
-          await sheets.updateTotalsReception(existingTx.captainPhone, -oldQuantity, groupPrefix, getSafePartyName(existingTx.captainPhone));
-        }
-        await sheets.updateTransactionStatus(existingTx.rowIndex, {
-          status: 'محذوف',
-          quantity: 0,
-          notes: `استبدال إيموجي كمية بغير كمي بواسطة ${producerPhone} | الإيموجي: ${existingTx.emoji || 'غير متوفر'} → ${result.text || result.reactionText || 'غير كمي'} | الكمية: ${oldQuantity} → 0`,
-        });
-        await sheets.logEdit({
-          editorPhone: producerPhone,
-          editorName: sheets.getRegisteredName(producerPhone) || 'مجهول',
-          producerPhone: existingTx.producerPhone,
-          captainPhone: existingTx.captainPhone,
-          oldQuantity,
-          newQuantity: 0,
-          transactionId: existingTx.transactionId,
-          groupPrefix,
-          originalTimestamp: existingTx.timestamp,
-          tamMessageId: quotedMsgId,
-          oldEmoji: existingTx.emoji || '',
-          newEmoji: result.text || result.reactionText || '',
-          eventType: 'استبدال إيموجي بغير كمي',
-          notes: `استبدال إيموجي كمية بغير كمي | الكمية: ${oldQuantity} → 0`,
-        });
-        return;
-      }
-
-      if (result.type === 'accept' && isReactionOnAcceptedReply) {
-        const persistedOrderContext = quotedMsgId ? whatsapp.getOrderContextByReplyId(quotedMsgId) : null;
-        const targetMessageForEvidence = quotedMsgId ? whatsapp.getCachedMessage(quotedMsgId) : null;
-        const targetContextForEvidence = getCachedMessageContext(targetMessageForEvidence);
-        const evidenceOrderText = persistedOrderContext?.orderText ||
-          getQuotedContextText(targetContextForEvidence) || result.quotedText || '';
-        const evidenceClassification = persistedOrderContext?.confidenceLevel
-          ? { confidenceLevel: persistedOrderContext.confidenceLevel }
-          : classifyOriginalOrder({ text: evidenceOrderText });
-        if (evidenceClassification.confidenceLevel === 'ambiguous') {
-          const ambiguousDetail = buildOrderDetail({
-            result: { ...result, confidenceLevel: 'ambiguous' },
-            msg,
-            quotedMsgId,
-            groupPrefix,
-            producerPhone: realProducerPhone || orderOwnerPhone || '',
-            captainPhone: captainPhone || '',
-            reactorPhone: producerPhone,
-          });
-          await sheets.upsertOrderDetails(ambiguousDetail);
-          await sheets.upsertOperationReview({
-            reviewId: `AMBIGUOUS_${quotedMsgId}`,
-            timestamp: result.timestamp,
-            groupPrefix,
-            alertType: 'طلب مبهم بسلسلة مؤكدة',
-            referenceId: quotedMsgId || result.messageId || '',
-            reason: 'اكتملت الأدلة الثابتة (رد كابتن مباشر + إيموجي كمية مخوّل)، لكن النص غير واضح للاعتماد الآلي',
-            notes: ambiguousDetail.notes,
-            producerPhone: ambiguousDetail.producerPhone,
-            captainPhone: ambiguousDetail.captainPhone,
-            producerName: ambiguousDetail.producerName,
-            captainName: ambiguousDetail.captainName,
-            quantity: ambiguousDetail.quantity,
-            orderText: ambiguousDetail.orderText,
-            captainReplyText: ambiguousDetail.tamText,
-            quantityEmoji: ambiguousDetail.emoji,
-            reactorName: ambiguousDetail.reactorName,
-            reactorPhone: ambiguousDetail.reactorPhone,
-          });
-          if (directOrderMessageId) whatsapp.markDirectOrderEmojiApplied(directOrderMessageId, quotedMsgId);
-          return;
+          captainPhone = producerPhone;
+          realProducerPhone = orderOwnerPhone;
         }
       }
 
       if (result.type === 'accept') {
         const existingTransaction = await sheets.findTransactionByMessageId(quotedMsgId, realProducerPhone || producerPhone);
-        
         if (existingTransaction) {
           if (existingTransaction.quantity !== quantity) {
-          const producerName = whatsapp.getPushName(msg);
-          const replacementKey = `${producerPhone}_${quotedMsgId}`;
-          pendingEmojiReplace.set(replacementKey, {
-            emoji: result.reactionText || result.text || '',
-            quantity,
-            timestamp: Date.now(),
-            kind: 'quantity',
-          });
-
-          const editResult = await sheets.processEdit({
-            messageId: quotedMsgId,
-            editorPhone: producerPhone,
-            editorName: producerName || '',
-            newQuantity: quantity,
-            groupPrefix,
-            newEmoji: result.reactionText || result.text || '',
-            reason: 'استبدال إيموجي كمية',
-          });
-
-          if (editResult.success) {
-            if (directOrderMessageId) whatsapp.markDirectOrderEmojiApplied(directOrderMessageId, quotedMsgId);
-          } else {
-            pendingEmojiReplace.delete(replacementKey);
+            await sheets.processEdit({
+              messageId: quotedMsgId,
+              editorPhone: producerPhone,
+              editorName: sheets.getRegisteredName(producerPhone) || '',
+              newQuantity: quantity,
+              groupPrefix,
+              newEmoji: result.reactionText || result.text || '',
+              reason: 'استبدال إيموجي كمية',
+            });
           }
-          return;
-          }
-
           if (directOrderMessageId) whatsapp.markDirectOrderEmojiApplied(directOrderMessageId, quotedMsgId);
           return;
         }
 
         let finalProducerPhone = realProducerPhone || producerPhone;
-        
         if (finalProducerPhone && finalProducerPhone.includes('@lid')) {
           finalProducerPhone = await resolveLidPhone(finalProducerPhone);
         }
@@ -1944,35 +665,28 @@ async function start() {
 
         const producerParty = await queueUnknownParty(finalProducerPhone, 'المنتج');
         const captainParty = await queueUnknownParty(resolvedCaptainForSheet, 'الكابتن');
-
         const identityIncomplete = !producerParty.recordable || !captainParty.recordable;
+
         if (producerParty.recordable) {
-          try {
-            const producerName = getSafePartyName(finalProducerPhone);
-            await sheets.updateTotalsProduction(finalProducerPhone, quantity, groupPrefix, producerName);
-          } catch (error) {}
+          await sheets.updateTotalsProduction(finalProducerPhone, quantity, groupPrefix, getSafePartyName(finalProducerPhone));
         }
-
         if (resolvedCaptainForSheet && captainParty.recordable) {
-          try {
-            const captainName = getSafePartyName(resolvedCaptainForSheet);
-            await sheets.updateTotalsReception(resolvedCaptainForSheet, quantity, groupPrefix, captainName);
-          } catch (error) {}
+          await sheets.updateTotalsReception(resolvedCaptainForSheet, quantity, groupPrefix, getSafePartyName(resolvedCaptainForSheet));
         }
 
-        sheets.recordTransaction({
+        await sheets.recordTransaction({
           transactionId: result.transactionId,
           timestamp: result.timestamp,
           producerPhone: finalProducerPhone,
           captainPhone: resolvedCaptainForSheet || '',
-          quantity,
+          quantity, // تسجيل الكمية بالكامل بدون سقف (حتى 10 أو أكثر)
           type: 'انتاج',
           emoji: result.text,
           groupPrefix,
           messageId: quotedMsgId || '',
           status: identityIncomplete ? '⏳ هوية غير مكتملة' : 'نشط',
-          notes: identityIncomplete ? 'حُفظت العملية؛ هوية أحد الأطراف غير مكتملة' : 'reaction'
-        }).catch(() => {});
+          notes: 'reaction'
+        });
 
         const orderDetail = buildOrderDetail({
           result,
@@ -1984,594 +698,54 @@ async function start() {
           reactorPhone: producerPhone,
           identityIncomplete,
         });
-        sheets.upsertOrderDetails(orderDetail).catch(() => {});
+        await sheets.upsertOrderDetails(orderDetail);
         if (directOrderMessageId) whatsapp.markDirectOrderEmojiApplied(directOrderMessageId, quotedMsgId);
-        if (orderDetail.status === 'يحتاج مراجعة') {
-          sheets.upsertOperationReview({
-            reviewId: `REVIEW_${result.transactionId}`,
-            timestamp: result.timestamp,
-            groupPrefix,
-            alertType: identityIncomplete ? 'هوية غير مكتملة' : 'تطابق المنتج والكابتن',
-            referenceId: quotedMsgId || result.messageId || '',
-            reason: orderDetail.notes || 'رقم المنتج والكابتن متطابقان',
-            notes: 'لا يتم تعديل أي رصيد عند اختيار نعم أو لا',
-            producerPhone: finalProducerPhone || '',
-            captainPhone: resolvedCaptainForSheet || '',
-            producerName: orderDetail.producerName,
-            captainName: orderDetail.captainName,
-            quantity: orderDetail.quantity,
-            orderText: orderDetail.orderText,
-            captainReplyText: orderDetail.tamText,
-            quantityEmoji: orderDetail.emoji,
-            reactorName: orderDetail.reactorName,
-            reactorPhone: orderDetail.reactorPhone,
-          }).catch(() => {});
-        }
-
-      } else if (result.type === 'cancel') {
-        const cancellerPhone = producerPhone;
-
-        if (!quotedMsgId) return;
-
+      } else if (result.type === 'cancel' && quotedMsgId) {
         const existingTx = await sheets.findTransactionByMessageId(quotedMsgId, null);
-        if (!existingTx) {
-          const cancellerName = sheets.getRegisteredName(cancellerPhone) || whatsapp.getPushName(msg) || 'غير معروف';
-          await sheets.logEdit({
-            editorPhone: cancellerPhone,
-            editorName: cancellerName,
-            producerPhone: result.orderOwnerPhone || '',
-            captainPhone: result.quotedPhone || '',
-            oldQuantity: 0,
-            newQuantity: 0,
-            groupPrefix,
-            orderMessageId: result.orderMessageId || '',
-            tamMessageId: quotedMsgId,
-            oldEmoji: '',
-            newEmoji: result.reactionText || result.text || '❌',
-            eventType: 'إلغاء بلا عملية أصلية',
-            notes: `إلغاء بلا عملية أصلية — لا تأثير على الرصيد`,
-          });
-          return;
-        }
-
-        const txTime = new Date(existingTx.timestamp);
-        const now = new Date();
-        const diffHours = (now - txTime) / (1000 * 60 * 60);
-        const isSuperCancel = await sheets.isSupervisor(cancellerPhone);
-        const maxCancelHours = isSuperCancel ? 168 : 24;
-
-        if (diffHours > maxCancelHours) return;
-
-        const cancelQuantity = existingTx.quantity;
-        const cancelProducer = existingTx.producerPhone;
-        const cancelCaptain = existingTx.captainPhone;
-
-        try {
-          const producerName = sheets.getRegisteredName(cancelProducer) || '';
-          await sheets.updateTotalsProduction(cancelProducer, -cancelQuantity, groupPrefix, producerName);
-        } catch (error) {}
-
-        if (cancelCaptain) {
-          try {
-            const cancelCaptainName = sheets.getRegisteredName(cancelCaptain) || 'كابتن';
-            await sheets.updateTotalsReception(cancelCaptain, -cancelQuantity, groupPrefix, cancelCaptainName);
-          } catch (error) {}
-        }
-
-        await sheets.updateTransactionStatus(existingTx.rowIndex, {
-          status: 'ملغى',
-          quantity: 0,
-          notes: `إلغاء بواسطة ${cancellerPhone} | الكمية الأصلية: ${cancelQuantity} | msgId:${quotedMsgId}`
-        });
-
-        await sheets.logEdit({
-          editorPhone: cancellerPhone,
-          editorName: isSuperCancel ? 'مشرف' : 'كابتن',
-          producerPhone: cancelProducer,
-          captainPhone: cancelCaptain,
-          oldQuantity: cancelQuantity,
-          newQuantity: 0,
-          transactionId: existingTx.transactionId,
-          groupPrefix,
-          originalTimestamp: existingTx.timestamp,
-          tamMessageId: quotedMsgId,
-          oldEmoji: existingTx.emoji || '',
-          newEmoji: result.reactionText || result.text || '❌',
-          eventType: 'إلغاء بواسطة ❌',
-          notes: `إلغاء بواسطة ${cancellerPhone} | الكمية: ${cancelQuantity} → 0`,
-        });
-
-      } else if (result.type === 'remove') {
-        if (!quotedMsgId) return;
-
-        const existingTx = await sheets.findTransactionByMessageIdIncludingCancelled(quotedMsgId, null);
-        if (!existingTx) return;
-
-        const replacementKey = `${producerPhone}_${quotedMsgId}`;
-        let pendingReplacement = pendingEmojiReplace.get(replacementKey);
-        if (!pendingReplacement) {
-          await new Promise(resolve => setTimeout(resolve, EMOJI_REPLACEMENT_GRACE_MS));
-          pendingReplacement = pendingEmojiReplace.get(replacementKey);
-        }
-        if (pendingReplacement && Date.now() - pendingReplacement.timestamp <= EMOJI_REPLACEMENT_GRACE_MS * 2) {
-          pendingEmojiReplace.delete(replacementKey);
-          return;
-        }
-        if (pendingReplacement) pendingEmojiReplace.delete(replacementKey);
-
-        const isCancelled = existingTx.transactionId?.startsWith('CANCELLED_') || 
-                           existingTx.notes?.includes('ملغى');
-        if (isCancelled) {
-          const restorerPhone = producerPhone;
-
-          const txTime = new Date(existingTx.timestamp);
-          const now = new Date();
-          const diffHours = (now - txTime) / (1000 * 60 * 60);
-          const isSuperRestore = await sheets.isSupervisor(restorerPhone);
-          const maxRestoreHours = isSuperRestore ? 168 : 24;
-
-          if (diffHours > maxRestoreHours) return;
-
-          const notesMatch = existingTx.notes?.match(/الكمية الأصلية:\s*(\d+)/);
-          const originalQuantity = notesMatch ? parseInt(notesMatch[1]) : existingTx.quantity;
-
-          const restoreProducer = existingTx.producerPhone;
-          const restoreCaptain = existingTx.captainPhone;
-
-          try {
-            const producerName = sheets.getRegisteredName(restoreProducer) || '';
-            await sheets.updateTotalsProduction(restoreProducer, originalQuantity, groupPrefix, producerName);
-          } catch (error) {}
-
-          if (restoreCaptain) {
-            try {
-              const captainName = sheets.getRegisteredName(restoreCaptain) || 'كابتن';
-              await sheets.updateTotalsReception(restoreCaptain, originalQuantity, groupPrefix, captainName);
-            } catch (error) {}
+        if (existingTx) {
+          const cancelQuantity = existingTx.quantity;
+          await sheets.updateTotalsProduction(existingTx.producerPhone, -cancelQuantity, groupPrefix, getSafePartyName(existingTx.producerPhone));
+          if (existingTx.captainPhone) {
+            await sheets.updateTotalsReception(existingTx.captainPhone, -cancelQuantity, groupPrefix, getSafePartyName(existingTx.captainPhone));
           }
-
           await sheets.updateTransactionStatus(existingTx.rowIndex, {
-            quantity: originalQuantity,
-            status: 'نشط',
-            notes: `استرجاع بواسطة ${restorerPhone} | msgId:${quotedMsgId}`
-          });
-
-          await sheets.logEdit({
-            editorPhone: restorerPhone,
-            editorName: isSuperRestore ? 'مشرف' : 'كابتن',
-            producerPhone: restoreProducer,
-            captainPhone: restoreCaptain,
-            oldQuantity: 0,
-            newQuantity: originalQuantity,
-            transactionId: existingTx.transactionId,
-            groupPrefix,
-            originalTimestamp: existingTx.timestamp,
-            tamMessageId: quotedMsgId,
-            oldEmoji: '❌',
-            newEmoji: existingTx.emoji || '',
-            eventType: 'استرجاع بعد إزالة ❌',
-            notes: `إزالة إيموجي الإلغاء واسترجاع العملية | الكمية: 0 → ${originalQuantity}`,
-          });
-
-        } else {
-          const removeQuantity = existingTx.quantity || 0;
-          const removeProducer = existingTx.producerPhone || realProducerPhone || producerPhone;
-          const removeCaptain = existingTx.captainPhone || captainPhone;
-
-          if (removeQuantity <= 0) return;
-
-          const removeTxTime = new Date(existingTx.timestamp);
-          const removeNow = new Date();
-          const removeDiffHours = (removeNow - removeTxTime) / (1000 * 60 * 60);
-          const isSuperRemove = await sheets.isSupervisor(producerPhone);
-          const maxRemoveHours = isSuperRemove ? 168 : 24;
-
-          if (removeDiffHours > maxRemoveHours) return;
-
-          try {
-            const producerName = sheets.getRegisteredName(removeProducer) || '';
-            await sheets.updateTotalsProduction(removeProducer, -removeQuantity, groupPrefix, producerName);
-          } catch (error) {}
-
-          if (removeCaptain) {
-            try {
-              const captainName = sheets.getRegisteredName(removeCaptain) || 'كابتن';
-              await sheets.updateTotalsReception(removeCaptain, -removeQuantity, groupPrefix, captainName);
-            } catch (error) {}
-          }
-
-          await sheets.updateTransactionStatus(existingTx.rowIndex, {
-            status: 'محذوف',
+            status: 'ملغى',
             quantity: 0,
-            notes: `حذف إيموجي بواسطة ${producerPhone} | الكمية الأصلية: ${removeQuantity} | msgId:${quotedMsgId}`
+            notes: `إلغاء بواسطة ${producerPhone} | الكمية: ${cancelQuantity}`
           });
-
-          try {
-            const deleterName = sheets.getRegisteredName(producerPhone) || producerPhone;
-            const _replaceKey = `${producerPhone}_${quotedMsgId}`;
-            const _pendingReplace = pendingEmojiReplace.get(_replaceKey);
-            const _deleteNotes = _pendingReplace
-              ? `تغيير إيموجي: ${result.reactionText || '?'} → ${_pendingReplace.emoji}`
-              : `حذف إيموجي مباشر`;
-            if (_pendingReplace) pendingEmojiReplace.delete(_replaceKey);
-            await sheets.logEdit({
-              editorPhone: producerPhone,
-              editorName: deleterName,
-              producerPhone: removeProducer,
-              captainPhone: removeCaptain || '',
-              oldQuantity: removeQuantity,
-              newQuantity: 0,
-              transactionId: existingTx.transactionId,
-              groupPrefix,
-              originalTimestamp: existingTx.timestamp,
-              tamMessageId: quotedMsgId,
-              oldEmoji: result.reactionText || existingTx.emoji || '',
-              newEmoji: _pendingReplace?.emoji || '',
-              eventType: _pendingReplace ? 'استبدال إيموجي كمية — إزالة القيمة السابقة' : 'إزالة إيموجي كمية',
-              notes: _deleteNotes,
-            });
-          } catch (logErr) {}
         }
       }
-
       return;
-    }
-
-    const rawText = whatsapp.extractText(msg) || '';
-    const trimmedText = rawText.trim();
-
-    const reportMatch = trimmedText.match(/^كشف\s+(\d{9,15})(?:\s+(\d{1,2}\/\d{1,2})\s+(\d{1,2}\/\d{1,2}))?$/i);
-    if (reportMatch) {
-      const senderJid = whatsapp.getSenderJid(msg);
-      const senderPhone = parser.cleanPhone(senderJid) || senderJid.split('@')[0].replace(/\D/g, '');
-
-      const isSuper = await sheets.isSupervisor(senderPhone);
-      if (isSuper) {
-        const targetPhone = reportMatch[1];
-        const remoteJid = msg.key.remoteJid;
-        const targetGroups = config.whatsapp.targetGroups || [];
-        const groupInfo = targetGroups.find(g => g.id === remoteJid);
-        const groupPrefix = groupInfo ? groupInfo.prefix : '';
-
-        let fromDate = null;
-        let toDate = null;
-        if (reportMatch[2] && reportMatch[3]) {
-          const year = new Date().getFullYear();
-          const [fd, fm] = reportMatch[2].split('/');
-          const [td, tm] = reportMatch[3].split('/');
-          fromDate = new Date(`${year}-${fm.padStart(2,'0')}-${fd.padStart(2,'0')}T00:00:00Z`);
-          toDate = new Date(`${year}-${tm.padStart(2,'0')}-${td.padStart(2,'0')}T23:59:59Z`);
-        }
-
-        try {
-          const reportResult = await sheets.getDetailedReport(targetPhone, groupPrefix, fromDate, toDate);
-          const supervisorJid = senderJid.includes('@') ? senderJid : `${senderPhone}@s.whatsapp.net`;
-          await sock.sendMessage(supervisorJid, { text: reportResult.report });
-        } catch (error) {}
-        return;
-      }
-    }
-
-    if (trimmedText === '.') {
-      const senderJid = whatsapp.getSenderJid(msg);
-      const senderPhone = parser.cleanPhone(senderJid) || (senderJid || '').split('@')[0].replace(/\D/g, '');
-      const isSuper = await sheets.isSupervisor(senderPhone);
-      
-      if (isSuper) {
-        const remoteJid = msg.key.remoteJid;
-        try {
-          await whatsapp.syncGroupLids(remoteJid);
-        } catch (err) {}
-        return;
-      }
     }
 
     const result = await parser.processMessage(msg, sock);
     if (!result) return;
+    if (result.type === 'order') return;
 
-    if (result.type === 'order') {
-      if (result.orderClassification !== 'invalid' && result.orderClassification !== 'blocked') {
-        const incompleteReview = messageLog.trackOrderCandidate({
-          messageId: result.messageId,
-          groupId: result.groupId,
-          timestamp: Date.parse(result.timestamp) || Date.now(),
-          ownerPhone: result.phone || '',
-          orderText: result.text || '',
-          classification: result.orderClassification,
-          reason: result.orderClassificationReason || '',
-        });
-        telegramMonitor.notifyIncompleteOrder({
-          ...incompleteReview,
-          groupName: (config.whatsapp.targetGroups || []).find(group => group.id === result.groupId)?.name || result.groupId,
-        });
-      }
-      return;
-    }
-
-    if (result.type === 'accept') {
-      if (result.orderClassification === 'invalid') return;
+    if (result.type === 'accept' && result.quantity > 0) {
       let captainPhone = result.phone;
       const tamMessageId = result.messageId;
-      const isVoiceAcceptance = Boolean(
-        result.isVoiceReply && result.voiceMessageId && String(result.text || '').trim().length > 0 && !parser.isQuantityEmoji(result.text)
-      );
       if (captainPhone && captainPhone.includes('@lid')) {
-        const resolvedCaptain = whatsapp.resolveLid(captainPhone);
-        if (resolvedCaptain && !resolvedCaptain.includes('@lid')) {
-          captainPhone = resolvedCaptain;
-        } else {
-          const captainPushName = msg.pushName;
-          if (captainPushName && captainPushName !== 'غير معروف') {
-            const resolvedByName = whatsapp.resolvePhoneByPushName(captainPushName);
-            if (resolvedByName && !resolvedByName.includes('@lid')) {
-              whatsapp.addLidMapping(captainPhone, resolvedByName);
-              captainPhone = resolvedByName;
-            } else {
-              const directResolvedTam = await whatsapp.resolveLidDirect(captainPhone);
-              if (directResolvedTam && !directResolvedTam.includes('@lid')) {
-                captainPhone = directResolvedTam;
-              }
-            }
-          } else {
-            const directResolvedTam = await whatsapp.resolveLidDirect(captainPhone);
-            if (directResolvedTam && !directResolvedTam.includes('@lid')) {
-              captainPhone = directResolvedTam;
-            }
-          }
-        }
+        captainPhone = await resolveLidPhone(captainPhone);
       }
-
       if (captainPhone && tamMessageId) {
         whatsapp.setCaptainForMessage(tamMessageId, captainPhone);
         sheets.saveTamToSheet(tamMessageId, captainPhone).catch(() => {});
-        const voiceReplyStatus = isVoiceAcceptance
-          ? whatsapp.registerVoiceReply(result.voiceMessageId, tamMessageId, captainPhone)
-          : null;
-        if (voiceReplyStatus?.invalidated) {
-          await invalidateVoiceReplyTransactions(voiceReplyStatus);
-        }
-        
-        if (result.orderOwnerPhone) {
-          let resolvedOwner = result.orderOwnerPhone;
-          if (resolvedOwner && resolvedOwner.includes('@lid')) {
-            const fromMap = whatsapp.resolveLid(resolvedOwner);
-            if (fromMap && !fromMap.includes('@lid')) {
-              resolvedOwner = fromMap.split('@')[0].replace(/\D/g, '');
-            } else {
-              const fromSheet = sheets.resolvePhoneFromRegistered(resolvedOwner);
-              if (fromSheet && !fromSheet.includes('@lid')) {
-                resolvedOwner = fromSheet.split('@')[0].replace(/\D/g, '');
-              } else {
-                try {
-                  const directResolved = await whatsapp.resolveLidDirect(resolvedOwner);
-                  if (directResolved && !directResolved.includes('@lid')) {
-                    resolvedOwner = directResolved.split('@')[0].replace(/\D/g, '');
-                  } else {
-                    resolvedOwner = resolvedOwner.split(':')[0].replace(/\D/g, '');
-                    whatsapp.queueLidForResolve(result.orderOwnerPhone);
-                  }
-                } catch (e) {
-                  resolvedOwner = resolvedOwner.split(':')[0].replace(/\D/g, '');
-                }
-              }
-            }
-          }
-          const originalOrderMessage = result.quotedMessageId
-            ? whatsapp.getCachedMessage(result.quotedMessageId)
-            : null;
-          whatsapp.setOrderForReply(tamMessageId, resolvedOwner, {
-            orderMessageId: result.quotedMessageId || '',
-            orderText: whatsapp.extractText(originalOrderMessage) || result.quotedText || '',
-            tamText: whatsapp.extractText(msg) || '',
-            orderClassification: result.orderClassification || 'valid',
-            confidenceLevel: result.confidenceLevel || (result.orderClassification === 'review' ? 'ambiguous' : 'clear'),
-            deliveryOrderDetails: result.deliveryOrderDetails || null,
-            isVoiceOrder: isVoiceAcceptance,
-            voiceMessageId: isVoiceAcceptance ? result.voiceMessageId : '',
-            voiceReplyCount: voiceReplyStatus?.replyCount || 0,
-            voiceReplyInvalidated: Boolean(voiceReplyStatus?.invalidated),
-          });
-          const updatedIncompleteReview = messageLog.markCaptainReply({
-            orderMessageId: result.quotedMessageId || '',
-            replyMessageId: tamMessageId,
-            captainPhone,
-            captainReplyText: whatsapp.extractText(msg) || result.text || '',
-          });
-          if (updatedIncompleteReview?.status === 'waiting_quantity') {
-            telegramMonitor.notifyIncompleteOrder({
-              ...updatedIncompleteReview,
-              groupName: (config.whatsapp.targetGroups || []).find(group => group.id === result.groupId)?.name || result.groupId,
-            });
-          }
-
-          if (!isVoiceAcceptance && result.quotedMessageId) {
-            const pendingDirectEmoji = whatsapp.getDirectOrderEmoji(result.quotedMessageId);
-            const pendingGroup = (config.whatsapp.targetGroups || []).find(group => group.id === result.groupId);
-            if (pendingDirectEmoji && pendingDirectEmoji.appliedReplyMessageId !== tamMessageId) {
-              try {
-                await applyPendingDirectOrderEmoji({
-                  pending: pendingDirectEmoji,
-                  replyMessageId: tamMessageId,
-                  orderMessageId: result.quotedMessageId,
-                  producerPhone: resolvedOwner,
-                  captainPhone,
-                  groupPrefix: pendingGroup?.prefix || '',
-                  msg,
-                  timestamp: result.timestamp,
-                });
-              } catch (error) {}
-            }
-          }
-        }
-        
-        if (result.quantity > 0) {
-          const targetGroups = config.whatsapp.targetGroups || [];
-          const groupInfo = targetGroups.find(g => g.id === result.groupId);
-          const groupPrefix = groupInfo ? groupInfo.prefix : '';
-          const quotedMsgIdKmi = result.quotedMessageId;
-          const voiceReplyStatus = quotedMsgIdKmi ? whatsapp.getVoiceReplyStatusByReplyId(quotedMsgIdKmi) : null;
-          if (voiceReplyStatus) return;
-
-          let realCaptain = null;
-          let realProducer = null;
-          let rolesConfirmed = false;
-
-          if (quotedMsgIdKmi) {
-            const captainFromCache = whatsapp.getCaptainByMessageId(quotedMsgIdKmi);
-            const producerFromCache = whatsapp.getOrderByReplyId(quotedMsgIdKmi);
-            if (captainFromCache) {
-              realCaptain = captainFromCache;
-              realProducer = producerFromCache || result.phone;
-              rolesConfirmed = true;
-            }
-          }
-
-          if (!rolesConfirmed) {
-            if (result.orderOwnerPhone && result.phone && result.orderOwnerPhone !== result.phone) {
-              realCaptain = result.orderOwnerPhone;
-              realProducer = result.phone;
-              rolesConfirmed = true;
-            }
-          }
-
-          if (realCaptain && typeof realCaptain === 'string' && realCaptain.includes('@lid')) {
-            const resolved = whatsapp.resolveLid(realCaptain);
-            if (resolved && !resolved.includes('@lid')) realCaptain = resolved.split('@')[0].replace(/\D/g, '');
-            else realCaptain = realCaptain.split(':')[0].replace(/\D/g, '');
-          }
-          if (realProducer && typeof realProducer === 'string' && realProducer.includes('@lid')) {
-            const resolved = whatsapp.resolveLid(realProducer);
-            if (resolved && !resolved.includes('@lid')) realProducer = resolved.split('@')[0].replace(/\D/g, '');
-            else realProducer = realProducer.split(':')[0].replace(/\D/g, '');
-          }
-          if (realCaptain && typeof realCaptain === 'string' && realCaptain.includes('@')) realCaptain = realCaptain.split('@')[0].replace(/\D/g, '');
-          if (realProducer && typeof realProducer === 'string' && realProducer.includes('@')) realProducer = realProducer.split('@')[0].replace(/\D/g, '');
-
-          if (rolesConfirmed && realCaptain && realProducer && realCaptain !== realProducer) {
-            try {
-              const captainRegName = sheets.getRegisteredName(realCaptain) || 'كابتن';
-              const producerRegName = sheets.getRegisteredName(realProducer) || 'منتج';
-              await sheets.updateTotalsProduction(realProducer, result.quantity, groupPrefix, producerRegName);
-              await sheets.updateTotalsReception(realCaptain, result.quantity, groupPrefix, captainRegName);
-              sheets.recordTransaction({
-                transactionId: result.transactionId,
-                timestamp: result.timestamp,
-                producerPhone: realProducer,
-                captainPhone: realCaptain,
-                quantity: result.quantity,
-                type: 'استلام (رد كمي)',
-                emoji: result.text || '⌨️',
-                groupPrefix: groupPrefix,
-                messageId: tamMessageId || '',
-                status: 'نشط',
-                notes: 'reply-quantity'
-              }).catch(() => {});
-            } catch (error) {}
-          } else {
-            const pendingInfo = {
-              rawPhone: result.phone || '',
-              rawOrderOwner: result.orderOwnerPhone || '',
-              quotedMsgId: quotedMsgIdKmi || '',
-              captainFromMsg: captainPhone || '',
-              reason: !rolesConfirmed ? 'لم يُعثر على tamCache' : (realCaptain === realProducer ? 'الكابتن = المنتج' : 'بيانات ناقصة')
-            };
-            sheets.recordTransaction({
-              transactionId: result.transactionId,
-              timestamp: result.timestamp,
-              producerPhone: pendingInfo.rawOrderOwner || pendingInfo.rawPhone || '?',
-              captainPhone: pendingInfo.captainFromMsg || '?',
-              quantity: result.quantity,
-              type: 'رد كمي (معلّق)',
-              emoji: result.text || '⌨️',
-              groupPrefix: groupPrefix,
-              messageId: tamMessageId || '',
-              status: '⏳ معلّق',
-              notes: `يحتاج مراجعة | ${pendingInfo.reason}`
-            }).catch(() => {});
-          }
-        }
       }
     }
   });
 
   whatsapp.onQRUpdate(setCurrentQR, clearCurrentQR);
-
-  whatsapp.connect().then(() => {
-    logger.info('جاري الاتصال بواتساب...');
-  }).catch((error) => {
-    logger.error('❌ فشل الاتصال الأولي', { error: error.message });
-  });
+  await whatsapp.connect();
 
   oneTimeBroadcast = createOneTimeBroadcastProcessor({
     volumePath: config.volumePath || path.join(__dirname, 'volume'),
-    targetGroupId: config.whatsapp.targetGroups.find(group => group.prefix === 'السيف').id,
+    targetGroupId: (config.whatsapp.targetGroups || []).find(group => group.prefix === 'السيف')?.id || '',
     getSocket: whatsapp.getSocket,
     isConnected: whatsapp.isConnected,
     logger,
   });
-  let oneTimeBroadcastInProgress = false;
-  setInterval(async () => {
-    if (oneTimeBroadcastInProgress) return;
-    oneTimeBroadcastInProgress = true;
-    try {
-      await oneTimeBroadcast.processPendingRequest();
-    } finally {
-      oneTimeBroadcastInProgress = false;
-    }
-  }, 2000);
-
-  setInterval(async () => {
-    try {
-      await sheets.loadSettings();
-    } catch (error) {}
-  }, config.general.settingsRefreshInterval);
-
-  setInterval(async () => {
-    sheets.createDashboardSheet().catch(e => {});
-  }, 30 * 60 * 1000);
-
-  setInterval(async () => {
-    try {
-      await sheets.reconcileDailySheets();
-    } catch (e) {}
-  }, 60 * 60 * 1000);
-
-  let reviewSyncInProgress = false;
-  setInterval(async () => {
-    if (reviewSyncInProgress) return;
-    reviewSyncInProgress = true;
-    try {
-      await sheets.syncOperationReviewResponses();
-    } catch (e) {
-    } finally {
-      reviewSyncInProgress = false;
-    }
-  }, 60 * 1000);
-
-  if (config.sheets.weeklyReport?.enabled === true) {
-    setInterval(async () => {
-      const now = new Date();
-      const jordanTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
-
-      if (jordanTime.getUTCDay() === 5 &&
-          jordanTime.getUTCHours() === 23 &&
-          jordanTime.getUTCMinutes() === 0) {
-        await sheets.generateWeeklyReport();
-      }
-    }, 60000);
-  } else {
-    logger.info('📊 تقرير نهاية الأسبوع موقوف مؤقتاً بطلب الإدارة');
-  }
-
-  logger.info('✅ النظام جاهز. في انتظار الرسائل...');
 }
-
-process.on('uncaughtException', (error) => {
-  logger.error('خطأ غير متوقع', { error: error.message });
-});
-process.on('unhandledRejection', (reason) => {
-  logger.error('وعد مرفوض', { reason: String(reason) });
-});
 
 start().catch((error) => {
   logger.error('فشل التشغيل', { error: error.message });
