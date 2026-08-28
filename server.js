@@ -39,7 +39,8 @@ const telegramMonitor = require('./telegram-monitor');
 // ============================================================
 (function cleanOldLogs() {
   try {
-    const logsDir = path.join(process.env.VOLUME_PATH || '/app/auth', 'logs');
+    const fallbackAuth = path.join(__dirname, 'auth');
+    const logsDir = path.join(process.env.VOLUME_PATH || fallbackAuth, 'logs');
     if (!fs.existsSync(logsDir)) return;
     const files = fs.readdirSync(logsDir);
     let freed = 0;
@@ -142,7 +143,7 @@ async function invalidateVoiceReplyTransactions(voiceStatus) {
 
 /**
  * قاعدة التسجيل الصوتي: لا يقبل رد «تم» سوى إيموجي كمية نشط واحد. عند وجود
- * أكثر من إيموجي، أو عدم بقاء إيموجي كمية، نعكس الحركة ونوثّق السبب.
+ * أكثر من إيموجي، أو عدم بقاء إيموجي كمية، نعكس الحركة ونتوثق السبب.
  */
 async function invalidateVoiceEmojiTransaction(voiceEmojiStatus, reason) {
   if (!voiceEmojiStatus?.replyMessageId) return;
@@ -295,7 +296,7 @@ const httpServer = http.createServer(async (req, res) => {
     }, null, 2));
   } else if (req.url === '/recovery-status/dreamax-2026-08-12') {
     // قراءة فقط: لا تشغّل أي Recovery ولا تعرض بيانات رسائل أو أرقام هواتف.
-    const receiptPath = path.resolve(config.volumePath, 'historical-recovery-dreamax-2026-08-12.complete.json');
+    const receiptPath = path.resolve(config.volumePath || path.join(__dirname, 'volume'), 'historical-recovery-dreamax-2026-08-12.complete.json');
     let receipt = null;
     try {
       if (fs.existsSync(receiptPath)) receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
@@ -337,7 +338,6 @@ const httpServer = http.createServer(async (req, res) => {
     }
   } else if (req.method === 'POST' && req.url === '/qr/refresh') {
     // مسار إداري مؤقت: يلغي رمز الهاتف المعلّق فقط ويطلب QR جديداً.
-    // لا يحذف بيانات auth ولا يعرض QR في الاستجابة؛ الصفحة /qr هي موضع عرضه.
     try {
       const refreshed = await whatsapp.refreshQRCode();
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -348,7 +348,6 @@ const httpServer = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ success: false, error: 'تعذر تجهيز QR حالياً' }));
     }
   } else if (req.method === 'POST' && req.url === '/internal/recover-dreamax-2026-08-12') {
-    // مسار مؤقت ومحمي لاستعادة فجوة دريمكس التي تم اعتمادها فقط (00:00–00:41 بتوقيت عمّان).
     const expectedToken = process.env.HISTORICAL_RECOVERY_TOKEN || '';
     const receivedToken = String(req.headers['x-historical-recovery-token'] || '');
     const tokenMatches = expectedToken.length > 0 && receivedToken.length === expectedToken.length &&
@@ -463,10 +462,9 @@ const httpServer = http.createServer(async (req, res) => {
       res.end('Error: ' + e.message);
     }
   } else if (req.url === '/reconcile' || req.url.startsWith('/reconcile?')) {
-    // مطابقة يدوية للأوراق اليومية
     try {
       const urlParams = new URL(req.url, 'http://localhost').searchParams;
-      const dateStr = urlParams.get('date') || null; // ?date=2026-08-09
+      const dateStr = urlParams.get('date') || null;
       const result = await sheets.reconcileDailySheets(dateStr);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       if (result.success) {
@@ -508,10 +506,7 @@ const httpServer = http.createServer(async (req, res) => {
       res.end('Error: ' + e.message);
     }
   } else if (req.url === '/logout') {
-    // مسح ملفات الجلسة وإعادة التشغيل
-    const fs = require('fs');
-    const path = require('path');
-    const authPath = path.resolve(config.whatsapp.authPath);
+    const authPath = path.resolve(config.whatsapp.authPath || path.join(__dirname, 'auth'));
     try {
       if (fs.existsSync(authPath)) {
         const files = fs.readdirSync(authPath);
@@ -535,10 +530,8 @@ const httpServer = http.createServer(async (req, res) => {
       <p>انتظر دقيقة ثم افتح الصفحة الرئيسية لمسح QR الجديد</p>
       <script>setTimeout(()=>location.href='/', 5000);</script>
     </body></html>`);
-    // إعادة التشغيل فوراً
     setTimeout(() => process.exit(0), 1000);
   } else if (req.url === '/dashboard') {
-    // لوحة التحكم الرئيسية
     const groups = config.whatsapp.targetGroups || [];
     const html = `<!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -680,14 +673,12 @@ const httpServer = http.createServer(async (req, res) => {
       const inp = document.getElementById('inp-' + phone);
       const fullPhone = (inp.value || '').trim().replace(/[^0-9]/g, '');
       if(!fullPhone || fullPhone.length < 9) { alert('أدخل رقم هاتف صحيح'); return; }
-      // البحث عن LID في أعضاء الجروب
       let lid = null;
       for(const g of GROUPS) {
         const res2 = await fetch('/api/group-members?groupId=' + encodeURIComponent(g.id));
         const members = await res2.json();
         for(const m of members) {
           if(!m.resolved && m.pushName) {
-            // نحاول مطابقة pushName مع اسم الشخص
             const row = document.getElementById('row-' + phone);
             const nameCell = row ? row.cells[0].textContent : '';
             if(m.pushName.includes(nameCell.trim()) || nameCell.includes(m.pushName.trim())) {
@@ -698,7 +689,6 @@ const httpServer = http.createServer(async (req, res) => {
         }
         if(lid) break;
       }
-      // ربط مباشر برقم الهاتف
       const res3 = await fetch('/api/link-lid?lid=' + encodeURIComponent(lid || 'manual-' + phone) + '&phone=' + encodeURIComponent(fullPhone), { method: 'POST' });
       const data = await res3.json();
       if(data.ok || data.lid) {
@@ -752,18 +742,18 @@ const httpServer = http.createServer(async (req, res) => {
     function showGroups() {
       let html = '<p class="page-title">اختر جروباً لعرض بياناته</p>';
       html += '<div style="margin-bottom:20px;display:flex;gap:10px;flex-wrap:wrap;">';
-      html += '<a class="back-btn" onclick="showLinkLid();return false;" href="#" style="background:rgba(102,126,234,0.15);border-color:rgba(102,126,234,0.4);">\uD83D\uDD17 ربط LID للأرقام</a>';
+      html += '<a class="back-btn" onclick="showLinkLid();return false;" href="#" style="background:rgba(102,126,234,0.15);border-color:rgba(102,126,234,0.4);">🔗 ربط LID للأرقام</a>';
       html += '<a class="back-btn" onclick="showMembersStatus();return false;" href="#" style="background:rgba(104,211,145,0.15);border-color:rgba(104,211,145,0.4);color:#68d391;">👥 حالة الأعضاء</a>';
       html += '</div>';
       html += '<div class="groups-grid">';
       for(const g of GROUPS) {
         const cls = getCardClass(g.name);
-        html += \`<a class="group-card \${cls}" onclick="showDays('\${g.prefix}','\${g.name}');return false;" href="#">
-          <div class="group-icon">\${getIcon(g.name)}</div>
-          <div class="group-name">\${g.prefix}</div>
-          <div class="group-meta">\${g.name}</div>
+        html += `<a class="group-card ${cls}" onclick="showDays('${g.prefix}','${g.name}');return false;" href="#">
+          <div class="group-icon">${getIcon(g.name)}</div>
+          <div class="group-name">${g.prefix}</div>
+          <div class="group-meta">${g.name}</div>
           <span class="group-arrow">&larr;</span>
-        </a>\`;
+        </a>`;
       }
       html += '</div>';
       document.getElementById('content').innerHTML = html;
@@ -774,22 +764,22 @@ const httpServer = http.createServer(async (req, res) => {
       const res = await fetch('/api/days?prefix=' + encodeURIComponent(prefix));
       const days = await res.json();
       const today = new Date().toLocaleDateString('sv-SE', {timeZone:'Asia/Amman'});
-      let html = \`<a class="back-btn" onclick="showGroups();return false;" href="#">&rarr; الجروبات</a>
-        <h2 style="margin:20px 0 25px;color:#fff;font-size:22px;">📅 أيام \${prefix}</h2>\`;
-      if(!days.length) { html += '<p style="color:#888;">\u0644ا توجد بيانات حتى الآن</p>'; }
+      let html = `<a class="back-btn" onclick="showGroups();return false;" href="#">&rarr; الجروبات</a>
+        <h2 style="margin:20px 0 25px;color:#fff;font-size:22px;">📅 أيام ${prefix}</h2>`;
+      if(!days.length) { html += '<p style="color:#888;">لا توجد بيانات حتى الآن</p>'; }
       else {
         html += '<div class="days-grid">';
         for(const d of days) {
           const isToday = d.date === today;
           const dateLabel = new Date(d.date + 'T00:00:00').toLocaleDateString('ar-JO', {weekday:'long',day:'numeric',month:'long',year:'numeric'});
-          html += \`<a class="day-card" onclick="showDay('\${d.name}','\${d.date}');return false;" href="#">
-            <div class="day-date">\${isToday ? '<span class="today-badge">اليوم</span>' : ''}\${dateLabel}</div>
+          html += `<a class="day-card" onclick="showDay('${d.name}','${d.date}');return false;" href="#">
+            <div class="day-date">${isToday ? '<span class="today-badge">اليوم</span>' : ''}${dateLabel}</div>
             <div class="day-stats">
-              <div class="stat prod"><div class="stat-val">\${d.totalProduction}</div><div class="stat-lbl">الانتاج</div></div>
-              <div class="stat recv"><div class="stat-val">\${d.totalReception}</div><div class="stat-lbl">الاستلام</div></div>
-              <div class="stat"><div class="stat-val" style="color:#f6ad55;">\${d.rows}</div><div class="stat-lbl">شخص</div></div>
+              <div class="stat prod"><div class="stat-val">${d.totalProduction}</div><div class="stat-lbl">الانتاج</div></div>
+              <div class="stat recv"><div class="stat-val">${d.totalReception}</div><div class="stat-lbl">الاستلام</div></div>
+              <div class="stat"><div class="stat-val" style="color:#f6ad55;">${d.rows}</div><div class="stat-lbl">شخص</div></div>
             </div>
-          </a>\`;
+          </a>`;
         }
         html += '</div>';
       }
@@ -806,19 +796,19 @@ const httpServer = http.createServer(async (req, res) => {
       const totalProd = rows.reduce((s,r)=>s+r.production,0);
       const totalRecv = rows.reduce((s,r)=>s+r.reception,0);
       const diff = totalProd - totalRecv;
-      let html = \`<a class="back-btn" onclick="showDays('\${prefix}','\${prefix}');return false;" href="#">&rarr; أيام \${prefix}</a>
-        <h2 style="margin:20px 0 20px;color:#fff;font-size:20px;">📆 \${dateLabel}</h2>
+      let html = `<a class="back-btn" onclick="showDays('${prefix}','${prefix}');return false;" href="#">&rarr; أيام ${prefix}</a>
+        <h2 style="margin:20px 0 20px;color:#fff;font-size:20px;">📆 ${dateLabel}</h2>
         <div class="totals-bar">
-          <div class="total-box total-prod"><div class="val">\${totalProd}</div><div class="lbl">إجمالي الانتاج</div></div>
-          <div class="total-box total-recv"><div class="val">\${totalRecv}</div><div class="lbl">إجمالي الاستلام</div></div>
-          <div class="total-box total-diff"><div class="val">\${diff >= 0 ? '+' : ''}\${diff}</div><div class="lbl">الفرق</div></div>
-        </div>\`;
+          <div class="total-box total-prod"><div class="val">${totalProd}</div><div class="lbl">إجمالي الانتاج</div></div>
+          <div class="total-box total-recv"><div class="val">${totalRecv}</div><div class="lbl">إجمالي الاستلام</div></div>
+          <div class="total-box total-diff"><div class="val">${diff >= 0 ? '+' : ''}${diff}</div><div class="lbl">الفرق</div></div>
+        </div>`;
       if(!rows.length) { html += '<p style="color:#888;">لا توجد بيانات لهذا اليوم</p>'; }
       else {
         html += '<table class="data-table"><thead><tr><th>الاسم</th><th>الهاتف</th><th style="text-align:center;">الانتاج</th><th style="text-align:center;">الاستلام</th></tr></thead><tbody>';
         const sorted = [...rows].sort((a,b) => (b.production+b.reception)-(a.production+a.reception));
         for(const r of sorted) {
-          html += \`<tr><td class="name">\${r.name || '—'}</td><td class="phone">\${r.phone}</td><td class="prod">\${r.production || '—'}</td><td class="recv">\${r.reception || '—'}</td></tr>\`;
+          html += `<tr><td class="name">${r.name || '—'}</td><td class="phone">${r.phone}</td><td class="prod">${r.production || '—'}</td><td class="recv">${r.reception || '—'}</td></tr>`;
         }
         html += '</tbody></table>';
       }
@@ -861,9 +851,10 @@ const httpServer = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: 'غير موجود' }));
       return;
     }
-    const requestPath = path.join(config.volumePath, 'one-time-broadcast.json');
-    const sentPath = path.join(config.volumePath, 'one-time-broadcast.sent.json');
-    const sendingPath = path.join(config.volumePath, 'one-time-broadcast.sending.json');
+    const volumePathLocal = config.volumePath || path.join(__dirname, 'volume');
+    const requestPath = path.join(volumePathLocal, 'one-time-broadcast.json');
+    const sentPath = path.join(volumePathLocal, 'one-time-broadcast.sent.json');
+    const sendingPath = path.join(volumePathLocal, 'one-time-broadcast.sending.json');
     if (fs.existsSync(sentPath)) {
       const receipt = JSON.parse(fs.readFileSync(sentPath, 'utf8'));
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -883,7 +874,7 @@ const httpServer = http.createServer(async (req, res) => {
       logger.info('📣 تم تجهيز طلب التحية الأحادي إلى السيف');
     }
     if (!oneTimeBroadcast) {
-      res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.writeHead(53, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify({ error: 'معالج الإرسال لم يكتمل تشغيله بعد' }));
       return;
     }
@@ -896,7 +887,6 @@ const httpServer = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ status: result.status, messageId: result.receipt.messageId || '' }));
   } else if (req.url.startsWith('/api/link-lid') && req.method === 'POST') {
-    // ربط LID برقم يدوياً: POST /api/link-lid?lid=XXX@lid&phone=9627XXXXXXXX
     let body = '';
     req.on('data', chunk => { body += chunk; });
     req.on('end', () => {
@@ -950,7 +940,6 @@ const httpServer = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: e.message }));
     }
   } else if (req.url === '/refresh-dashboard' || req.url === '/api/refresh-dashboard') {
-    // تحديث ورقة الرئيسية يدوياً
     try {
       await sheets.createDashboardSheet();
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -960,7 +949,6 @@ const httpServer = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: e.message }));
     }
   } else if (req.url === '/sync-all-lids' || req.url === '/api/sync-all-lids') {
-    // مزامنة LID شاملة لجميع الجروبات مع محاولة حل غير المحلول
     try {
       logger.info('🔄 طلب مزامنة LID شاملة');
       const result = await whatsapp.syncAllLidsFull();
@@ -972,10 +960,8 @@ const httpServer = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ success: false, error: e.message }));
     }
   } else if (req.url === '/force-sync-lids' || req.url === '/api/force-sync-lids') {
-    // مزامنة LID يدوياً لجميع الجروبات
     try {
       const syncResult = await whatsapp.syncGroupLids();
-      // إعادة تحميل أسماء المسجلين
       await sheets.loadRegisteredUsers(true);
       const unresolved = whatsapp.getUnresolvedLids ? whatsapp.getUnresolvedLids() : [];
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -991,13 +977,11 @@ const httpServer = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: e.message }));
     }
   } else if (req.url === '/unresolved-lids') {
-    // عرض جميع الأعضاء الذين لم يُحل LID الخاص بهم
     try {
       const lidMap = whatsapp.getLidToPhoneMap ? whatsapp.getLidToPhoneMap() : new Map();
       const msgCache = whatsapp.getMessageCache ? whatsapp.getMessageCache() : new Map();
       
-      // جمع جميع LIDs غير المحلولة من messageCache
-      const unresolvedMap = new Map(); // lid → { name, lid }
+      const unresolvedMap = new Map();
       for (const [msgId, msg] of msgCache) {
         const senderJid = msg.key?.participant || msg.key?.remoteJid || '';
         if (senderJid.includes('@lid') && !lidMap.has(senderJid)) {
@@ -1010,7 +994,6 @@ const httpServer = http.createServer(async (req, res) => {
       
       const list = Array.from(unresolvedMap.values());
       
-      // عرض HTML جميل
       let html = `<!DOCTYPE html><html dir="rtl"><head><meta charset="utf-8"><title>LIDs غير محلولة</title>
       <style>body{background:#111;color:#0f0;font-family:monospace;padding:20px;}
       table{border-collapse:collapse;width:100%;} th,td{border:1px solid #0f0;padding:8px;text-align:right;}
@@ -1052,7 +1035,6 @@ const httpServer = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: e.message }));
     }
   } else if (req.url?.startsWith('/map-lid')) {
-    // ربط LID برقم هاتف يدوياً
     try {
       const urlObj = new URL(req.url, 'http://localhost');
       const lid = urlObj.searchParams.get('lid');
@@ -1062,7 +1044,6 @@ const httpServer = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: 'lid و phone مطلوبان' }));
         return;
       }
-      // تنظيف الرقم
       const cleanedPhone = phone.replace(/[^0-9]/g, '');
       const phoneJid = cleanedPhone.includes('@') ? cleanedPhone : `${cleanedPhone}@s.whatsapp.net`;
       whatsapp.addLidMapping(lid, phoneJid);
@@ -1074,7 +1055,6 @@ const httpServer = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: e.message }));
     }
   } else if (req.url === '/members-db' || req.url === '/api/members-db') {
-    // حالة قاعدة بيانات Members
     try {
       const membersDb = require('./members-db');
       const stats = membersDb.getStats();
@@ -1102,8 +1082,6 @@ httpServer.listen(PORT, () => {
 
 function setCurrentQR(qr) { currentQR = qr; }
 
-// v5: تصدير دالة معالجة الرسائل للـ Recovery Service
-// تسمح لـ recovery-service.js بتمرير الرسائل الفائتة عبر نفس pipeline
 async function processRecoveredMessage(msg) {
   const _msgId = msg?.key?.id;
   if (_msgId && isAlreadyProcessed(_msgId)) {
@@ -1111,7 +1089,6 @@ async function processRecoveredMessage(msg) {
     return false;
   }
   if (_msgId) markAsProcessed(_msgId);
-  // تمرير الرسالة عبر نفس pipeline الرسائل العادية
   try {
     await whatsapp._triggerMessageHandler(msg);
     return true;
@@ -1123,11 +1100,7 @@ async function processRecoveredMessage(msg) {
 module.exports = { processRecoveredMessage };
 function clearCurrentQR() { currentQR = null; }
 
-// ====================================================
-// البحث عن رقم الكابتن
-// ====================================================
 async function findCaptainPhone(quotedMessageId, fallbackPhone) {
-  // 1. tamCache (الأسرع)
   if (quotedMessageId) {
     const fromCache = whatsapp.getCaptainByMessageId(quotedMessageId);
     if (fromCache) {
@@ -1136,13 +1109,11 @@ async function findCaptainPhone(quotedMessageId, fallbackPhone) {
     }
   }
 
-  // 2. من بيانات الرسالة (orderOwnerPhone)
   if (fallbackPhone) {
     logger.info('📱 كابتن من بيانات الرسالة', { captain: fallbackPhone });
     return fallbackPhone;
   }
 
-  // 3. من ورقة سجل_تم (بعد إعادة الاتصال)
   if (quotedMessageId) {
     const fromSheet = await sheets.getCaptainFromTamSheet(quotedMessageId);
     if (fromSheet) {
@@ -1154,16 +1125,10 @@ async function findCaptainPhone(quotedMessageId, fallbackPhone) {
   return null;
 }
 
-// ====================================================
-// دالة مساعدة: حل LID إلى رقم هاتف حقيقي
-// تُستخدم قبل كل تسجيل في الشيت
-// ====================================================
 async function resolveLidPhone(phone) {
   if (!phone) return phone;
-  // إذا لم يكن LID → أرجعه كما هو
   if (!phone.includes('@lid')) return phone;
   
-  // محاولة 1: resolveLid() مع base-prefix matching
   const fromMap = whatsapp.resolveLid(phone);
   if (fromMap && !fromMap.includes('@lid')) {
     const clean = fromMap.split('@')[0].replace(/\D/g, '');
@@ -1173,7 +1138,6 @@ async function resolveLidPhone(phone) {
     }
   }
   
-  // محاولة 2: USyncQuery مباشرة
   try {
     const directResolved = await whatsapp.resolveLidDirect(phone);
     if (directResolved && !directResolved.includes('@lid')) {
@@ -1187,7 +1151,6 @@ async function resolveLidPhone(phone) {
     logger.debug('فشل حل LID عبر USyncQuery', { error: e.message });
   }
   
-  // إذا لم يُحل، نحتفظ بالـ LID كاملاً للتدقيق بدلاً من قصّه إلى رقم قد يبدو كرقم هاتف مزيف.
   logger.warn(`⚠️ LID لم يُحل للتسجيل: ${phone.substring(0,15)} — سيبقى كمعرف مؤقت للتدقيق`);
   whatsapp.queueLidForResolve(phone);
   return phone;
@@ -1198,23 +1161,17 @@ function normalizePhoneForComparison(phone) {
   return digits.length >= 9 ? digits.slice(-9) : digits;
 }
 
-/** يتحقق من أن المعرف رقم هاتف قابل للتسجيل، وليس LID أو قيمة رقمية مشوهة. */
 function isRecordablePhone(phone) {
   const raw = String(phone || '');
   const digits = raw.replace(/\D/g, '');
   return Boolean(raw) && !raw.includes('@lid') && digits.length >= 9 && digits.length <= 12;
 }
 
-/**
- * لا نستخدم اسم واتساب غير المعتمد في الأرصدة: الطرف غير المسجل يظهر «مجهول»
- * إلى أن يضاف في ورقة المسجلين، بينما يحتفظ الطرف المسجل باسمه الرسمي.
- */
 function getSafePartyName(phone) {
   if (!isRecordablePhone(phone)) return 'مجهول';
   return sheets.getRegisteredName(phone) || 'مجهول';
 }
 
-/** يضع الرقم غير المسجل في قائمة المراجعة دون تعطيل تسجيل الطرف الآخر. */
 async function queueUnknownParty(phone, role) {
   if (!isRecordablePhone(phone)) {
     logger.warn('⚠️ تعذر تأكيد رقم هاتف الطرف للتسجيل اليومي؛ حُفظ المعرف في سجل العملية للتدقيق', {
@@ -1242,7 +1199,6 @@ function getCachedMessageContext(message) {
     payload.documentMessage?.contextInfo || null;
 }
 
-/** يستخرج نص الرسالة الأصلية المضمّن داخل رد واتساب عندما لا تكون في messageCache. */
 function getQuotedContextText(contextInfo) {
   if (!contextInfo?.quotedMessage) return '';
   return whatsapp.extractText({ message: contextInfo.quotedMessage }) || '';
@@ -1254,7 +1210,6 @@ function formatDeliveryOrderDetails(details) {
   return `من: ${details.from} | إلى: ${details.to} | الدفع: ${payment} | التوصيل: ${details.delivery}`;
 }
 
-/** يبني صف التدقيق دون الاعتماد على نجاحه في تسجيل الأرصدة اليومية. */
 function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone, captainPhone, reactorPhone, identityIncomplete = false }) {
   const targetMessage = quotedMsgId ? whatsapp.getCachedMessage(quotedMsgId) : null;
   const targetContext = getCachedMessageContext(targetMessage);
@@ -1310,11 +1265,6 @@ function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone
   };
 }
 
-/**
- * يطبق آخر كمية كانت معلقة على الطلب الأصلي بعد وصول رد كابتن مقتبس.
- * المفتاح المحاسبي يبقى دائماً معرف رد الكابتن حتى تستمر تعديلات الكمية
- * اللاحقة في استعمال مسار processEdit نفسه.
- */
 async function applyPendingDirectOrderEmoji({ pending, replyMessageId, orderMessageId, producerPhone, captainPhone, groupPrefix, msg, timestamp }) {
   if (!pending || !replyMessageId || !producerPhone || !captainPhone) return false;
   if (pending.appliedReplyMessageId === replyMessageId) return false;
@@ -1331,8 +1281,6 @@ async function applyPendingDirectOrderEmoji({ pending, replyMessageId, orderMess
     quotedText: '',
     confidenceLevel: orderConfidence,
   };
-  // يوجد رد كابتن وإيموجي مخوّل، لكن النص غير كافٍ للاعتماد الآلي.
-  // لا نغيّر أي رصيد؛ نوثق السلسلة كاملة في المراجعة ليحسمها المستخدم.
   if (orderConfidence === 'ambiguous') {
     const ambiguousDetail = buildOrderDetail({
       result: syntheticResult,
@@ -1432,18 +1380,43 @@ async function start() {
   logger.info('   🚀 نظام AbuSaif v5 — Self-Healing + Recovery');
   logger.info('═══════════════════════════════════════');
 
-  // 0. إنشاء مجلدات VOLUME إذا لم تكن موجودة
-  const fs = require('fs');
-  const path = require('path');
-  const volumePath = path.resolve(config.volumePath);
-  const authSessionPath = path.resolve(config.whatsapp.authPath);
-  const logsPath = path.resolve(config.logging.logsPath);
-  [volumePath, authSessionPath, logsPath].forEach(dir => {
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-      logger.info(`📁 تم إنشاء المجلد: ${dir}`);
+  // 0. إنشاء مجلدات التشغيل بشكل آمن لتجنب EACCES على Render
+  const volumePath = (() => {
+    try {
+      const resolved = path.resolve(config.volumePath || path.join(__dirname, 'volume'));
+      if (!fs.existsSync(resolved)) fs.mkdirSync(resolved, { recursive: true });
+      return resolved;
+    } catch (e) {
+      const localFallback = path.join(__dirname, 'volume');
+      if (!fs.existsSync(localFallback)) fs.mkdirSync(localFallback, { recursive: true });
+      return localFallback;
     }
-  });
+  })();
+
+  const authSessionPath = (() => {
+    try {
+      const resolved = path.resolve(config.whatsapp.authPath || path.join(__dirname, 'auth'));
+      if (!fs.existsSync(resolved)) fs.mkdirSync(resolved, { recursive: true });
+      return resolved;
+    } catch (e) {
+      const localFallback = path.join(__dirname, 'auth');
+      if (!fs.existsSync(localFallback)) fs.mkdirSync(localFallback, { recursive: true });
+      return localFallback;
+    }
+  })();
+
+  const logsPath = (() => {
+    try {
+      const resolved = path.resolve(config.logging.logsPath || path.join(__dirname, 'logs'));
+      if (!fs.existsSync(resolved)) fs.mkdirSync(resolved, { recursive: true });
+      return resolved;
+    } catch (e) {
+      const localFallback = path.join(__dirname, 'logs');
+      if (!fs.existsSync(localFallback)) fs.mkdirSync(localFallback, { recursive: true });
+      return localFallback;
+    }
+  })();
+
   logger.info(`💾 VOLUME_PATH: ${volumePath} (${process.env.VOLUME_PATH ? 'Railway Volume' : 'محلي'})`);
   logger.info(`🔑 AUTH_PATH: ${authSessionPath}`);
 
@@ -1459,13 +1432,11 @@ async function start() {
     logger.info('✅ ورقة مراجعة العمليات جاهزة');
     const importedReviews = await sheets.backfillOperationReviewsFromOrderDetails();
     if (importedReviews.created) logger.info('✅ تم استيراد مراجعات قائمة', importedReviews);
-    // إنشاء/تحديث ورقة الرئيسية عند بدء التشغيل
     sheets.createDashboardSheet().catch(e => logger.warn('فشل تحديث الرئيسية', { error: e.message }));
   } catch (error) {
     logger.warn('⚠️ Google Sheets غير متاح', { error: error.message });
   }
 
-  // تيليجرام اختياري: نتحقق من الرمز عند التشغيل ولا نوقف البوت إذا تعذر الاتصال به.
   const telegramVerification = await telegramMonitor.verifyBot();
   if (telegramVerification.ok) {
     logger.info(`✅ بوت تيليجرام للمراقبة جاهز: @${telegramVerification.username}`);
@@ -1474,32 +1445,23 @@ async function start() {
   } else {
     logger.info('ℹ️ مراقبة تيليجرام غير مفعلة بعد');
   }
+
   // 2. معالج الرسائل
   whatsapp.setMessageHandler(async (msg, sock) => {
 
-    // ====================================================
-    // حالة 1: تفاعل (reaction) 👍 / 2️⃣ / 3️⃣ / ❌
-    // ====================================================
     if (whatsapp.isReaction(msg)) {
       const result = await parser.processMessage(msg, sock);
       if (!result) return;
 
       const producerPhone = result.phone;
       const quantity = result.quantity;
-      // unknown_emoji يعيد targetMessageId مباشرة، أما الأنواع الأخرى فتستخدم quotedMessageId.
       let quotedMsgId = result.quotedMessageId || result.targetMessageId;
       const remoteJid = msg.key.remoteJid;
       let orderOwnerPhone = result.orderOwnerPhone || result.quotedPhone || null;
       let directOrderMessageId = '';
       let directOrderMode = false;
 
-      // === قاعدة: إذا وضع شخص إيموجي على رسالته هو نفسه → تجاهل
-      // لكن هذه القاعدة لا تنطبق إذا كان الإيموجي على رسالة "تم" لكابتن آخر
-      // لأن صاحب الطلب (أمجد) يضع إيموجي على رد الكابتن (يعقوب) لتحديد الكمية
       const _captainFromTamEarly = quotedMsgId ? whatsapp.getCaptainByMessageId(quotedMsgId) : null;
-      // لا يجوز أن ينشئ الإيموجي قيداً مباشرة على منشور أو تحذير. لا يقبل
-      // البوت التفاعل المالي إلا على رد تأكيد سُجّل أولاً في tamCache أو
-      // في سجل_تم الدائم، حتى تبقى القاعدة سليمة بعد إعادة التشغيل أيضاً.
       const _captainFromSheetEarly = !_captainFromTamEarly && quotedMsgId
         ? await sheets.getCaptainFromTamSheet(quotedMsgId)
         : null;
@@ -1547,7 +1509,6 @@ async function start() {
         if (result.type === 'accept') {
           whatsapp.setDirectOrderEmoji(directOrderMessageId, producerPhone, result.text || result.reactionText || '', quantity);
         } else {
-          // لا نحتفظ بكمية معلقة بعد إزالة الإيموجي أو استبداله بغير كمي.
           whatsapp.clearDirectOrderEmoji(directOrderMessageId);
         }
         messageLog.markOrderQuantity({
@@ -1563,11 +1524,10 @@ async function start() {
           }
           return;
         }
-        // نوجّه المعالجة إلى رد الكابتن ليبقى مفتاح الحركة ثابتاً ولا ينشأ قيد جديد على الطلب الأصلي.
         quotedMsgId = _existingReplyForDirectOrder.replyMessageId;
         orderOwnerPhone = _existingReplyForDirectOrder.producer || orderOwnerPhone;
       }
-      // فحص إضافي: هل الرسالة المستهدفة هي reply (تم) من messageCache
+
       let _isTargetAReply = !!_captainFromTamEarly || directOrderMode;
       let _targetTextEarly = '';
       if (!_isTargetAReply && quotedMsgId) {
@@ -1588,8 +1548,6 @@ async function start() {
         _isTargetAReply = !!_targetCtxEarly?.quotedMessage;
         _targetTextEarly = whatsapp.extractText(_targetMsgEarly) || '';
 
-        // لا نعالج أي إيموجي على «تم» مستقلة لم ترد على طلب أصلي.
-        // حتى لو كان واضع الإيموجي شخصاً آخر، لا توجد عملية يمكن نسبتها بأمان.
         if (parser.isStandaloneAcceptWithoutOrder(_targetTextEarly, _isTargetAReply)) {
           logger.info('⚠️ تجاهل تفاعل على رسالة استلام مستقلة بلا طلب مقتبس', {
             msgId: quotedMsgId.substring(0, 8),
@@ -1600,7 +1558,6 @@ async function start() {
       }
 
       if (!_isTargetAReply && !directOrderMode) {
-        // فقط إذا لم يكن الإيموجي على رسالة "تم" — نطبق قاعدة التجاهل الذاتي
         const _producerFromOrderEarly = quotedMsgId ? whatsapp.getOrderByReplyId(quotedMsgId) : null;
         const _realOwner = _producerFromOrderEarly || orderOwnerPhone;
         if (_realOwner && producerPhone) {
@@ -1617,8 +1574,6 @@ async function start() {
           }
         }
       } else {
-        // الإيموجي على رسالة "تم" — تحقق فقط أن واضع الإيموجي ليس الكابتن نفسه
-        // الكابتن = من tamCache أو من orderOwnerPhone (صاحب الرسالة المستهدفة)
         const _captainForGuard = _captainFromTamEarly || orderOwnerPhone;
         if (_captainForGuard) {
           const cleanProducer = producerPhone.replace(/\D/g, '');
@@ -1635,8 +1590,6 @@ async function start() {
         }
       }
 
-      // عند التفاعل على رد كابتن موثق، نعيد ربطه بالطلب الأصلي لسجل المتابعة فقط.
-      // لا ينشئ هذا السجل أي رصيد أو صف في Google Sheets.
       if (!directOrderMode) {
         const reviewOrderContext = quotedMsgId ? whatsapp.getOrderContextByReplyId(quotedMsgId) : null;
         if (reviewOrderContext?.orderMessageId) {
@@ -1648,43 +1601,24 @@ async function start() {
         }
       }
 
-      // تحديد بادئة الجروب
       const targetGroups = config.whatsapp.targetGroups || [];
       const groupInfo = targetGroups.find(g => g.id === remoteJid);
       const groupPrefix = groupInfo ? groupInfo.prefix : '';
 
-            // ====================================================
-      // تحديد الكابتن وصاحب الطلب بشكل صحيح
-      // الحالة 1: الإيموجي على رسالة "تم" مباشرة
-      //   - quotedMsgId موجود في tamCache → الكابتن معروف
-      //   - orderCache[quotedMsgId] موجود → صاحب الطلب معروف
-      // الحالة 2: الإيموجي على رسالة الطلب مباشرة
-      //   - quotedMsgId ليس في tamCache → واضع الإيموجي هو الكابتن
-      //   - orderOwnerPhone = صاحب الرسالة (المنتج)
-      // ====================================================
-
-      // أولاً: هل الإيموجي على رسالة "تم"?
       const captainFromTam = quotedMsgId ? whatsapp.getCaptainByMessageId(quotedMsgId) : null;
-      // صاحب الطلب من orderCache (مربوط بـ id رسالة "تم")
       const producerFromOrder = quotedMsgId ? whatsapp.getOrderByReplyId(quotedMsgId) : null;
 
       let captainPhone, realProducerPhone;
 
       if (captainFromTam) {
-        // الحالة 1: الإيموجي على رسالة "تم"
-        // الكابتن = من tamCache
-        // صاحب الطلب = من orderCache أو orderOwnerPhone
         let resolvedCaptain = captainFromTam;
-        // إذا كان الكابتن LID غير محلول، نحاول حله الآن
         if (resolvedCaptain && resolvedCaptain.includes('@lid')) {
-          // محاولة 1: من lidToPhoneMap
           const lidResolved = whatsapp.resolveLid(resolvedCaptain);
           if (lidResolved && !lidResolved.includes('@lid')) {
             logger.info(`✅ حل LID الكابتن عند الإيموجي (lidMap): ${resolvedCaptain.substring(0,15)} → ${lidResolved}`);
             resolvedCaptain = lidResolved;
             if (quotedMsgId) whatsapp.setCaptainForMessage(quotedMsgId, resolvedCaptain);
           } else {
-            // محاولة 2: من pushName رسالة "تم" في messageCache
             const tamMsg = quotedMsgId ? whatsapp.getCachedMessage(quotedMsgId) : null;
             const captainPushName = tamMsg?.pushName || whatsapp.getPushNameFromCachedMessage(quotedMsgId);
             if (captainPushName && captainPushName !== 'غير معروف') {
@@ -1695,58 +1629,38 @@ async function start() {
                 whatsapp.addLidMapping(captainFromTam, resolvedByName);
                 if (quotedMsgId) whatsapp.setCaptainForMessage(quotedMsgId, resolvedCaptain);
               } else {
-                // محاولة 3: resolveLidDirect عبر USyncQuery
                 const directResolved = await whatsapp.resolveLidDirect(resolvedCaptain);
                 if (directResolved && !directResolved.includes('@lid')) {
                   logger.info(`✅ حل LID الكابتن عند الإيموجي (USyncQuery): ${resolvedCaptain.substring(0,15)} → ${directResolved}`);
                   resolvedCaptain = directResolved;
                   if (quotedMsgId) whatsapp.setCaptainForMessage(quotedMsgId, resolvedCaptain);
-                } else {
-                  logger.warn(`⚠️ كابتن LID لا يزال غير محلول عند الإيموجي`, {
-                    lid: resolvedCaptain.substring(0,15),
-                    pushName: captainPushName
-                  });
                 }
               }
             } else {
-              // محاولة 3 (بدون pushName): resolveLidDirect عبر USyncQuery
               const directResolved = await whatsapp.resolveLidDirect(resolvedCaptain);
               if (directResolved && !directResolved.includes('@lid')) {
                 logger.info(`✅ حل LID الكابتن عند الإيموجي (USyncQuery/noPushName): ${resolvedCaptain.substring(0,15)} → ${directResolved}`);
                 resolvedCaptain = directResolved;
                 if (quotedMsgId) whatsapp.setCaptainForMessage(quotedMsgId, resolvedCaptain);
-              } else {
-                logger.warn(`⚠️ كابتن LID بدون pushName`, { lid: resolvedCaptain.substring(0,15) });
               }
             }
           }
         }
         captainPhone = resolvedCaptain;
-        // صاحب الطلب: من orderCache أولاً
-        // إذا كان orderOwnerPhone = الكابتن نفسه (مقلوب)، استخدم واضع الإيموجي بدلاً
         const _captainNorm = captainPhone ? captainPhone.replace(/\D/g, '').slice(-9) : null;
         const _ownerNorm = orderOwnerPhone ? orderOwnerPhone.replace(/\D/g, '').slice(-9) : null;
         const _ownerIsCaptain = _captainNorm && _ownerNorm && _captainNorm === _ownerNorm;
         if (producerFromOrder) {
           realProducerPhone = producerFromOrder;
         } else if (_ownerIsCaptain) {
-          // لا ننسب الطلب لواضع الإيموجي عند غياب صاحب الطلب الحقيقي.
-          // ذلك يمنع طرفاً ثالثاً من اعتماد رصيد غيره بعد فقدان سياق الطلب.
           realProducerPhone = null;
         } else {
           realProducerPhone = orderOwnerPhone;
         }
-        logger.info('📌 حالة 1: إيموجي على رسالة تم', {
-          captain: captainPhone, producer: realProducerPhone, ownerWasCaptain: _ownerIsCaptain, qty: quantity
-        });
       } else {
-        // tamCache فارغ — نحاول طرق بديلة لتحديد إذا كانت رسالة "تم"
-        
-        // محاولة 1: فحص Sheet (سجل_تم)
         const captainFromSheet = quotedMsgId ? await sheets.getCaptainFromTamSheet(quotedMsgId) : null;
         if (captainFromSheet) {
           captainPhone = captainFromSheet;
-          // نفس منطق حالة 1: إذا orderOwnerPhone = الكابتن → واضع الإيموجي هو صاحب الطلب
           const _cNorm1b = captainPhone ? captainPhone.replace(/\D/g, '').slice(-9) : null;
           const _oNorm1b = orderOwnerPhone ? orderOwnerPhone.replace(/\D/g, '').slice(-9) : null;
           if (producerFromOrder) {
@@ -1756,12 +1670,7 @@ async function start() {
           } else {
             realProducerPhone = orderOwnerPhone;
           }
-          logger.info('📌 حالة 1b: إيموجي على رسالة تم (من Sheet)', {
-            captain: captainPhone, producer: realProducerPhone, qty: quantity
-          });
         } else {
-          // محاولة 2: فحص messageCache — إذا الرسالة المستهدفة هي reply (رد على رسالة أخرى)
-          // فهي رسالة "تم" وصاحبها هو الكابتن
           const targetMsg = quotedMsgId ? whatsapp.getCachedMessage(quotedMsgId) : null;
           const targetMsgObj = targetMsg?.message || {};
           const targetContextInfo = 
@@ -1773,13 +1682,9 @@ async function start() {
           const isTargetReply = !!targetContextInfo?.quotedMessage;
 
           if (isTargetReply && orderOwnerPhone) {
-            // الرسالة المستهدفة هي رد (تم) → صاحبها هو الكابتن
-            captainPhone = orderOwnerPhone; // صاحب رسالة "تم" = الكابتن
-            // صاحب الطلب = صاحب الرسالة التي رد عليها الكابتن
+            captainPhone = orderOwnerPhone;
             const originalOrderMsgId = targetContextInfo.stanzaId;
             const originalOrderMsg = originalOrderMsgId ? whatsapp.getCachedMessage(originalOrderMsgId) : null;
-            // سياق الرسالة المستهدفة يحتفظ به واتساب داخل رد «تم» نفسه، حتى لو
-            // لم تعد رسالة الطلب الأصلية متاحة في messageCache بعد الانقطاع.
             const originalOwnerJid = whatsapp.getSenderJid(originalOrderMsg) ||
               targetContextInfo.senderPn ||
               targetContextInfo.participantPn ||
@@ -1789,7 +1694,6 @@ async function start() {
             } else {
               realProducerPhone = null;
             }
-            // حفظ في tamCache للمرات القادمة
             whatsapp.setCaptainForMessage(quotedMsgId, captainPhone);
             if (realProducerPhone) {
               whatsapp.setOrderForReply(quotedMsgId, realProducerPhone, {
@@ -1799,40 +1703,22 @@ async function start() {
                 deliveryOrderDetails: parser.extractDeliveryOrderDetails(whatsapp.extractText(originalOrderMsg) || getQuotedContextText(targetContextInfo)),
               });
             }
-            logger.info('📌 حالة 1c: إيموجي على رسالة تم (من messageCache/contextInfo)', {
-              captain: captainPhone, producer: realProducerPhone, qty: quantity
-            });
           } else {
-            // الحالة 2: الإيموجي على رسالة الطلب مباشرة (ليست رد)
-            // واضع الإيموجي = الكابتن
-            // صاحب الرسالة = المنتج
             captainPhone = producerPhone;
             realProducerPhone = orderOwnerPhone;
-            logger.info('📌 حالة 2: إيموجي على رسالة طلب مباشرة', {
-              captain: captainPhone, producer: realProducerPhone, qty: quantity
-            });
           }
         }
       }
 
-      // عند التفاعل على رسالة «تم» ردّاً على طلب: الاعتماد لصاحب الطلب فقط،
-      // أو لمشرف معتمد. لا يسمح لتفاعل طرف ثالث بإنشاء أو تعديل رصيد.
       const isReactionOnAcceptedReply = Boolean(
         captainPhone && (captainFromTam || _captainFromTamEarly || _isTargetAReply)
       );
       const voiceReplyStatus = quotedMsgId ? whatsapp.getVoiceReplyStatusByReplyId(quotedMsgId) : null;
       const voiceOrderContext = quotedMsgId ? whatsapp.getOrderContextByReplyId(quotedMsgId) : null;
       if (voiceOrderContext?.isVoiceOrder && (!voiceReplyStatus || voiceReplyStatus.replyCount !== 1 || voiceReplyStatus.invalidated)) {
-        logger.warn('⚠️ تجاهل تفاعل على تسجيل صوتي غير مؤهل', {
-          msgId: quotedMsgId?.substring(0, 8),
-          voiceMessageId: voiceOrderContext.voiceMessageId?.substring(0, 8),
-          replyCount: voiceReplyStatus?.replyCount || 0,
-        });
         return;
       }
 
-      // التسجيل الصوتي صالح فقط مع إيموجي كمية واحد نشط على رد «تم» الوحيد.
-      // نسجّل الحالة قبل أي أثر مالي ليبقى القرار سليماً بعد إعادة التشغيل.
       if (voiceOrderContext?.isVoiceOrder && isReactionOnAcceptedReply) {
         if (result.type === 'accept' || result.type === 'unknown_emoji') {
           const authorization = authorizeQuantityReaction({
@@ -1840,15 +1726,7 @@ async function start() {
             orderOwnerPhone: realProducerPhone,
             isSupervisor: await sheets.isSupervisor(producerPhone),
           });
-          if (!authorization.allowed) {
-            logger.warn('⚠️ تجاهل إيموجي غير مصرح به على رد تسجيل صوتي', {
-              reason: authorization.reason,
-              reactor: producerPhone || 'unknown',
-              orderOwner: realProducerPhone || 'unknown',
-              msgId: quotedMsgId?.substring(0, 8),
-            });
-            return;
-          }
+          if (!authorization.allowed) return;
           const voiceEmojiStatus = whatsapp.addVoiceEmoji(quotedMsgId, producerPhone, result.reactionText || result.text || '');
           const isSingleQuantityEmoji = result.type === 'accept' && voiceEmojiStatus?.activeEmojiCount === 1;
           if (!isSingleQuantityEmoji) {
@@ -1858,12 +1736,6 @@ async function start() {
                 ? 'وُضع إيموجي غير كمي على رد التسجيل الصوتي'
                 : 'وُجد إيموجيان أو أكثر على رد التسجيل الصوتي'
             );
-            logger.warn('⛔ إلغاء اعتماد تسجيل صوتي: يجب وجود إيموجي كمية واحد فقط', {
-              voiceMessageId: voiceEmojiStatus?.voiceMessageId?.substring(0, 8),
-              replyMessageId: quotedMsgId?.substring(0, 8),
-              activeEmojiCount: voiceEmojiStatus?.activeEmojiCount || 0,
-              type: result.type,
-            });
             return;
           }
         } else if (result.type === 'remove') {
@@ -1879,7 +1751,6 @@ async function start() {
                   : 'لا يزال على رد التسجيل الصوتي أكثر من إيموجي'
               );
             }
-            // لا يمر حذف إيموجي التسجيل الصوتي لمسار الحذف العام.
             return;
           }
         }
@@ -1891,8 +1762,6 @@ async function start() {
           isSupervisor: await sheets.isSupervisor(producerPhone),
         });
         if (!authorization.allowed) {
-          // لا نسمح بأثر مالي عندما لا يمكن إثبات صاحب الطلب، لكن لا نرمي
-          // الرسالة: نحفظها في سجل الحركات وتفاصيل الطلبات والمراجعة اليدوية.
           if (authorization.reason === 'unknown-order-owner') {
             const unresolvedProducer = realProducerPhone || orderOwnerPhone || '';
             const unresolvedCaptain = captainPhone || '';
@@ -1937,55 +1806,23 @@ async function start() {
               reactorName: unresolvedDetail.reactorName,
               reactorPhone: unresolvedDetail.reactorPhone,
             });
-            logger.warn('⏳ تفاعل كمية حُفظ للمراجعة بسبب هوية صاحب طلب غير مكتملة', {
-              reactor: producerPhone || 'unknown',
-              captain: unresolvedCaptain || 'unknown',
-              msgId: quotedMsgId?.substring(0, 8),
-            });
-          } else {
-            logger.warn('⚠️ تجاهل تفاعل كمية غير مصرح به على رسالة تم', {
-              reason: authorization.reason,
-              reactor: producerPhone || 'unknown',
-              orderOwner: realProducerPhone || 'unknown',
-              msgId: quotedMsgId?.substring(0, 8),
-            });
           }
           return;
         }
-        logger.info('✅ تفاعل كمية مصرح به', {
-          authorization: authorization.reason,
-          reactor: producerPhone,
-          orderOwner: realProducerPhone,
-          msgId: quotedMsgId?.substring(0, 8),
-        });
       }
 
-      // إزالة الإيموجي أو استبداله بغير كمي لا يملك أي أثر إلا من صاحب الطلب أو مشرف.
       if ((result.type === 'remove' || result.type === 'unknown_emoji') && isReactionOnAcceptedReply) {
         const authorization = authorizeQuantityReaction({
           reactorPhone: producerPhone,
           orderOwnerPhone: realProducerPhone,
           isSupervisor: await sheets.isSupervisor(producerPhone),
         });
-        if (!authorization.allowed) {
-          logger.warn('⚠️ تجاهل إزالة أو استبدال إيموجي غير مصرح به', {
-            reason: authorization.reason,
-            reactor: producerPhone || 'unknown',
-            msgId: quotedMsgId?.substring(0, 8),
-          });
-          return;
-        }
+        if (!authorization.allowed) return;
       }
 
-      // الإيموجي غير الكمي يلغي الكمية المعتمدة فقط، مع أثر تدقيق كامل بلا حركة جديدة.
       if (result.type === 'unknown_emoji' && isReactionOnAcceptedReply) {
         const existingTx = await sheets.findTransactionByMessageIdIncludingCancelled(quotedMsgId, null);
-        if (!existingTx || existingTx.quantity <= 0) {
-          logger.info('⚪ إيموجي غير كمي بلا كمية نشطة — لا أثر مالي', {
-            msgId: quotedMsgId?.substring(0, 8), emoji: result.text || result.reactionText || '',
-          });
-          return;
-        }
+        if (!existingTx || existingTx.quantity <= 0) return;
         const oldQuantity = existingTx.quantity;
         await sheets.updateTotalsProduction(existingTx.producerPhone, -oldQuantity, groupPrefix, getSafePartyName(existingTx.producerPhone));
         if (existingTx.captainPhone) {
@@ -2012,12 +1849,9 @@ async function start() {
           eventType: 'استبدال إيموجي بغير كمي',
           notes: `استبدال إيموجي كمية بغير كمي | الكمية: ${oldQuantity} → 0`,
         });
-        logger.info('⚪ تم تصفير الكمية بعد استبدال الإيموجي بغير كمي', { msgId: quotedMsgId?.substring(0, 8), oldQuantity });
         return;
       }
 
-      // بعد تحقق الرد المباشر والإيموجي المخوّل، يكون النص هو عامل الثقة فقط.
-      // السلسلة المبهمة لا تُسقط ولا تُسجل مالياً: تُحفظ للمراجعة التفصيلية.
       if (result.type === 'accept' && isReactionOnAcceptedReply) {
         const persistedOrderContext = quotedMsgId ? whatsapp.getOrderContextByReplyId(quotedMsgId) : null;
         const targetMessageForEvidence = quotedMsgId ? whatsapp.getCachedMessage(quotedMsgId) : null;
@@ -2058,30 +1892,16 @@ async function start() {
             reactorPhone: ambiguousDetail.reactorPhone,
           });
           if (directOrderMessageId) whatsapp.markDirectOrderEmojiApplied(directOrderMessageId, quotedMsgId);
-          logger.info('🔎 تفاعل كمية مؤكد حُفظ للمراجعة بسبب نص طلب مبهم', {
-            replyId: quotedMsgId?.substring(0, 8), quantity,
-          });
           return;
         }
       }
 
       if (result.type === 'accept') {
-        // === فحص هل هذا تعديل (إيموجي جديد على نفس الرسالة المسجلة سابقاً) ===
         const existingTransaction = await sheets.findTransactionByMessageId(quotedMsgId, realProducerPhone || producerPhone);
         
         if (existingTransaction) {
           if (existingTransaction.quantity !== quantity) {
-          // هذا تعديل - تغيير الإيموجي
           const producerName = whatsapp.getPushName(msg);
-          logger.info('✏️ محاولة تعديل', {
-            producer: producerPhone,
-            oldQty: existingTransaction.quantity,
-            newQty: quantity,
-            msgId: quotedMsgId?.substring(0, 8)
-          });
-
-          // قد يصل إشعار الإيموجي الجديد قبل أو بعد إشعار إزالة السابق؛ نربطهما
-          // لفترة قصيرة حتى يبقى الأثر «تغيير كمية» واحداً لا إلغاءين.
           const replacementKey = `${producerPhone}_${quotedMsgId}`;
           pendingEmojiReplace.set(replacementKey, {
             emoji: result.reactionText || result.text || '',
@@ -2101,31 +1921,19 @@ async function start() {
           });
 
           if (editResult.success) {
-            logger.info(`✏️ تعديل ناجح: ${editResult.message}`);
             if (directOrderMessageId) whatsapp.markDirectOrderEmojiApplied(directOrderMessageId, quotedMsgId);
           } else {
             pendingEmojiReplace.delete(replacementKey);
-            logger.warn(`⚠️ فشل التعديل: ${editResult.message} - سيتم تسجيل كعملية جديدة`);
-            // إذا فشل التعديل (انتهت المهلة)، لا نسجل عملية جديدة لنفس الرسالة
           }
           return;
           }
 
-          // نفس العملية والكمية مسجلتان بالفعل. لا نعيد تحديث الأرصدة أو نسجل صفاً ثانياً.
-          logger.info('⏭️ تفاعل مسترجع مكرر — العملية موجودة بالكمية نفسها', {
-            msgId: quotedMsgId?.substring(0, 8),
-            quantity,
-          });
           if (directOrderMessageId) whatsapp.markDirectOrderEmojiApplied(directOrderMessageId, quotedMsgId);
           return;
         }
 
-        // === انتاج + استلام (عملية جديدة) ===
-        // صاحب الطلب = realProducerPhone
-        // واضع الإيموجي = producerPhone
         let finalProducerPhone = realProducerPhone || producerPhone;
         
-        // حل LID إلى رقم حقيقي قبل التسجيل
         if (finalProducerPhone && finalProducerPhone.includes('@lid')) {
           finalProducerPhone = await resolveLidPhone(finalProducerPhone);
         }
@@ -2134,42 +1942,24 @@ async function start() {
           resolvedCaptainForSheet = await resolveLidPhone(resolvedCaptainForSheet);
         }
 
-        // نسجل الرقم غير المسجل في قائمة مراجعة مستقلة، ولا نسمح لغياب اسمه أن يوقف الطرف الآخر.
         const producerParty = await queueUnknownParty(finalProducerPhone, 'المنتج');
         const captainParty = await queueUnknownParty(resolvedCaptainForSheet, 'الكابتن');
-        
-        logger.info('🎯 تسجيل انتاج+استلام', {
-          producer: finalProducerPhone,
-          emojiBy: producerPhone,
-          captain: resolvedCaptainForSheet || '❓',
-          qty: quantity,
-          group: groupInfo ? groupInfo.name : 'Unknown'
-        });
 
         const identityIncomplete = !producerParty.recordable || !captainParty.recordable;
         if (producerParty.recordable) {
           try {
-          const producerName = getSafePartyName(finalProducerPhone);
-          await sheets.updateTotalsProduction(finalProducerPhone, quantity, groupPrefix, producerName);
-          logger.info(`✅ انتاج: ${finalProducerPhone} +${quantity} [${groupPrefix}]`);
-          } catch (error) {
-            logger.error('❌ فشل انتاج', { error: error.message });
-          }
+            const producerName = getSafePartyName(finalProducerPhone);
+            await sheets.updateTotalsProduction(finalProducerPhone, quantity, groupPrefix, producerName);
+          } catch (error) {}
         }
 
         if (resolvedCaptainForSheet && captainParty.recordable) {
           try {
             const captainName = getSafePartyName(resolvedCaptainForSheet);
             await sheets.updateTotalsReception(resolvedCaptainForSheet, quantity, groupPrefix, captainName);
-            logger.info(`✅ استلام: ${resolvedCaptainForSheet} +${quantity} [${groupPrefix}]`);
-          } catch (error) {
-            logger.error('❌ فشل استلام', { error: error.message });
-          }
-        } else {
-          logger.warn('⚠️ لم يُعثر على الكابتن!', { msgId: quotedMsgId?.substring(0, 8) });
+          } catch (error) {}
         }
 
-        // تسجيل في سجل الحركات
         sheets.recordTransaction({
           transactionId: result.transactionId,
           timestamp: result.timestamp,
@@ -2181,9 +1971,7 @@ async function start() {
           groupPrefix,
           messageId: quotedMsgId || '',
           status: identityIncomplete ? '⏳ هوية غير مكتملة' : 'نشط',
-          notes: identityIncomplete
-            ? 'حُفظت العملية؛ هوية أحد الأطراف غير مكتملة ويستلزم الرقم الحقيقي للمطابقة'
-            : 'reaction'
+          notes: identityIncomplete ? 'حُفظت العملية؛ هوية أحد الأطراف غير مكتملة' : 'reaction'
         }).catch(() => {});
 
         const orderDetail = buildOrderDetail({
@@ -2221,20 +2009,9 @@ async function start() {
         }
 
       } else if (result.type === 'cancel') {
-        // === إلغاء ❌ ===
-        // القواعد:
-        // 1. الجميع يمكنهم وضع ❌ خلال 24 ساعة
-        // 2. المشرف يمكنه وضع ❌ خلال أسبوع كامل (168 ساعة)
-        // 3. لا يُحذف السجل — يُحدّث نفس الصف فقط
-        // 4. لا يُنشأ سجل جديد
+        const cancellerPhone = producerPhone;
 
-        const cancellerPhone = producerPhone; // واضع ❌
-
-        // البحث عن العملية الأصلية
-        if (!quotedMsgId) {
-          logger.warn('⛔ إلغاء بدون معرف رسالة');
-          return;
-        }
+        if (!quotedMsgId) return;
 
         const existingTx = await sheets.findTransactionByMessageId(quotedMsgId, null);
         if (!existingTx) {
@@ -2252,65 +2029,41 @@ async function start() {
             oldEmoji: '',
             newEmoji: result.reactionText || result.text || '❌',
             eventType: 'إلغاء بلا عملية أصلية',
-            notes: `إلغاء بلا عملية أصلية — لا تأثير على الرصيد | group:${groupPrefix} | targetMsg:${quotedMsgId} | reactionEvent:${result.messageId}`,
+            notes: `إلغاء بلا عملية أصلية — لا تأثير على الرصيد`,
           });
-          logger.info('📝 تم توثيق إلغاء بلا عملية أصلية', { msgId: quotedMsgId?.substring(0, 8), reactionId: result.messageId?.substring(0, 8) });
           return;
         }
 
-        // التحقق من الصلاحية والوقت
         const txTime = new Date(existingTx.timestamp);
         const now = new Date();
         const diffHours = (now - txTime) / (1000 * 60 * 60);
         const isSuperCancel = await sheets.isSupervisor(cancellerPhone);
-        const maxCancelHours = isSuperCancel ? 168 : 24; // مشرف = أسبوع، غيره = 24 ساعة
+        const maxCancelHours = isSuperCancel ? 168 : 24;
 
-        if (diffHours > maxCancelHours) {
-          const label = isSuperCancel ? 'أسبوع' : '24 ساعة';
-          logger.info(`⛔ رفض إلغاء: انتهت المهلة (${label})`, { hours: diffHours.toFixed(1) });
-          return;
-        }
+        if (diffHours > maxCancelHours) return;
 
         const cancelQuantity = existingTx.quantity;
         const cancelProducer = existingTx.producerPhone;
         const cancelCaptain = existingTx.captainPhone;
 
-        logger.info('❌ إلغاء عملية', {
-          canceller: cancellerPhone,
-          isSuper: isSuperCancel,
-          producer: cancelProducer,
-          captain: cancelCaptain || '❓',
-          qty: cancelQuantity,
-          group: groupInfo ? groupInfo.name : 'Unknown'
-        });
-
-        // خصم الإنتاج (تصفير)
         try {
           const producerName = sheets.getRegisteredName(cancelProducer) || '';
           await sheets.updateTotalsProduction(cancelProducer, -cancelQuantity, groupPrefix, producerName);
-        } catch (error) {
-          logger.error('فشل خصم انتاج', { error: error.message });
-        }
+        } catch (error) {}
 
-        // خصم الاستلام (تصفير)
         if (cancelCaptain) {
           try {
             const cancelCaptainName = sheets.getRegisteredName(cancelCaptain) || 'كابتن';
             await sheets.updateTotalsReception(cancelCaptain, -cancelQuantity, groupPrefix, cancelCaptainName);
-          } catch (error) {
-            logger.error('فشل خصم استلام', { error: error.message });
-          }
+          } catch (error) {}
         }
 
-        // تحديث نفس الصف في سجل الحركات (لا إنشاء سجل جديد)
-        // نصفّر الكمية في عمود E ونحفظ الكمية الأصلية في الملاحظات
         await sheets.updateTransactionStatus(existingTx.rowIndex, {
           status: 'ملغى',
-          quantity: 0,  // تصفير الكمية في عمود E
-          notes: `إلغاء بواسطة ${cancellerPhone} في ${now.toISOString()} | الكمية الأصلية: ${cancelQuantity} | msgId:${quotedMsgId}`
+          quantity: 0,
+          notes: `إلغاء بواسطة ${cancellerPhone} | الكمية الأصلية: ${cancelQuantity} | msgId:${quotedMsgId}`
         });
 
-        // تسجيل في Audit Log
         await sheets.logEdit({
           editorPhone: cancellerPhone,
           editorName: isSuperCancel ? 'مشرف' : 'كابتن',
@@ -2325,30 +2078,15 @@ async function start() {
           oldEmoji: existingTx.emoji || '',
           newEmoji: result.reactionText || result.text || '❌',
           eventType: 'إلغاء بواسطة ❌',
-          notes: `إلغاء بواسطة ${cancellerPhone} | الإيموجي: ${existingTx.emoji || 'غير متوفر'} → ${result.reactionText || result.text || '❌'} | الكمية: ${cancelQuantity} → 0`,
+          notes: `إلغاء بواسطة ${cancellerPhone} | الكمية: ${cancelQuantity} → 0`,
         });
 
       } else if (result.type === 'remove') {
-        // === إزالة إيموجي ===
-        // حالتان:
-        // أ) إزالة إيموجي كمي (👍/2️⃣/3️⃣) = عكس العملية (حذف)
-        // ب) إزالة ❌ = استرجاع العملية الملغاة (مشرف فقط + 24 ساعة)
+        if (!quotedMsgId) return;
 
-        if (!quotedMsgId) {
-          logger.info('🗑️ حذف إيموجي بدون معرف رسالة — تجاهل');
-          return;
-        }
-
-        // البحث عن العملية (بما فيها الملغاة)
         const existingTx = await sheets.findTransactionByMessageIdIncludingCancelled(quotedMsgId, null);
-        if (!existingTx) {
-          logger.info('🗑️ حذف إيموجي — لا توجد عملية مسجلة', { msgId: quotedMsgId?.substring(0, 8) });
-          return;
-        }
+        if (!existingTx) return;
 
-        // عند تغيير 👍 إلى 2️⃣ قد تصل رسالة إزالة 👍 قبل أو بعد رسالة 2️⃣.
-        // ننتظر نافذة قصيرة للحدث المرافق ثم نتجاهل الإزالة لأن processEdit
-        // سجّل تغيير الكمية فعلاً؛ أما الإزالة المستقلة فتستمر كما كانت.
         const replacementKey = `${producerPhone}_${quotedMsgId}`;
         let pendingReplacement = pendingEmojiReplace.get(replacementKey);
         if (!pendingReplacement) {
@@ -2357,18 +2095,13 @@ async function start() {
         }
         if (pendingReplacement && Date.now() - pendingReplacement.timestamp <= EMOJI_REPLACEMENT_GRACE_MS * 2) {
           pendingEmojiReplace.delete(replacementKey);
-          logger.info('↔️ تجاهل إزالة الإيموجي لأنها جزء من استبدال كمية موثق', {
-            msgId: quotedMsgId?.substring(0, 8), newEmoji: pendingReplacement.emoji,
-          });
           return;
         }
         if (pendingReplacement) pendingEmojiReplace.delete(replacementKey);
 
         const isCancelled = existingTx.transactionId?.startsWith('CANCELLED_') || 
-                             existingTx.notes?.includes('ملغى');
+                           existingTx.notes?.includes('ملغى');
         if (isCancelled) {
-          // === حالة ب: استرجاع عملية ملغاة (إزالة ❌) ===
-          // الجميع 24 ساعة، المشرف أسبوع كامل
           const restorerPhone = producerPhone;
 
           const txTime = new Date(existingTx.timestamp);
@@ -2377,53 +2110,32 @@ async function start() {
           const isSuperRestore = await sheets.isSupervisor(restorerPhone);
           const maxRestoreHours = isSuperRestore ? 168 : 24;
 
-          if (diffHours > maxRestoreHours) {
-            const label = isSuperRestore ? 'أسبوع' : '24 ساعة';
-            logger.info(`⛔ رفض استرجاع: انتهت المهلة (${label})`, { hours: diffHours.toFixed(1) });
-            return;
-          }
+          if (diffHours > maxRestoreHours) return;
 
-          // استخراج الكمية الأصلية من الملاحظات
           const notesMatch = existingTx.notes?.match(/الكمية الأصلية:\s*(\d+)/);
           const originalQuantity = notesMatch ? parseInt(notesMatch[1]) : existingTx.quantity;
 
           const restoreProducer = existingTx.producerPhone;
           const restoreCaptain = existingTx.captainPhone;
 
-          logger.info('🔄 استرجاع عملية ملغاة', {
-            restorer: restorerPhone,
-            isSuper: isSuperRestore,
-            producer: restoreProducer,
-            captain: restoreCaptain || '❓',
-            qty: originalQuantity
-          });
-
-          // إعادة الإنتاج
           try {
             const producerName = sheets.getRegisteredName(restoreProducer) || '';
             await sheets.updateTotalsProduction(restoreProducer, originalQuantity, groupPrefix, producerName);
-          } catch (error) {
-            logger.error('فشل استرجاع انتاج', { error: error.message });
-          }
+          } catch (error) {}
 
-          // إعادة الاستلام
           if (restoreCaptain) {
             try {
               const captainName = sheets.getRegisteredName(restoreCaptain) || 'كابتن';
               await sheets.updateTotalsReception(restoreCaptain, originalQuantity, groupPrefix, captainName);
-            } catch (error) {
-              logger.error('فشل استرجاع استلام', { error: error.message });
-            }
+            } catch (error) {}
           }
 
-          // تحديث نفس الصف (إعادة الحالة إلى نشط)
           await sheets.updateTransactionStatus(existingTx.rowIndex, {
             quantity: originalQuantity,
             status: 'نشط',
-            notes: `استرجاع بواسطة ${restorerPhone} في ${new Date().toISOString()} | msgId:${quotedMsgId}`
+            notes: `استرجاع بواسطة ${restorerPhone} | msgId:${quotedMsgId}`
           });
 
-          // تسجيل في Audit Log
           await sheets.logEdit({
             editorPhone: restorerPhone,
             editorName: isSuperRestore ? 'مشرف' : 'كابتن',
@@ -2442,65 +2154,40 @@ async function start() {
           });
 
         } else {
-          // === حالة أ: حذف إيموجي كمي عادي (عكس العملية) ===
-          // الجميع 24 ساعة، المشرف أسبوع كامل
           const removeQuantity = existingTx.quantity || 0;
           const removeProducer = existingTx.producerPhone || realProducerPhone || producerPhone;
           const removeCaptain = existingTx.captainPhone || captainPhone;
 
-          if (removeQuantity <= 0) {
-            logger.info('🗑️ حذف إيموجي — كمية صفر، تجاهل');
-            return;
-          }
+          if (removeQuantity <= 0) return;
 
-          // التحقق من الوقت
           const removeTxTime = new Date(existingTx.timestamp);
           const removeNow = new Date();
           const removeDiffHours = (removeNow - removeTxTime) / (1000 * 60 * 60);
           const isSuperRemove = await sheets.isSupervisor(producerPhone);
           const maxRemoveHours = isSuperRemove ? 168 : 24;
 
-          if (removeDiffHours > maxRemoveHours) {
-            const label = isSuperRemove ? 'أسبوع' : '24 ساعة';
-            logger.info(`⛔ رفض حذف إيموجي: انتهت المهلة (${label})`, { hours: removeDiffHours.toFixed(1) });
-            return;
-          }
+          if (removeDiffHours > maxRemoveHours) return;
 
-          logger.info('🗑️ تنفيذ حذف إيموجي (عكس عملية)', {
-            producer: removeProducer,
-            captain: removeCaptain || '❓',
-            qty: removeQuantity,
-            group: groupInfo ? groupInfo.name : 'Unknown'
-          });
-
-          // خصم الانتاج
           try {
             const producerName = sheets.getRegisteredName(removeProducer) || '';
             await sheets.updateTotalsProduction(removeProducer, -removeQuantity, groupPrefix, producerName);
-          } catch (error) {
-            logger.error('❌ فشل خصم انتاج', { error: error.message });
-          }
+          } catch (error) {}
 
-          // خصم الاستلام
           if (removeCaptain) {
             try {
               const captainName = sheets.getRegisteredName(removeCaptain) || 'كابتن';
               await sheets.updateTotalsReception(removeCaptain, -removeQuantity, groupPrefix, captainName);
-            } catch (error) {
-              logger.error('❌ فشل خصم استلام', { error: error.message });
-            }
+            } catch (error) {}
           }
 
-          // تحديث حالة العملية في نفس الصف (تصفير الكمية)
           await sheets.updateTransactionStatus(existingTx.rowIndex, {
             status: 'محذوف',
-            quantity: 0,  // تصفير الكمية في عمود E
-            notes: `حذف إيموجي بواسطة ${producerPhone} في ${new Date().toISOString()} | الكمية الأصلية: ${removeQuantity} | msgId:${quotedMsgId}`
+            quantity: 0,
+            notes: `حذف إيموجي بواسطة ${producerPhone} | الكمية الأصلية: ${removeQuantity} | msgId:${quotedMsgId}`
           });
-          // تسجيل في ورقة سجل التعديلات — من حذف + الكمية المحذوفة
+
           try {
             const deleterName = sheets.getRegisteredName(producerPhone) || producerPhone;
-            // البحث عن الإيموجي الجديد إذا كان هذا تغيير إيموجي وليس حذف مباشر
             const _replaceKey = `${producerPhone}_${quotedMsgId}`;
             const _pendingReplace = pendingEmojiReplace.get(_replaceKey);
             const _deleteNotes = _pendingReplace
@@ -2523,34 +2210,21 @@ async function start() {
               eventType: _pendingReplace ? 'استبدال إيموجي كمية — إزالة القيمة السابقة' : 'إزالة إيموجي كمية',
               notes: _deleteNotes,
             });
-            logger.info('📝 تم تسجيل الحذف في سجل التعديلات', {
-              deleter: producerPhone,
-              producer: removeProducer,
-              captain: removeCaptain || '—',
-              qty: removeQuantity,
-            });
-          } catch (logErr) {
-            logger.error('فشل تسجيل حذف الإيموجي في سجل التعديلات', { error: logErr.message });
-          }
+          } catch (logErr) {}
         }
       }
 
       return;
     }
 
-    // ====================================================
-    // حالة 2: أوامر المشرف (كشف تفصيلي)
-    // ====================================================
     const rawText = whatsapp.extractText(msg) || '';
     const trimmedText = rawText.trim();
 
-    // أمر الكشف: "كشف 962797210303" أو "كشف 962797210303 01/08 06/08"
     const reportMatch = trimmedText.match(/^كشف\s+(\d{9,15})(?:\s+(\d{1,2}\/\d{1,2})\s+(\d{1,2}\/\d{1,2}))?$/i);
     if (reportMatch) {
       const senderJid = whatsapp.getSenderJid(msg);
       const senderPhone = parser.cleanPhone(senderJid) || senderJid.split('@')[0].replace(/\D/g, '');
 
-      // فقط المشرف يمكنه طلب الكشف
       const isSuper = await sheets.isSupervisor(senderPhone);
       if (isSuper) {
         const targetPhone = reportMatch[1];
@@ -2559,7 +2233,6 @@ async function start() {
         const groupInfo = targetGroups.find(g => g.id === remoteJid);
         const groupPrefix = groupInfo ? groupInfo.prefix : '';
 
-        // تحديد الفترة (إذا حددها المشرف)
         let fromDate = null;
         let toDate = null;
         if (reportMatch[2] && reportMatch[3]) {
@@ -2570,25 +2243,15 @@ async function start() {
           toDate = new Date(`${year}-${tm.padStart(2,'0')}-${td.padStart(2,'0')}T23:59:59Z`);
         }
 
-        logger.info('📋 طلب كشف تفصيلي', { supervisor: senderPhone, target: targetPhone, group: groupPrefix });
-
         try {
           const reportResult = await sheets.getDetailedReport(targetPhone, groupPrefix, fromDate, toDate);
-          
-          // إرسال الكشف رسالة خاصة للمشرف
           const supervisorJid = senderJid.includes('@') ? senderJid : `${senderPhone}@s.whatsapp.net`;
           await sock.sendMessage(supervisorJid, { text: reportResult.report });
-          logger.info('✅ تم إرسال الكشف التفصيلي خاص', { to: senderPhone });
-        } catch (error) {
-          logger.error('فشل إرسال الكشف', { error: error.message });
-        }
-        return; // بصمت - لا رد في الجروب
+        } catch (error) {}
+        return;
       }
     }
 
-    // ====================================================
-    // حالة 2.5: أمر النقطة — مزامنة LID سرية (للمشرف فقط)
-    // ====================================================
     if (trimmedText === '.') {
       const senderJid = whatsapp.getSenderJid(msg);
       const senderPhone = parser.cleanPhone(senderJid) || (senderJid || '').split('@')[0].replace(/\D/g, '');
@@ -2596,26 +2259,16 @@ async function start() {
       
       if (isSuper) {
         const remoteJid = msg.key.remoteJid;
-        logger.info('🔄 أمر مزامنة LID من المشرف', { phone: senderPhone });
-        
         try {
-          const syncResult = await whatsapp.syncGroupLids(remoteJid);
-          logger.info(`✅ مزامنة كاملة: ${syncResult.newLinks} ربط جديد من إجمالي ${syncResult.total}`);
-        } catch (err) {
-          logger.warn('فشل أمر المزامنة', { error: err.message });
-        }
-        return; // بصمت تام — لا رد في الجروب
+          await whatsapp.syncGroupLids(remoteJid);
+        } catch (err) {}
+        return;
       }
     }
 
-    // ====================================================
-    // حالة 3: رسالة نصية (تم / رد)
-    // ====================================================
     const result = await parser.processMessage(msg, sock);
     if (!result) return;
 
-    // الطلب المؤهل يُعرض محلياً كمراجعة غير مالية إلى أن يكتمل برد كابتن وإيموجي كمية.
-    // لا ينشئ هذا السجل أي صف Google Sheets ولا يغيّر رصيداً.
     if (result.type === 'order') {
       if (result.orderClassification !== 'invalid' && result.orderClassification !== 'blocked') {
         const incompleteReview = messageLog.trackOrderCandidate({
@@ -2636,65 +2289,33 @@ async function start() {
     }
 
     if (result.type === 'accept') {
-      // لا يدخل رد على تحذير/إعلان/رسالة عامة إلى tamCache أو سجل «تم»،
-      // وبالتالي لا يمكن أن ينشئ لاحقاً تفاعل الكمية رصيداً خاطئاً.
-      if (result.orderClassification === 'invalid') {
-        logger.info('⚠️ تجاهل رد على منشور عام غير مؤهل كطلب', {
-          reason: result.orderClassificationReason,
-          replyId: (result.messageId || '').substring(0, 8),
-          orderId: (result.quotedMessageId || '').substring(0, 8),
-        });
-        return;
-      }
-      // الصيغة غير الواضحة لا تُسقط: نحفظ رد الكابتن فقط، ثم عند وصول إيموجي كمية
-      // يُنشأ صف مراجعة مفصل. لا يمكن إنشاء المراجعة الآن لأنها بلا إيموجي كمية.
-      if (result.orderClassification === 'review') {
-        logger.info('🔎 حُفظ رد كابتن على نص مبهم بانتظار إيموجي كمية للمراجعة التفصيلية', {
-          reason: result.orderClassificationReason,
-          replyId: (result.messageId || '').substring(0, 8),
-        });
-      }
+      if (result.orderClassification === 'invalid') return;
       let captainPhone = result.phone;
       const tamMessageId = result.messageId;
-      // التسجيل الصوتي يحافظ على شرط رد واحد فقط، لكن لا نقيد نص الرد
-      // بكلمة بعينها: أي رد نصي مقتبس وغير كمي هو تأكيد مبدئي.
       const isVoiceAcceptance = Boolean(
         result.isVoiceReply && result.voiceMessageId && String(result.text || '').trim().length > 0 && !parser.isQuantityEmoji(result.text)
       );
-      // إذا كان captainPhone هو LID غير محلول، نحاول حله الآن
       if (captainPhone && captainPhone.includes('@lid')) {
-        // محاولة 1: من lidToPhoneMap
         const resolvedCaptain = whatsapp.resolveLid(captainPhone);
         if (resolvedCaptain && !resolvedCaptain.includes('@lid')) {
-          logger.info(`✅ حل LID الكابتن عند تم (lidMap): ${captainPhone.substring(0,15)} → ${resolvedCaptain}`);
           captainPhone = resolvedCaptain;
         } else {
-          // محاولة 2: من pushName الرسالة الحالية (الكابتن يكتب "تم" الآن)
           const captainPushName = msg.pushName;
           if (captainPushName && captainPushName !== 'غير معروف') {
             const resolvedByName = whatsapp.resolvePhoneByPushName(captainPushName);
             if (resolvedByName && !resolvedByName.includes('@lid')) {
-              logger.info(`✅ حل LID الكابتن عند تم (pushName): ${captainPushName} → ${resolvedByName}`);
               whatsapp.addLidMapping(captainPhone, resolvedByName);
               captainPhone = resolvedByName;
             } else {
-              // محاولة 3: resolveLidDirect عبر USyncQuery
               const directResolvedTam = await whatsapp.resolveLidDirect(captainPhone);
               if (directResolvedTam && !directResolvedTam.includes('@lid')) {
-                logger.info(`✅ حل LID الكابتن عند تم (USyncQuery): ${captainPhone.substring(0,15)} → ${directResolvedTam}`);
                 captainPhone = directResolvedTam;
-              } else {
-                logger.warn(`⚠️ كابتن LID غير محلول — سيُحفظ بالـ LID مؤقتاً`, { lid: captainPhone.substring(0,15), pushName: captainPushName });
               }
             }
           } else {
-            // محاولة 3 (بدون pushName): resolveLidDirect عبر USyncQuery
             const directResolvedTam = await whatsapp.resolveLidDirect(captainPhone);
             if (directResolvedTam && !directResolvedTam.includes('@lid')) {
-              logger.info(`✅ حل LID الكابتن عند تم (USyncQuery/noPushName): ${captainPhone.substring(0,15)} → ${directResolvedTam}`);
               captainPhone = directResolvedTam;
-            } else {
-              logger.warn(`⚠️ كابتن LID بدون pushName`, { lid: captainPhone.substring(0,15) });
             }
           }
         }
@@ -2707,46 +2328,30 @@ async function start() {
           ? whatsapp.registerVoiceReply(result.voiceMessageId, tamMessageId, captainPhone)
           : null;
         if (voiceReplyStatus?.invalidated) {
-          logger.warn('⚠️ تسجيل صوتي غير مؤهل: تعدد ردود «تم»', {
-            voiceMessageId: result.voiceMessageId.substring(0, 8),
-            replyCount: voiceReplyStatus.replyCount,
-            replyMessageIds: voiceReplyStatus.replyMessageIds.map(id => id.substring(0, 8)),
-          });
           await invalidateVoiceReplyTransactions(voiceReplyStatus);
         }
         
-        // حفظ رقم صاحب الطلب مربوطاً بـ id رسالة الرد
-        // حتى يعرف النظام من هو صاحب الطلب عند وضع إيموجي على رسالة الكابتن
         if (result.orderOwnerPhone) {
-          // حل LID صاحب الطلب قبل الحفظ في orderCache
           let resolvedOwner = result.orderOwnerPhone;
           if (resolvedOwner && resolvedOwner.includes('@lid')) {
             const fromMap = whatsapp.resolveLid(resolvedOwner);
             if (fromMap && !fromMap.includes('@lid')) {
               resolvedOwner = fromMap.split('@')[0].replace(/\D/g, '');
-              logger.info(`✅ حل LID صاحب الطلب عند حفظ تم (lidMap): ${result.orderOwnerPhone.substring(0,15)} → ${resolvedOwner}`);
             } else {
-              // محاولة من ورقة المسجلين
               const fromSheet = sheets.resolvePhoneFromRegistered(resolvedOwner);
               if (fromSheet && !fromSheet.includes('@lid')) {
                 resolvedOwner = fromSheet.split('@')[0].replace(/\D/g, '');
-                logger.info(`✅ حل LID صاحب الطلب عند حفظ تم (Registered): ${result.orderOwnerPhone.substring(0,15)} → ${resolvedOwner}`);
               } else {
-                // محاولة USyncQuery
                 try {
                   const directResolved = await whatsapp.resolveLidDirect(resolvedOwner);
                   if (directResolved && !directResolved.includes('@lid')) {
                     resolvedOwner = directResolved.split('@')[0].replace(/\D/g, '');
-                    logger.info(`✅ حل LID صاحب الطلب عند حفظ تم (USyncQuery): ${result.orderOwnerPhone.substring(0,15)} → ${resolvedOwner}`);
                   } else {
-                    // استخدام الجزء الرقمي كمعرف مؤقت
                     resolvedOwner = resolvedOwner.split(':')[0].replace(/\D/g, '');
-                    logger.warn(`⚠️ LID صاحب الطلب لم يُحل — سيُحفظ كمعرف مؤقت: ${resolvedOwner}`);
                     whatsapp.queueLidForResolve(result.orderOwnerPhone);
                   }
                 } catch (e) {
                   resolvedOwner = resolvedOwner.split(':')[0].replace(/\D/g, '');
-                  logger.warn(`⚠️ فشل حل LID صاحب الطلب: ${e.message}`);
                 }
               }
             }
@@ -2779,8 +2384,6 @@ async function start() {
             });
           }
 
-          // قد يضع صاحب الطلب أو المشرف آخر إيموجي كمية قبل وصول رد الكابتن.
-          // بعد أن ثبتنا الرد وصاحبه، نطبّق هذه الكمية مرة واحدة على مفتاح الرد نفسه.
           if (!isVoiceAcceptance && result.quotedMessageId) {
             const pendingDirectEmoji = whatsapp.getDirectOrderEmoji(result.quotedMessageId);
             const pendingGroup = (config.whatsapp.targetGroups || []).find(group => group.id === result.groupId);
@@ -2796,48 +2399,19 @@ async function start() {
                   msg,
                   timestamp: result.timestamp,
                 });
-              } catch (error) {
-                logger.error('❌ فشل تطبيق كمية مباشرة مؤجلة بعد رد الكابتن', {
-                  orderId: result.quotedMessageId.substring(0, 8), error: error.message,
-                });
-              }
+              } catch (error) {}
             }
           }
         }
         
-        logger.info('💾 حفظ "تم"', { 
-          captain: captainPhone, 
-          producer: result.orderOwnerPhone || '?',
-          msgId: (tamMessageId || '').substring(0, 8) 
-        });
-
-        // ====================================================
-        // رد كمي بأي إيموجي كمية موجب، أقل أو أكبر من 8، على رسالة "تم"
-        // ====================================================
-        // المنطق:
-        // - من أرسل إيموجي الكمية = result.phone = صاحب الطلب (المنتج)
-        // - صاحب رسالة "تم" = الكابتن (محفوظ في tamCache)
-        //
-        // إذا لم يتحدَّد الكابتن وصاحب الطلب بشكل موثوق:
-        //   → لا تُسجَّل بأدوار خاطئة
-        //   → تُحفظ في سجل الحركات بحالة "⏳ معلّق" للمراجعة اليدوية
-        // ====================================================
         if (result.quantity > 0) {
           const targetGroups = config.whatsapp.targetGroups || [];
           const groupInfo = targetGroups.find(g => g.id === result.groupId);
           const groupPrefix = groupInfo ? groupInfo.prefix : '';
           const quotedMsgIdKmi = result.quotedMessageId;
           const voiceReplyStatus = quotedMsgIdKmi ? whatsapp.getVoiceReplyStatusByReplyId(quotedMsgIdKmi) : null;
-          if (voiceReplyStatus) {
-            logger.warn('⚠️ تجاهل رد كمي على رسالة تم تخص تسجيلاً صوتياً؛ الاعتماد للتفاعل فقط وبعد رد تم وحيد', {
-              msgId: quotedMsgIdKmi?.substring(0, 8),
-              voiceMessageId: voiceReplyStatus.voiceMessageId?.substring(0, 8),
-              replyCount: voiceReplyStatus.replyCount,
-            });
-            return;
-          }
+          if (voiceReplyStatus) return;
 
-          // الخطوة 1: تحديد الكابتن من tamCache (المصدر الموثوق)
           let realCaptain = null;
           let realProducer = null;
           let rolesConfirmed = false;
@@ -2847,34 +2421,19 @@ async function start() {
             const producerFromCache = whatsapp.getOrderByReplyId(quotedMsgIdKmi);
             if (captainFromCache) {
               realCaptain = captainFromCache;
-              // صاحب الطلب: من orderCache أو من أرسل إيموجي الكمية
               realProducer = producerFromCache || result.phone;
               rolesConfirmed = true;
-              logger.info('✅ أدوار الرد الكمي من tamCache', {
-                captain: realCaptain,
-                producer: realProducer,
-                qty: result.quantity
-              });
             }
           }
 
-          // الخطوة 2: إذا لم يُعثر في tamCache — نحاول من result مباشرة
           if (!rolesConfirmed) {
-            // result.orderOwnerPhone = صاحب رسالة "تم" = الكابتن
-            // result.phone = من أرسل إيموجي الكمية = صاحب الطلب
             if (result.orderOwnerPhone && result.phone && result.orderOwnerPhone !== result.phone) {
               realCaptain = result.orderOwnerPhone;
               realProducer = result.phone;
               rolesConfirmed = true;
-              logger.info('✅ أدوار الرد الكمي من result مباشرة', {
-                captain: realCaptain,
-                producer: realProducer,
-                qty: result.quantity
-              });
             }
           }
 
-          // حل LID وتنظيف الأرقام
           if (realCaptain && typeof realCaptain === 'string' && realCaptain.includes('@lid')) {
             const resolved = whatsapp.resolveLid(realCaptain);
             if (resolved && !resolved.includes('@lid')) realCaptain = resolved.split('@')[0].replace(/\D/g, '');
@@ -2888,9 +2447,7 @@ async function start() {
           if (realCaptain && typeof realCaptain === 'string' && realCaptain.includes('@')) realCaptain = realCaptain.split('@')[0].replace(/\D/g, '');
           if (realProducer && typeof realProducer === 'string' && realProducer.includes('@')) realProducer = realProducer.split('@')[0].replace(/\D/g, '');
 
-          // الخطوة 3: التسجيل أو الحفظ معلّقاً
           if (rolesConfirmed && realCaptain && realProducer && realCaptain !== realProducer) {
-            // ✅ الأدوار صحيحة — سجّل مباشرة
             try {
               const captainRegName = sheets.getRegisteredName(realCaptain) || 'كابتن';
               const producerRegName = sheets.getRegisteredName(realProducer) || 'منتج';
@@ -2909,12 +2466,8 @@ async function start() {
                 status: 'نشط',
                 notes: 'reply-quantity'
               }).catch(() => {});
-              logger.info(`✅ رد كمي مُسجَّل: منتج=${realProducer} +${result.quantity} | كابتن=${realCaptain} [${groupPrefix}]`);
-            } catch (error) {
-              logger.error('فشل تسجيل رد كمي', { error: error.message });
-            }
+            } catch (error) {}
           } else {
-            // ⏳ الأدوار غير مؤكدة — احفظ معلّقاً لا تضيّع العملية
             const pendingInfo = {
               rawPhone: result.phone || '',
               rawOrderOwner: result.orderOwnerPhone || '',
@@ -2922,11 +2475,6 @@ async function start() {
               captainFromMsg: captainPhone || '',
               reason: !rolesConfirmed ? 'لم يُعثر على tamCache' : (realCaptain === realProducer ? 'الكابتن = المنتج' : 'بيانات ناقصة')
             };
-            logger.warn('⏳ رد كمي معلّق — حُفظ للمراجعة', {
-              qty: result.quantity,
-              group: groupPrefix,
-              ...pendingInfo
-            });
             sheets.recordTransaction({
               transactionId: result.transactionId,
               timestamp: result.timestamp,
@@ -2938,29 +2486,24 @@ async function start() {
               groupPrefix: groupPrefix,
               messageId: tamMessageId || '',
               status: '⏳ معلّق',
-              notes: `يحتاج مراجعة | ${pendingInfo.reason} | quotedMsg=${pendingInfo.quotedMsgId.substring(0,8)}`
+              notes: `يحتاج مراجعة | ${pendingInfo.reason}`
             }).catch(() => {});
           }
         }
       }
     }
-    // أي شيء آخر (order) → نتجاهله — لا نسجل الطلبات
   });
 
-  // 3. ربط QR
   whatsapp.onQRUpdate(setCurrentQR, clearCurrentQR);
 
-  // 4. الاتصال بواتساب (بدون await لمنع تعليق السيرفر)
   whatsapp.connect().then(() => {
     logger.info('جاري الاتصال بواتساب...');
   }).catch((error) => {
     logger.error('❌ فشل الاتصال الأولي', { error: error.message });
   });
 
-  // 4b. قناة تنفيذ أحادية الاستخدام: تقرأ طلباً محلياً من الـVolume ثم تحذفه بعد الإرسال.
-  // لا يوجد مسار HTTP عام ولا يمكنها إعادة الإرسال بعد إنشاء إيصال .sent.
   oneTimeBroadcast = createOneTimeBroadcastProcessor({
-    volumePath: config.volumePath,
+    volumePath: config.volumePath || path.join(__dirname, 'volume'),
     targetGroupId: config.whatsapp.targetGroups.find(group => group.prefix === 'السيف').id,
     getSocket: whatsapp.getSocket,
     isConnected: whatsapp.isConnected,
@@ -2977,61 +2520,45 @@ async function start() {
     }
   }, 2000);
 
-  // 5. تحديث الإعدادات دورياً
   setInterval(async () => {
     try {
       await sheets.loadSettings();
-    } catch (error) {
-      logger.debug('فشل تحديث الإعدادات');
-    }
+    } catch (error) {}
   }, config.general.settingsRefreshInterval);
 
-  // 6b. تحديث ورقة الرئيسية كل 30 دقيقة
   setInterval(async () => {
-    sheets.createDashboardSheet().catch(e => logger.debug('فشل تحديث الرئيسية', { error: e.message }));
+    sheets.createDashboardSheet().catch(e => {});
   }, 30 * 60 * 1000);
 
-  // 6c. مطابقة الأوراق اليومية كل ساعة (تصحيح أي فروق بسبب إعادة التشغيل أو التعديلات)
   setInterval(async () => {
     try {
-      const result = await sheets.reconcileDailySheets();
-      if (result.success) {
-        logger.info('🔄 مطابقة يومية تلقائية', { results: result.results });
-      }
-    } catch (e) {
-      logger.debug('فشل المطابقة اليومية', { error: e.message });
-    }
-  }, 60 * 60 * 1000); // كل ساعة
-  // 6d. قراءة قرارات المراجعة اليدوية كل دقيقة — لا تغيّر الأرصدة
+      await sheets.reconcileDailySheets();
+    } catch (e) {}
+  }, 60 * 60 * 1000);
+
   let reviewSyncInProgress = false;
   setInterval(async () => {
     if (reviewSyncInProgress) return;
     reviewSyncInProgress = true;
     try {
-      const result = await sheets.syncOperationReviewResponses();
-      if (result.updated) logger.info('🔎 تمت مزامنة إجابات المراجعات', { updated: result.updated });
+      await sheets.syncOperationReviewResponses();
     } catch (e) {
-      logger.debug('فشل مزامنة إجابات المراجعات', { error: e.message });
     } finally {
       reviewSyncInProgress = false;
     }
   }, 60 * 1000);
-  // 6. التحقق من الإغلاق الأسبوعي (الجمعة 11:00 مساءً) عند تفعيله صراحةً فقط.
+
   if (config.sheets.weeklyReport?.enabled === true) {
     setInterval(async () => {
       const now = new Date();
-      // توقيت الأردن GMT+3
       const jordanTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
 
-      // الجمعة = 5
-      // نتحقق من الدقيقة الصفر لضمان التشغيل مرة واحدة فقط في تلك الساعة
       if (jordanTime.getUTCDay() === 5 &&
           jordanTime.getUTCHours() === 23 &&
           jordanTime.getUTCMinutes() === 0) {
-        logger.info('🕒 موعد الإغلاق الأسبوعي - توليد التقرير...');
         await sheets.generateWeeklyReport();
       }
-    }, 60000); // كل دقيقة
+    }, 60000);
   } else {
     logger.info('📊 تقرير نهاية الأسبوع موقوف مؤقتاً بطلب الإدارة');
   }
@@ -3039,7 +2566,6 @@ async function start() {
   logger.info('✅ النظام جاهز. في انتظار الرسائل...');
 }
 
-// === معالجة الأخطاء ===
 process.on('uncaughtException', (error) => {
   logger.error('خطأ غير متوقع', { error: error.message });
 });
