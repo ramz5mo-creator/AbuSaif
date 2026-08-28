@@ -1,215 +1,149 @@
-/**
- * server.js - نقطة تشغيل النظام v5 (Self-Healing + Recovery)
- * ================================
- */
-
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { google } = require('googleapis');
+const express = require('express');
 const http = require('http');
+const { Server } = require('socket.io');
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
-const QRCode = require('qrcode');
-const config = require('./config');
 
-// تصحيح المسارات تلقائياً لتجنب مشكلة EACCES على Render
-try {
-  if (config.whatsapp) {
-    if (!config.whatsapp.authPath || config.whatsapp.authPath.startsWith('/app/')) {
-      config.whatsapp.authPath = path.join(__dirname, 'auth');
-    }
-  }
-  if (config.volumePath && config.volumePath.startsWith('/app/')) {
-    config.volumePath = path.join(__dirname, 'volume');
-  }
-  if (config.logging && config.logging.logsPath && config.logging.logsPath.startsWith('/app/')) {
-    config.logging.logsPath = path.join(__dirname, 'logs');
-  }
-} catch (e) {}
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
 
-const logger = require('./logger');
-const whatsapp = require('./whatsapp');
-const parser = require('./parser');
-const sheets = require('./sheets');
-const { createOneTimeBroadcastProcessor } = require('./one-time-broadcast');
-const { authorizeQuantityReaction } = require('./reaction-authorization');
-const { validateQuantityReactionTarget } = require('./reaction-target-validation');
-const { classifyOriginalOrder } = require('./order-classification');
-const messageLog = require('./message-log');
-const telegramMonitor = require('./telegram-monitor');
+// إعدادات الشيت والمعرفات
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '15gDbpqB0e8WxG8S9QqCeUPg8WLZPPYuKSF1mHplp0';
 
-// تنظيف السجلات عند بدء التشغيل
-(function cleanOldLogs() {
-  try {
-    const fallbackAuth = path.join(__dirname, 'auth');
-    const logsDir = path.join(process.env.VOLUME_PATH || fallbackAuth, 'logs');
-    if (!fs.existsSync(logsDir)) return;
-    const files = fs.readdirSync(logsDir);
-    for (const file of files) {
-      const filePath = path.join(logsDir, file);
-      try {
-        const stat = fs.statSync(filePath);
-        if (stat.size / (1024 * 1024) > 10) {
-          fs.writeFileSync(filePath, '');
-        }
-      } catch (e) {}
-    }
-  } catch (e) {}
-})();
-
-let currentQR = null;
-
-const httpServer = http.createServer(async (req, res) => {
-  if (req.url === '/' || req.url === '/qr') {
-    if (!currentQR) {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(`<html><body style="background:#111;color:#0f0;font-size:20px;text-align:center;padding:40px;font-family:monospace;">
-        <div style="border:2px solid #0f0;padding:20px;border-radius:10px;display:inline-block;">
-          <h1>✅ البوت متصل بواتساب</h1>
-          <p>نظام التسجيل: <span style="color:#ff0;">مُفعّل (بدون قيود على الكميات)</span></p>
-        </div>
-      </body></html>`);
-      return;
-    }
+// تهيئة اتصال Google Sheets باستخدام حساب الخدمة من متغير البيئة
+function getGoogleSheetsClient() {
     try {
-      const qrImage = await QRCode.toDataURL(currentQR, { width: 400 });
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(`<html><body style="background:#000;text-align:center;padding:30px;">
-        <h1 style="color:#fff;">📱 امسح رمز QR بواتساب</h1>
-        <img src="${qrImage}" style="width:400px;height:400px;border:10px solid #fff;border-radius:10px;" />
-      </body></html>`);
-    } catch (e) {
-      res.writeHead(500);
-      res.end('Error');
-    }
-  } else {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('AbuSaif Bot v5');
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-httpServer.listen(PORT, () => {
-  logger.info(`🌐 خادم يعمل على البورت ${PORT}`);
-});
-
-function setCurrentQR(qr) { currentQR = qr; }
-function clearCurrentQR() { currentQR = null; }
-
-async function resolveLidPhone(phone) {
-  if (!phone) return phone;
-  if (!phone.includes('@lid')) return phone;
-  const fromMap = whatsapp.resolveLid(phone);
-  if (fromMap && !fromMap.includes('@lid')) {
-    const clean = fromMap.split('@')[0].replace(/\D/g, '');
-    if (clean.length >= 9) return clean;
-  }
-  try {
-    const directResolved = await whatsapp.resolveLidDirect(phone);
-    if (directResolved && !directResolved.includes('@lid')) {
-      const clean = directResolved.split('@')[0].replace(/\D/g, '');
-      if (clean.length >= 9) return clean;
-    }
-  } catch (e) {}
-  whatsapp.queueLidForResolve(phone);
-  return phone;
-}
-
-function getSafePartyName(phone) {
-  const raw = String(phone || '');
-  if (!raw || raw.includes('@lid') || raw.replace(/\D/g, '').length < 9) return 'مجهول';
-  return sheets.getRegisteredName(phone) || 'مجهول';
-}
-
-async function queueUnknownParty(phone) {
-  const raw = String(phone || '');
-  if (!raw || raw.includes('@lid') || raw.replace(/\D/g, '').length < 9) return { recordable: false };
-  const registeredName = sheets.getRegisteredName(phone);
-  if (!registeredName) {
-    await sheets.logUnregisteredNumber(raw.replace(/\D/g, '').slice(-9), 'مجهول');
-  }
-  return { recordable: true };
-}
-
-async function start() {
-  logger.info('   🚀 نظام AbuSaif v5 — Self-Healing + Recovery');
-
-  const volumePath = path.resolve(config.volumePath || path.join(__dirname, 'volume'));
-  const authSessionPath = path.resolve(config.whatsapp.authPath || path.join(__dirname, 'auth'));
-  const logsPath = path.resolve(config.logging.logsPath || path.join(__dirname, 'logs'));
-
-  if (!fs.existsSync(volumePath)) fs.mkdirSync(volumePath, { recursive: true });
-  if (!fs.existsSync(authSessionPath)) fs.mkdirSync(authSessionPath, { recursive: true });
-  if (!fs.existsSync(logsPath)) fs.mkdirSync(logsPath, { recursive: true });
-
-  try {
-    await sheets.initialize();
-    await sheets.loadSettings();
-    await sheets.ensureOrderDetailsSheet();
-    await sheets.ensureOperationReviewsSheet();
-  } catch (error) {}
-
-  whatsapp.setMessageHandler(async (msg, sock) => {
-    if (whatsapp.isReaction(msg)) {
-      const result = await parser.processMessage(msg, sock);
-      if (!result) return;
-
-      const producerPhone = result.phone;
-      const quantity = result.quantity; // تسجيل الكمية بالكامل بدون سقف (حتى 10 أو أكثر)
-      let quotedMsgId = result.quotedMessageId || result.targetMessageId;
-      const remoteJid = msg.key.remoteJid;
-
-      const targetGroups = config.whatsapp.targetGroups || [];
-      const groupInfo = targetGroups.find(g => g.id === remoteJid);
-      const groupPrefix = groupInfo ? groupInfo.prefix : '';
-
-      const captainFromTam = quotedMsgId ? whatsapp.getCaptainByMessageId(quotedMsgId) : null;
-      const producerFromOrder = quotedMsgId ? whatsapp.getOrderByReplyId(quotedMsgId) : null;
-
-      let captainPhone = captainFromTam || producerPhone;
-      let realProducerPhone = producerFromOrder || result.orderOwnerPhone;
-
-      if (result.type === 'accept') {
-        let finalProducerPhone = realProducerPhone || producerPhone;
-        if (finalProducerPhone && finalProducerPhone.includes('@lid')) {
-          finalProducerPhone = await resolveLidPhone(finalProducerPhone);
+        const credentialsJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+        if (!credentialsJson) {
+            console.log("⚠️ تحذير: Google Sheets غير متاحة (لم يُعثر على GOOGLE_SERVICE_ACCOUNT_JSON)");
+            return null;
         }
-        let resolvedCaptainForSheet = captainPhone;
-        if (resolvedCaptainForSheet && resolvedCaptainForSheet.includes('@lid')) {
-          resolvedCaptainForSheet = await resolveLidPhone(resolvedCaptainForSheet);
-        }
-
-        const producerParty = await queueUnknownParty(finalProducerPhone);
-        const captainParty = await queueUnknownParty(resolvedCaptainForSheet);
-        const identityIncomplete = !producerParty.recordable || !captainParty.recordable;
-
-        if (producerParty.recordable) {
-          await sheets.updateTotalsProduction(finalProducerPhone, quantity, groupPrefix, getSafePartyName(finalProducerPhone));
-        }
-        if (resolvedCaptainForSheet && captainParty.recordable) {
-          await sheets.updateTotalsReception(resolvedCaptainForSheet, quantity, groupPrefix, getSafePartyName(resolvedCaptainForSheet));
-        }
-
-        await sheets.recordTransaction({
-          transactionId: result.transactionId,
-          timestamp: result.timestamp,
-          producerPhone: finalProducerPhone,
-          captainPhone: resolvedCaptainForSheet || '',
-          quantity, // الكمية كاملة بدون أي قيود
-          type: 'انتاج',
-          emoji: result.text,
-          groupPrefix,
-          messageId: quotedMsgId || '',
-          status: identityIncomplete ? '⏳ هوية غير مكتملة' : 'نشط',
-          notes: 'reaction'
+        const credentials = JSON.parse(credentialsJson);
+        const auth = new google.auth.GoogleAuth({
+            credentials,
+            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
         });
-      }
-      return;
+        return google.sheets({ version: 'v4', auth });
+    } catch (error) {
+        console.error("❌ خطأ في تهيئة حساب الخدمة لجوجل شيت:", error.message);
+        return null;
     }
-  });
-
-  whatsapp.onQRUpdate(setCurrentQR, clearCurrentQR);
-  await whatsapp.connect();
 }
 
-start().catch((error) => {
-  process.exit(1);
+// دالة جلب اسم المندوب يدوياً من ورقة Members في الشيت
+async function getDriverNameFromMembers(identifier) {
+    try {
+        const sheets = getGoogleSheetsClient();
+        if (!sheets) return identifier; // إذا لم يتصل الشيت، يعيد المعرف نفسه
+
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: SPREADSHEET_ID,
+            range: 'Members!A:B', // العمود الأول: رقم/LID، العمود الثاني: الاسم
+        });
+
+        const rows = response.data.values;
+        if (!rows || rows.length === 0) return identifier;
+
+        for (const row of rows) {
+            if (row[0] && row[0].toString().trim() === identifier.toString().trim()) {
+                return row[1] || identifier; // إرجاع الاسم المسجل يدوياً
+            }
+        }
+        return identifier; // إذا لم يوجد، يعيد المعرف الأصلي مؤقتاً
+    } catch (error) {
+        console.log("⚠️ ملاحظة أثناء البحث عن الاسم في Members:", error.message);
+        return identifier;
+    }
+}
+
+let sock;
+let qrCodeData = '';
+let connectionStatus = 'disconnected';
+
+async function connectToWhatsApp() {
+    const authFolder = path.join(__dirname, 'auth');
+    const { state, saveCreds } = await useMultiFileAuthState(authFolder);
+
+    sock = makeWASocket({
+        auth: state,
+        printQRInTerminal: true,
+    });
+
+    sock.usereCreds = saveCreds;
+
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        if (qr) {
+            qrCodeData = qr;
+            connectionStatus = 'qr';
+            console.log('📌 QR Code جديد جاهز للمسح.');
+        }
+        if (connection === 'open') {
+            connectionStatus = 'connected';
+            console.log('✅ Your service is live 🚀 - البوت متصل بواتساب بنجاح!');
+        } else if (connection === 'close') {
+            connectionStatus = 'disconnected';
+            console.log('🔄 انقطع الاتصال، جاري إعادة المحاولة...');
+            setTimeout(connectToWhatsApp, 5000);
+        }
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+
+    // مراقبة التفاعلات (Emojis) وتخطي قيود الـ LID عبر جلب الاسم من الشيت
+    sock.ev.on('messages.reaction', async (reactions) => {
+        try {
+            for (const reaction of reactions) {
+                if (!reaction.text) continue; // إذا تم إزالة التفاعل
+                
+                const senderIdentifier = reaction.author || reaction.sender || 'مندوب مجهول';
+                const cleanIdentifier = senderIdentifier.split('@')[0];
+                
+                // جلب الاسم الحقيقي يدوياً من ورقة Members
+                const driverName = await getDriverNameFromMembers(cleanIdentifier);
+                
+                console.log(`📥 تفاعل جديد من: ${driverName} (${cleanIdentifier}) | الإيموجي: ${reaction.text}`);
+                
+                // هنا يتم تسجيل التفاعل في جدول تفاصيل الطلبات مباشرة دون توقف
+                const sheets = getGoogleSheetsClient();
+                if (sheets) {
+                    await sheets.spreadsheets.values.append({
+                        spreadsheetId: SPREADSHEET_ID,
+                        range: 'تفاصيل الطلبات!A:D',
+                        valueInputOption: 'USER_ENTERED',
+                        requestBody: {
+                            values: [[new Date().toISOString(), driverName, reaction.text, 'تم التسجيل بنجاح']]
+                        }
+                    });
+                }
+            }
+        } catch (err) {
+            console.error('❌ خطأ أثناء معالجة التفاعل:', err.message);
+        }
+    });
+}
+
+// مسار فحص حالة البوت وعرض الـ QR
+app.get('/', (req, res) => {
+    if (connectionStatus === 'connected') {
+        res.send(`<html><body style="background:#111;color:#fff;text-align:center;padding-top:50px;">
+            <h1 style="color:#0f0;">✅ البوت متصل بواتساب</h1>
+            <p>نظام التسجيل: مُفعّل (بدون قيود على الكميات وباعتماد الأسماء اليدوية)</p>
+        </body></html>`);
+    } else {
+        res.send(`<html><body style="background:#111;color:#fff;text-align:center;padding-top:50px;">
+            <h1>⏳ جاري الاتصال أو بانتظار مسح QR...</h1>
+            <p>حالة الاتصال الحالي: ${connectionStatus}</p>
+        </body></html>`);
+    }
+});
+
+// بدء تشغيل الخير
+const PORT = process.env.PORT || 10000;
+server.listen(PORT, () => {
+    console.log(`خادم يعمل على البورت ${PORT}`);
+    connectToWhatsApp();
 });
