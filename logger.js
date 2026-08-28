@@ -8,10 +8,14 @@ const fs = require('fs');
 const path = require('path');
 const config = require('./config');
 
-// التأكد من وجود مجلد السجلات
-const logsDir = path.resolve(config.logging.logsPath);
-if (!fs.existsSync(logsDir)) {
-  fs.mkdirSync(logsDir, { recursive: true });
+// التأكد من وجود مجلد السجلات محلياً داخل مسار المشروع لضمان الصلاحيات وعدم حدوث خطأ EACCES
+const logsDir = path.join(__dirname, 'logs');
+try {
+  if (!fs.existsSync(logsDir)) {
+    fs.mkdirSync(logsDir, { recursive: true });
+  }
+} catch (err) {
+  // في حال فشل إنشاء الملف محلياً، نتجاهله لكي لا يتوقف البوت
 }
 
 /**
@@ -33,9 +37,6 @@ function getTimestamp() {
   return new Date().toISOString();
 }
 
-/**
- * كتابة السجل في ملف
- */
 /**
  * Log Rotation — حد أقصى 50MB لكل ملف، أرشفة تلقائية
  */
@@ -70,7 +71,11 @@ function writeToFile(level, message, data) {
   const filePath = path.join(logsDir, fileName);
 
   rotateIfNeeded(filePath);
-  fs.appendFileSync(filePath, JSON.stringify(logEntry) + '\n', 'utf8');
+  try {
+    fs.appendFileSync(filePath, JSON.stringify(logEntry) + '\n', 'utf8');
+  } catch (e) {
+    // نتجاهل خطأ الكتابة في حال تقييد الصلاحيات لضمان استمرار عمل البوت
+  }
 }
 
 /**
