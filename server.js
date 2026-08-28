@@ -43,40 +43,19 @@ const telegramMonitor = require('./telegram-monitor');
     const logsDir = path.join(process.env.VOLUME_PATH || fallbackAuth, 'logs');
     if (!fs.existsSync(logsDir)) return;
     const files = fs.readdirSync(logsDir);
-    let freed = 0;
     for (const file of files) {
       const filePath = path.join(logsDir, file);
       try {
         const stat = fs.statSync(filePath);
         if (stat.size / (1024 * 1024) > 10) {
           fs.writeFileSync(filePath, '');
-          freed += stat.size;
         }
       } catch (e) {}
     }
   } catch (e) {}
 })();
 
-const processedMessageIds = new Set();
-const PROCESSED_MSG_MAX = 10000;
-const pendingEmojiReplace = new Map();
-const EMOJI_REPLACEMENT_GRACE_MS = 1200;
-
-function isAlreadyProcessed(msgId) {
-  return processedMessageIds.has(msgId);
-}
-
-function markAsProcessed(msgId) {
-  if (!msgId) return;
-  processedMessageIds.add(msgId);
-  if (processedMessageIds.size > PROCESSED_MSG_MAX) {
-    const oldest = Array.from(processedMessageIds).slice(0, 1000);
-    oldest.forEach(id => processedMessageIds.delete(id));
-  }
-}
-
 let currentQR = null;
-let oneTimeBroadcast = null;
 
 const httpServer = http.createServer(async (req, res) => {
   if (req.url === '/' || req.url === '/qr') {
@@ -85,7 +64,6 @@ const httpServer = http.createServer(async (req, res) => {
       res.end(`<html><body style="background:#111;color:#0f0;font-size:20px;text-align:center;padding:40px;font-family:monospace;">
         <div style="border:2px solid #0f0;padding:20px;border-radius:10px;display:inline-block;">
           <h1>✅ البوت متصل بواتساب</h1>
-          <p>tamCache: ${whatsapp.getCacheStats().tamCache} رسالة</p>
           <p>نظام التسجيل: <span style="color:#ff0;">مُفعّل (بدون قيود على الكميات)</span></p>
         </div>
       </body></html>`);
@@ -102,9 +80,6 @@ const httpServer = http.createServer(async (req, res) => {
       res.writeHead(500);
       res.end('Error');
     }
-  } else if (req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', ...whatsapp.getCacheStats() }));
   } else {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('AbuSaif Bot v5');
@@ -154,24 +129,6 @@ async function queueUnknownParty(phone) {
   return { recordable: true };
 }
 
-function buildOrderDetail({ result, msg, quotedMsgId, groupPrefix, producerPhone, captainPhone, reactorPhone, identityIncomplete = false }) {
-  return {
-    transactionId: result.transactionId,
-    timestamp: result.timestamp,
-    groupPrefix,
-    producerName: getSafePartyName(producerPhone),
-    producerPhone,
-    captainName: getSafePartyName(captainPhone),
-    captainPhone,
-    reactorName: sheets.getRegisteredName(reactorPhone) || whatsapp.getPushName(msg) || '',
-    reactorPhone,
-    quantity: result.quantity,
-    orderText: result.quotedText || 'غير متوفر',
-    emoji: result.text || '',
-    status: identityIncomplete ? 'يحتاج مراجعة' : 'نشط',
-  };
-}
-
 async function start() {
   logger.info('   🚀 نظام AbuSaif v5 — Self-Healing + Recovery');
 
@@ -196,7 +153,7 @@ async function start() {
       if (!result) return;
 
       const producerPhone = result.phone;
-      const quantity = result.quantity; // بدون قيود: يسجل الكمية مهما بلغت (حتى 10 أو أكثر)
+      const quantity = result.quantity; // تسجيل الكمية بالكامل بدون سقف (حتى 10 أو أكثر)
       let quotedMsgId = result.quotedMessageId || result.targetMessageId;
       const remoteJid = msg.key.remoteJid;
 
@@ -236,7 +193,7 @@ async function start() {
           timestamp: result.timestamp,
           producerPhone: finalProducerPhone,
           captainPhone: resolvedCaptainForSheet || '',
-          quantity, // تسجيل الكمية بالكامل بدون سقف
+          quantity, // الكمية كاملة بدون أي قيود
           type: 'انتاج',
           emoji: result.text,
           groupPrefix,
@@ -244,15 +201,6 @@ async function start() {
           status: identityIncomplete ? '⏳ هوية غير مكتملة' : 'نشط',
           notes: 'reaction'
         });
-
-        const orderDetail = buildOrderDetail({
-          result, msg, quotedMsgId, groupPrefix,
-          producerPhone: finalProducerPhone,
-          captainPhone: resolvedCaptainForSheet || '',
-          reactorPhone: producerPhone,
-          identityIncomplete,
-        });
-        await sheets.upsertOrderDetails(orderDetail);
       }
       return;
     }
